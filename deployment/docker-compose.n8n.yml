@@ -1,0 +1,604 @@
+# SPOTTER — n8n overlay service
+#
+# Usage (from repo root, alongside Flowsint's prod compose):
+#   scripts/spotter_compose.sh up -d
+#
+# That wrapper is the only supported entry point: it supplies -p spotter, the env
+# file, the LLM/embed profiles and absolute -f paths, with vendor/flowsint's compose
+# file FIRST, and deliberately omits --project-directory.
+#
+# The n8n container joins the Flowsint Docker network so it can reach
+# flowsint-api directly at http://flowsint-api:5001 with no extra config.
+# The network is declared `external` and owned by Flowsint's prod stack
+# (name: ${FLOWSINT_NETWORK}). Bring up the Flowsint stack (or include its
+# compose file in the same launch) first so the network already exists.
+
+services:
+  n8n:
+    image: n8nio/n8n:2.26.6
+    container_name: spotter-n8n
+    restart: unless-stopped
+    # NO host port. The editor is reached through the authenticating nginx gate
+    # at http://localhost:8081 (frontend/nginx.conf), and the webhooks through
+    # http://localhost:8080/webhook/. Publishing 5678 again would reopen a path
+    # that bypasses the auth gate entirely -- and with it the X-Spotter-User
+    # header that WF16/17/18 trust for campaign ownership, making the per-user
+    # campaign model advisory rather than enforced.
+    # nginx and the task runners reach n8n over the Docker network regardless,
+    # and scripts/deploy_workflow.sh uses `docker exec`, so nothing needs it.
+    volumes:
+      # UNSET => the named volume n8n_data, which is what every host installed
+      # before the folder layout uses. SET => a bind mount inside the checkout,
+      # so a copy of SPOTTER_HOME carries the workflows and credentials too.
+      # Compose merges service volumes by TARGET path, so this one entry covers
+      # both layouts; deployment/setup-secrets.sh decides which, once, per host.
+      - ${SPOTTER_N8N_DATA:-n8n_data}:/home/node/.n8n
+      # Drop SharpHound ZIPs here; workflow 02 watches this path inside the container.
+      - ${SHARPHOUND_DROP_DIR:-${SPOTTER_HOME}/sharphound-drops}:/data/sharphound-drops
+      # Python scripts are mounted read-only so Code nodes can exec them.
+      # NOTE: keep this pointed at SPOTTER/scripts, and keep it ABSOLUTE. The
+      # default is derived from SPOTTER_HOME so it is invocation-independent; it
+      # used to be a bare "../scripts", which only resolved correctly for a
+      # single-file `-f deployment/...` invocation and under the multi-file stack
+      # invocation landed one dir too high, on a stale copy. If you override
+      # SPOTTER_SCRIPTS_DIR, give it an absolute path or that trap comes back.
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+    environment:
+      # --- n8n auth ---
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD}
+      N8N_USER_MANAGEMENT_DISABLED: "true"
+      # Credential-encryption key pinned in .env (was only inside the volume's config).
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      # --- Flowsint ---
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
+      FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
+      # --- Cobalt Strike ---
+      CS_API_URL: ${CS_API_URL}
+      CS_API_TOKEN: ${CS_API_TOKEN}
+      # --- Adaptix C2 (workflow 28) ---
+      # ADAPTIX_API_URL must include the endpoint prefix from the teamserver's
+      # profile.json (commonly /endpoint); Adaptix has no static API token, so the
+      # poll logs in with an operator account on every run.
+      ADAPTIX_API_URL: ${ADAPTIX_API_URL:-}
+      ADAPTIX_USERNAME: ${ADAPTIX_USERNAME:-}
+      ADAPTIX_PASSWORD: ${ADAPTIX_PASSWORD:-}
+      # --- Thresholds ---
+      HIGH_VALUE_SCORE_THRESHOLD: ${HIGH_VALUE_SCORE_THRESHOLD:-15}
+      # --- Attack path search bounds (workflow 04) and credential scan cap
+      #     (workflow 11). Also runtime-tunable from the Configuration panel,
+      #     which stores overrides in (:SpotterMeta {key:'settings'}) and wins
+      #     over these; an unset override falls back here. ---
+      MAX_ATTACK_HOPS: ${MAX_ATTACK_HOPS:-4}
+      MAX_ATTACK_PATHS_PER_IND: ${MAX_ATTACK_PATHS_PER_IND:-1500}
+      MAX_ATTACK_DOSSIER_WRITES: ${MAX_ATTACK_DOSSIER_WRITES:-400}
+      SPOTTER_CRED_SCAN_MAX_BYTES: ${SPOTTER_CRED_SCAN_MAX_BYTES:-10485760}
+      # --- Brute Ratel receiver (workflow 21) ---
+      # Optional shared secret. BRc4's webhook dialog has no header controls, so
+      # the token can only ride the query string (?t=<secret>). Empty disables
+      # the check, which is the norm when the endpoint is tunnel-only.
+      BRC4_WEBHOOK_TOKEN: ${BRC4_WEBHOOK_TOKEN:-}
+      # --- Graph DB (for direct Cypher in workflow 04) ---
+      NEO4J_HTTP_URL: ${NEO4J_HTTP_URL:-http://flowsint-neo4j-prod:7474}
+      NEO4J_USER: ${NEO4J_USERNAME:-${NEO4J_USER:-neo4j}}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # --- n8n base URL (used in alert deep-links) ---
+      N8N_WEBHOOK_BASE_URL: ${N8N_WEBHOOK_BASE:-http://localhost:5678}
+      WEBHOOK_URL: ${N8N_WEBHOOK_BASE:-http://localhost:5678}
+      # --- Flare.io ---
+      FLARE_API_KEY: ${FLARE_API_KEY}
+      FLARE_TENANT_ID: ${FLARE_TENANT_ID:-}
+      # --- FOFA.io + Shodan (Domain Recon / workflow 13) ---
+      FOFA_API_KEY: ${FOFA_API_KEY:-}
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # --- Cloud storage exposure (Domain Recon / workflow 13) ---
+      # GrayhatWarfare is the passive path; the rest bound the active list-check probe.
+      # BUCKET_PROBE_MAX_CANDIDATES=0 leaves GrayhatWarfare on and disables probing.
+      GRAYHATWARFARE_API_KEY: ${GRAYHATWARFARE_API_KEY:-}
+      BUCKET_PROBE_MAX_CANDIDATES: ${BUCKET_PROBE_MAX_CANDIDATES:-150}
+      BUCKET_PROBE_CONCURRENCY: ${BUCKET_PROBE_CONCURRENCY:-8}
+      BUCKET_PROBE_TIMEOUT: ${BUCKET_PROBE_TIMEOUT:-6}
+      BUCKET_PROBE_MAX_SECONDS: ${BUCKET_PROBE_MAX_SECONDS:-90}
+      BUCKET_ALERT_MIN_SCORE: ${BUCKET_ALERT_MIN_SCORE:-40}
+      BUCKET_PROBE_S3_CANARY: ${BUCKET_PROBE_S3_CANARY:-noaa-goes16}
+      BUCKET_PROBE_PROXY: ${BUCKET_PROBE_PROXY:-}
+      THC_IP_BASE_URL: ${THC_IP_BASE_URL:-https://ip.thc.org}
+      THC_SUBDOMAIN_LIMIT: ${THC_SUBDOMAIN_LIMIT:-300}
+      THC_RDNS_MAX_IPS: ${THC_RDNS_MAX_IPS:-8}
+      THC_TIMEOUT: ${THC_TIMEOUT:-15}
+      # --- Social enrichment ownership/orchestration ---
+      # Default 'direct' works out of the box (WF03 calls the sidecars itself).
+      # 'plugin' requires real SOCIAL_*_FLOW_ID values or WF03 is a silent no-op.
+      SOCIAL_ENRICHMENT_OWNER: ${SOCIAL_ENRICHMENT_OWNER:-direct}
+      SOCIAL_MAIGRET_FLOW_ID: ${SOCIAL_MAIGRET_FLOW_ID:-}
+      SOCIAL_LINKEDIN_FLOW_ID: ${SOCIAL_LINKEDIN_FLOW_ID:-}
+      # --- hh.ru organization intelligence (WF13 `org` source) ---
+      # Scrapes the public pages by default; switches to the documented REST API
+      # when an application credential is present. The API's employer/vacancy
+      # endpoints are NOT anonymous -- they answer 403 without an app token
+      # minted from a client_id/secret registered at https://dev.hh.ru/admin.
+      # HH_USER_AGENT is mandatory for the API path and must be
+      # "AppName (contact@email)"; hh.ru answers HTTP 400 for any other shape.
+      # The caps are also runtime-tunable from the Configuration panel.
+      HH_MODE: ${HH_MODE:-auto}
+      HH_APP_TOKEN: ${HH_APP_TOKEN:-}
+      HH_CLIENT_ID: ${HH_CLIENT_ID:-}
+      HH_CLIENT_SECRET: ${HH_CLIENT_SECRET:-}
+      HH_USER_AGENT: ${HH_USER_AGENT:-}
+      HH_TIMEOUT: ${HH_TIMEOUT:-20}
+      HH_MAX_EMPLOYERS: ${HH_MAX_EMPLOYERS:-25}
+      HH_MAX_VACANCIES: ${HH_MAX_VACANCIES:-100}
+      HH_MAX_VACANCY_DETAILS: ${HH_MAX_VACANCY_DETAILS:-15}
+      # --- LinkedIn via search engines + company-website RAG (WF13 `org`) ---
+      # SERP: never contacts linkedin.com (its anonymous company page is a login
+      # wall and its robots.txt is Disallow: /). It reads Google's index of those
+      # pages through SerpAPI. Free engines are unreliable from a datacenter IP
+      # -- Bing ignores `site:`, DuckDuckGo answers a bot challenge -- so without
+      # SERP_API_KEY the provider labels itself unreliable rather than returning
+      # a quiet empty result. The query carries the target's company name to a
+      # third party; see the README.
+      SERP_MODE: ${SERP_MODE:-auto}
+      SERP_API_KEY: ${SERP_API_KEY:-}
+      SERP_MAX_SEARCHES: ${SERP_MAX_SEARCHES:-12}
+      SERP_ROLE_KEYWORDS: ${SERP_ROLE_KEYWORDS:-}
+      SERP_TIMEOUT: ${SERP_TIMEOUT:-45}
+      # Tavily: the second search provider, and a PEER of the SERP one rather
+      # than one of its transports -- it emits its own provider row and, when
+      # both keys are present, answers first. Like SERP it never contacts
+      # linkedin.com, but here that is an active choice: include_raw_content is
+      # pinned off and /extract refuses linkedin hosts, so Tavily is not asked
+      # to fetch the page on our behalf either. There is NO keyless transport,
+      # so without a key the provider reports "skipped", not "nothing found".
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_MAX_SEARCHES: ${TAVILY_MAX_SEARCHES:-10}
+      TAVILY_MAX_RESULTS: ${TAVILY_MAX_RESULTS:-15}
+      TAVILY_TIMEOUT: ${TAVILY_TIMEOUT:-45}
+      TAVILY_SEARCH_DEPTH_ADVANCED: ${TAVILY_SEARCH_DEPTH_ADVANCED:-0}
+      # ONE ceiling across search, extract, crawl and map: they bill to a single
+      # account, so two counters would drain the key at twice this rate.
+      TAVILY_MAX_CREDITS: ${TAVILY_MAX_CREDITS:-50}
+      TAVILY_ROLE_KEYWORDS: ${TAVILY_ROLE_KEYWORDS:-}
+      TAVILY_BASE_URL: ${TAVILY_BASE_URL:-}
+      # Website-crawl backend. 0 = the built-in crawler (default). 1 and 2 hand
+      # fetching to Tavily, which means the requests reaching the CLIENT come
+      # from Tavily's addresses, not this deployment's egress.
+      SITE_TAVILY: ${SITE_TAVILY:-0}
+      SITE_TAVILY_BREADTH: ${SITE_TAVILY_BREADTH:-20}
+      SITE_TAVILY_ADVANCED: ${SITE_TAVILY_ADVANCED:-0}
+      # Website crawl. Deliberately ignores robots.txt Disallow rules (the
+      # target's own site, under RoE) but is hard-locked to that domain and its
+      # subdomains, rate-limited and page-capped.
+      SITE_ENABLED: ${SITE_ENABLED:-1}
+      SITE_MAX_PAGES: ${SITE_MAX_PAGES:-60}
+      SITE_MAX_DEPTH: ${SITE_MAX_DEPTH:-3}
+      SITE_DELAY_MS: ${SITE_DELAY_MS:-500}
+      SITE_MAX_BYTES_PER_PAGE: ${SITE_MAX_BYTES_PER_PAGE:-2097152}
+      SITE_MAX_SECONDS: ${SITE_MAX_SECONDS:-180}
+      SITE_TIMEOUT: ${SITE_TIMEOUT:-20}
+      # One bounded request before the crawl commits its budget; 0 skips it.
+      SITE_PREFLIGHT_TIMEOUT: ${SITE_PREFLIGHT_TIMEOUT:-10}
+      SITE_CHUNK_CHARS: ${SITE_CHUNK_CHARS:-1500}
+      SITE_CHUNK_OVERLAP: ${SITE_CHUNK_OVERLAP:-200}
+      # --- SEC EDGAR (WF13 `org`) ---
+      # Free, keyless, and the only source on the Organization card that is a
+      # filing of record rather than inference. Covers SEC filers only, so a
+      # miss is the normal case for a private target. NOT region-gated: whether
+      # a company files with the SEC is a fact about the company, not about
+      # which regions the operator ticked. SEC returns 403 without a
+      # User-Agent and asks for a real contact address in it.
+      EDGAR_ENABLED: ${EDGAR_ENABLED:-1}
+      EDGAR_USER_AGENT: ${EDGAR_USER_AGENT:-}
+      EDGAR_TIMEOUT: ${EDGAR_TIMEOUT:-20}
+      EDGAR_MAX_REQUESTS: ${EDGAR_MAX_REQUESTS:-12}
+      EDGAR_MIN_SCORE: ${EDGAR_MIN_SCORE:-72}
+      # --- Employment evidence gate (WF13 People & Positions) ---
+      # The people providers return CANDIDATES: a quoted company-name search on
+      # LinkedIn also returns former staff, vendors and anyone who mentions the
+      # company. These bound how much evidence a candidate needs before the card
+      # counts them and a WORKS_FOR edge is written.
+      ORG_COMPANY_MATCH_MIN: ${ORG_COMPANY_MATCH_MIN:-72}
+      ORG_PEOPLE_EMPLOYER_MIN: ${ORG_PEOPLE_EMPLOYER_MIN:-72}
+      ORG_PEOPLE_MIN_SCORE: ${ORG_PEOPLE_MIN_SCORE:-25}
+      ORG_PEOPLE_GEO_GATE: ${ORG_PEOPLE_GEO_GATE:-1}
+      ORG_PEOPLE_MAX_WRITES: ${ORG_PEOPLE_MAX_WRITES:-120}
+      ORG_JOBS_MAX: ${ORG_JOBS_MAX:-60}
+      # --- Titus credential scanner ---
+      TITUS_API_URL: ${TITUS_API_URL:-http://titus-api:8051}
+      SPOTTER_CRED_ENRICHER_FLOW_ID: ${SPOTTER_CRED_ENRICHER_FLOW_ID}
+      # --- Analysis LLM (via llm-gateway -> vLLM) ---
+      # These fallbacks read qwen3:8b until 2026-08-14 while .env pinned a 27b model, so a
+      # deploy without .env quietly ran a different model from every documented one. Keep
+      # them equal to .env and to the model vLLM actually serves (VLLM_MODEL below).
+      OLLAMA_URL: ${OLLAMA_URL:-http://llm-gateway:8080}
+      SECURITY_LLM_MODEL: ${SECURITY_LLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      EXTRACTION_LLM_MODEL: ${EXTRACTION_LLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      # vLLM is the only model server since Ollama was removed (2026-09-04).
+      # OLLAMA_URL above is not a rollback path any more -- it points at
+      # llm-gateway, the Ollama-shaped shim that translates to vLLM.
+      VLLM_URL: ${VLLM_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      SPOTTER_LLM_BACKEND: ${SPOTTER_LLM_BACKEND:-vllm}
+      VLLM_EMBEDDING_MODE: ${VLLM_EMBEDDING_MODE:-tfidf}
+      # --- Misc ---
+      GENERIC_TIMEZONE: UTC
+      N8N_LOG_LEVEL: info
+      # Max webhook request body size in MiB. This caps one request, not a file.
+      # Browser uploads over 32 MB are chunked to ingest-staging/ and the webhook
+      # carries only a staged id. Do not raise this to fit a larger file: n8n
+      # stores the body in its execution SQLite, and a multi-hundred-MB JSON
+      # payload will take the stack down. Keep it aligned with nginx's http-level
+      # client_max_body_size (128m). The SharpHound drop folder is a separate
+      # scheduled path (workflow 02); it is not the staging directory.
+      N8N_PAYLOAD_SIZE_MAX: "128"
+      # Max DECODED bytes of a one-shot JSON upload (workflow 06). Not applied to
+      # a staged file. Enforced in the "Detect Format" Code node, which runs in
+      # the task-runners container -- so it must be set on BOTH services below or
+      # the runner falls back to its 32 MiB built-in default and rejects a legal
+      # JSON upload as "oversize" inside an otherwise green run.
+      SPOTTER_UPLOAD_MAX_BYTES: ${SPOTTER_UPLOAD_MAX_BYTES:-94371840}
+      NODE_OPTIONS: "--max-old-space-size=8192"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336 # 14 days
+      # Hard cap on retained executions regardless of age. Backstop against the
+      # high-frequency pollers (WF01 5-min, WF09 ~every 100s) and the large
+      # analysis payloads (WF04/WF05 ~38 MB each) that ballooned the SQLite DB to
+      # 5+ GB. Those four workflows also have saveDataSuccessExecution=none so
+      # only their failures are persisted.
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: 1000
+      N8N_EXECUTION_TIMEOUT: 5400
+      N8N_RUNNERS_TASK_TIMEOUT: 5400
+      # --- Task runners (external mode) ---
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN: ${AUTH_SECRET}
+      N8N_RUNNERS_GRANT_TOKEN_TTL: "600"
+
+    networks:
+      - flowsint_net
+
+  task-runners:
+    image: spotter-n8n-runners:local
+    container_name: spotter-n8n-runners
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    healthcheck:
+      # Port 5682 is the Python task runner's health check server.
+      # If it stops responding (runner crashed, asyncio blocked) the
+      # container is marked unhealthy and autoheal restarts it.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5682/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    labels:
+      - autoheal=true
+    environment:
+      N8N_RUNNERS_AUTH_TOKEN: ${AUTH_SECRET}
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 86400
+      N8N_RUNNERS_TASK_TIMEOUT: 5400
+      # NOT authoritative for code-node imports — keep in sync with, but never
+      # diagnose from, n8n-task-runners.json. These two vars land on the *launcher*
+      # process; the launcher then applies `env-overrides` from
+      # /etc/n8n-task-runners.json when it spawns the Python runner, so the JSON's
+      # value is what actually gates `import`. `docker exec <runner> printenv` shows
+      # this launcher value and will happily disagree with the enforced one — read
+      # /proc/<python-runner-pid>/environ instead. A module missing from the JSON is
+      # blocked no matter what is listed here.
+      N8N_RUNNERS_STDLIB_ALLOW: "*"
+      N8N_RUNNERS_EXTERNAL_ALLOW: "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup"
+      N8N_WEBHOOK_BASE_URL: http://n8n:5678
+      # Must match the n8n service block above — the code nodes that call the Analysis LLM
+      # run HERE, in the runner, so a value set only on n8n has no effect on WF10/WF12.
+      OLLAMA_URL: ${OLLAMA_URL:-http://llm-gateway:8080}
+      SECURITY_LLM_MODEL: ${SECURITY_LLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      EXTRACTION_LLM_MODEL: ${EXTRACTION_LLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      VLLM_URL: ${VLLM_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      SPOTTER_LLM_BACKEND: ${SPOTTER_LLM_BACKEND:-vllm}
+      VLLM_EMBEDDING_MODE: ${VLLM_EMBEDDING_MODE:-tfidf}
+      N8N_BLOCK_RUNNER_ENV_ACCESS: "false"
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
+      FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
+      NEO4J_HTTP_URL: ${NEO4J_HTTP_URL:-http://flowsint-neo4j-prod:7474}
+      NEO4J_USER: ${NEO4J_USERNAME:-${NEO4J_USER:-neo4j}}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      CS_API_URL: ${CS_API_URL}
+      CS_API_TOKEN: ${CS_API_TOKEN}
+      # Workflow 28's Code nodes run HERE, in the runners container -- these must be
+      # set on this service, not only on n8n, or the poll no-ops as "not configured".
+      ADAPTIX_API_URL: ${ADAPTIX_API_URL:-}
+      ADAPTIX_USERNAME: ${ADAPTIX_USERNAME:-}
+      ADAPTIX_PASSWORD: ${ADAPTIX_PASSWORD:-}
+      FLARE_API_KEY: ${FLARE_API_KEY}
+      FLARE_TENANT_ID: ${FLARE_TENANT_ID:-}
+      FOFA_API_KEY: ${FOFA_API_KEY:-}
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # Workflow 13's Code node runs HERE, in the runners container -- these must be
+      # duplicated from the n8n service above or the bucket probe reads its defaults.
+      GRAYHATWARFARE_API_KEY: ${GRAYHATWARFARE_API_KEY:-}
+      BUCKET_PROBE_MAX_CANDIDATES: ${BUCKET_PROBE_MAX_CANDIDATES:-150}
+      BUCKET_PROBE_CONCURRENCY: ${BUCKET_PROBE_CONCURRENCY:-8}
+      BUCKET_PROBE_TIMEOUT: ${BUCKET_PROBE_TIMEOUT:-6}
+      BUCKET_PROBE_MAX_SECONDS: ${BUCKET_PROBE_MAX_SECONDS:-90}
+      BUCKET_ALERT_MIN_SCORE: ${BUCKET_ALERT_MIN_SCORE:-40}
+      BUCKET_PROBE_S3_CANARY: ${BUCKET_PROBE_S3_CANARY:-noaa-goes16}
+      BUCKET_PROBE_PROXY: ${BUCKET_PROBE_PROXY:-}
+      THC_IP_BASE_URL: ${THC_IP_BASE_URL:-https://ip.thc.org}
+      THC_SUBDOMAIN_LIMIT: ${THC_SUBDOMAIN_LIMIT:-300}
+      THC_RDNS_MAX_IPS: ${THC_RDNS_MAX_IPS:-8}
+      THC_TIMEOUT: ${THC_TIMEOUT:-15}
+      # Workflow 04's "Score Attack Paths" and workflow 21's "Normalise Badger
+      # Webhook" also run HERE, so these runtime values must be duplicated from
+      # the n8n service above -- setting them only there cannot reach a code node.
+      HIGH_VALUE_SCORE_THRESHOLD: ${HIGH_VALUE_SCORE_THRESHOLD:-15}
+      BRC4_WEBHOOK_TOKEN: ${BRC4_WEBHOOK_TOKEN:-}
+      # --- Attack path search bounds (workflow 04) and credential scan cap
+      #     (workflow 11). Also runtime-tunable from the Configuration panel,
+      #     which stores overrides in (:SpotterMeta {key:'settings'}) and wins
+      #     over these; an unset override falls back here. ---
+      MAX_ATTACK_HOPS: ${MAX_ATTACK_HOPS:-4}
+      MAX_ATTACK_PATHS_PER_IND: ${MAX_ATTACK_PATHS_PER_IND:-1500}
+      MAX_ATTACK_DOSSIER_WRITES: ${MAX_ATTACK_DOSSIER_WRITES:-400}
+      EXPLOIT_PATH_MAX_BONUS: ${EXPLOIT_PATH_MAX_BONUS:-8}
+      CLOUD_EXPOSURE_MAX_BONUS: ${CLOUD_EXPOSURE_MAX_BONUS:-8}
+      CLOUD_OWNER_MAX_BONUS: ${CLOUD_OWNER_MAX_BONUS:-0}
+      SPOTTER_CRED_SCAN_MAX_BYTES: ${SPOTTER_CRED_SCAN_MAX_BYTES:-10485760}
+      SOCIAL_ENRICHMENT_OWNER: ${SOCIAL_ENRICHMENT_OWNER:-direct}
+      SOCIAL_MAIGRET_FLOW_ID: ${SOCIAL_MAIGRET_FLOW_ID:-}
+      SOCIAL_LINKEDIN_FLOW_ID: ${SOCIAL_LINKEDIN_FLOW_ID:-}
+      TITUS_API_URL: ${TITUS_API_URL:-http://titus-api:8051}
+      SPOTTER_CRED_ENRICHER_FLOW_ID: ${SPOTTER_CRED_ENRICHER_FLOW_ID}
+      # Domain-breach export caps for WF13's Flare.io path. These are also
+      # runtime-tunable from the Configuration panel through spotter_settings.
+      FLARE_DOMAIN_MAX_CREDS: ${FLARE_DOMAIN_MAX_CREDS:-50000}
+      FLARE_DOMAIN_PAGE_SIZE: ${FLARE_DOMAIN_PAGE_SIZE:-1000}
+      FLARE_DOMAIN_LIST_CAP: ${FLARE_DOMAIN_LIST_CAP:-1000}
+      FLARE_DOMAIN_MATCH_CAP: ${FLARE_DOMAIN_MATCH_CAP:-500}
+      FLARE_DOMAIN_PROMOTE: ${FLARE_DOMAIN_PROMOTE:-1}
+      FLARE_MAX_PER_RUN: ${FLARE_MAX_PER_RUN:-250}
+      # --- hh.ru organization intelligence (WF13 `org` source) ---
+      # Scrapes the public pages by default; switches to the documented REST API
+      # when an application credential is present. The API's employer/vacancy
+      # endpoints are NOT anonymous -- they answer 403 without an app token
+      # minted from a client_id/secret registered at https://dev.hh.ru/admin.
+      # HH_USER_AGENT is mandatory for the API path and must be
+      # "AppName (contact@email)"; hh.ru answers HTTP 400 for any other shape.
+      # The caps are also runtime-tunable from the Configuration panel.
+      HH_MODE: ${HH_MODE:-auto}
+      HH_APP_TOKEN: ${HH_APP_TOKEN:-}
+      HH_CLIENT_ID: ${HH_CLIENT_ID:-}
+      HH_CLIENT_SECRET: ${HH_CLIENT_SECRET:-}
+      HH_USER_AGENT: ${HH_USER_AGENT:-}
+      HH_TIMEOUT: ${HH_TIMEOUT:-20}
+      HH_MAX_EMPLOYERS: ${HH_MAX_EMPLOYERS:-25}
+      HH_MAX_VACANCIES: ${HH_MAX_VACANCIES:-100}
+      HH_MAX_VACANCY_DETAILS: ${HH_MAX_VACANCY_DETAILS:-15}
+      # --- LinkedIn via search engines + company-website RAG (WF13 `org`) ---
+      # SERP: never contacts linkedin.com (its anonymous company page is a login
+      # wall and its robots.txt is Disallow: /). It reads Google's index of those
+      # pages through SerpAPI. Free engines are unreliable from a datacenter IP
+      # -- Bing ignores `site:`, DuckDuckGo answers a bot challenge -- so without
+      # SERP_API_KEY the provider labels itself unreliable rather than returning
+      # a quiet empty result. The query carries the target's company name to a
+      # third party; see the README.
+      SERP_MODE: ${SERP_MODE:-auto}
+      SERP_API_KEY: ${SERP_API_KEY:-}
+      SERP_MAX_SEARCHES: ${SERP_MAX_SEARCHES:-12}
+      SERP_ROLE_KEYWORDS: ${SERP_ROLE_KEYWORDS:-}
+      SERP_TIMEOUT: ${SERP_TIMEOUT:-45}
+      # Tavily: the second search provider, and a PEER of the SERP one rather
+      # than one of its transports -- it emits its own provider row and, when
+      # both keys are present, answers first. Like SERP it never contacts
+      # linkedin.com, but here that is an active choice: include_raw_content is
+      # pinned off and /extract refuses linkedin hosts, so Tavily is not asked
+      # to fetch the page on our behalf either. There is NO keyless transport,
+      # so without a key the provider reports "skipped", not "nothing found".
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_MAX_SEARCHES: ${TAVILY_MAX_SEARCHES:-10}
+      TAVILY_MAX_RESULTS: ${TAVILY_MAX_RESULTS:-15}
+      TAVILY_TIMEOUT: ${TAVILY_TIMEOUT:-45}
+      TAVILY_SEARCH_DEPTH_ADVANCED: ${TAVILY_SEARCH_DEPTH_ADVANCED:-0}
+      # ONE ceiling across search, extract, crawl and map: they bill to a single
+      # account, so two counters would drain the key at twice this rate.
+      TAVILY_MAX_CREDITS: ${TAVILY_MAX_CREDITS:-50}
+      TAVILY_ROLE_KEYWORDS: ${TAVILY_ROLE_KEYWORDS:-}
+      TAVILY_BASE_URL: ${TAVILY_BASE_URL:-}
+      # Website-crawl backend. 0 = the built-in crawler (default). 1 and 2 hand
+      # fetching to Tavily, which means the requests reaching the CLIENT come
+      # from Tavily's addresses, not this deployment's egress.
+      SITE_TAVILY: ${SITE_TAVILY:-0}
+      SITE_TAVILY_BREADTH: ${SITE_TAVILY_BREADTH:-20}
+      SITE_TAVILY_ADVANCED: ${SITE_TAVILY_ADVANCED:-0}
+      # Website crawl. Deliberately ignores robots.txt Disallow rules (the
+      # target's own site, under RoE) but is hard-locked to that domain and its
+      # subdomains, rate-limited and page-capped.
+      SITE_ENABLED: ${SITE_ENABLED:-1}
+      SITE_MAX_PAGES: ${SITE_MAX_PAGES:-60}
+      SITE_MAX_DEPTH: ${SITE_MAX_DEPTH:-3}
+      SITE_DELAY_MS: ${SITE_DELAY_MS:-500}
+      SITE_MAX_BYTES_PER_PAGE: ${SITE_MAX_BYTES_PER_PAGE:-2097152}
+      SITE_MAX_SECONDS: ${SITE_MAX_SECONDS:-180}
+      SITE_TIMEOUT: ${SITE_TIMEOUT:-20}
+      # One bounded request before the crawl commits its budget; 0 skips it.
+      SITE_PREFLIGHT_TIMEOUT: ${SITE_PREFLIGHT_TIMEOUT:-10}
+      SITE_CHUNK_CHARS: ${SITE_CHUNK_CHARS:-1500}
+      SITE_CHUNK_OVERLAP: ${SITE_CHUNK_OVERLAP:-200}
+      # --- SEC EDGAR (WF13 `org`) ---
+      # Free, keyless, and the only source on the Organization card that is a
+      # filing of record rather than inference. Covers SEC filers only, so a
+      # miss is the normal case for a private target. NOT region-gated: whether
+      # a company files with the SEC is a fact about the company, not about
+      # which regions the operator ticked. SEC returns 403 without a
+      # User-Agent and asks for a real contact address in it.
+      EDGAR_ENABLED: ${EDGAR_ENABLED:-1}
+      EDGAR_USER_AGENT: ${EDGAR_USER_AGENT:-}
+      EDGAR_TIMEOUT: ${EDGAR_TIMEOUT:-20}
+      EDGAR_MAX_REQUESTS: ${EDGAR_MAX_REQUESTS:-12}
+      EDGAR_MIN_SCORE: ${EDGAR_MIN_SCORE:-72}
+      # --- Employment evidence gate (WF13 People & Positions) ---
+      # The people providers return CANDIDATES: a quoted company-name search on
+      # LinkedIn also returns former staff, vendors and anyone who mentions the
+      # company. These bound how much evidence a candidate needs before the card
+      # counts them and a WORKS_FOR edge is written.
+      ORG_COMPANY_MATCH_MIN: ${ORG_COMPANY_MATCH_MIN:-72}
+      ORG_PEOPLE_EMPLOYER_MIN: ${ORG_PEOPLE_EMPLOYER_MIN:-72}
+      ORG_PEOPLE_MIN_SCORE: ${ORG_PEOPLE_MIN_SCORE:-25}
+      ORG_PEOPLE_GEO_GATE: ${ORG_PEOPLE_GEO_GATE:-1}
+      ORG_PEOPLE_MAX_WRITES: ${ORG_PEOPLE_MAX_WRITES:-120}
+      ORG_JOBS_MAX: ${ORG_JOBS_MAX:-60}
+      # Super-Enrich identity pivot (workflow 27) caps.
+      SUPERENRICH_MAX_USERNAMES: ${SUPERENRICH_MAX_USERNAMES:-5}
+      SUPERENRICH_MAX_SOCID_URLS: ${SUPERENRICH_MAX_SOCID_URLS:-12}
+      SUPERENRICH_MAX_ALT_EMAILS: ${SUPERENRICH_MAX_ALT_EMAILS:-25}
+      SUPERENRICH_MAX_EVENTS: ${SUPERENRICH_MAX_EVENTS:-15}
+      SUPERENRICH_MAIGRET_TOP_SITES: ${SUPERENRICH_MAIGRET_TOP_SITES:-40}
+      SUPERENRICH_MAIGRET_TIMEOUT: ${SUPERENRICH_MAIGRET_TIMEOUT:-8}
+      # Notification ticker (workflow 24) sweep/retention controls.
+      NOTIFY_SWEEP_INTERVAL: ${NOTIFY_SWEEP_INTERVAL:-120}
+      NOTIFY_MAX_PER_SWEEP: ${NOTIFY_MAX_PER_SWEEP:-25}
+      NOTIFY_RETENTION: ${NOTIFY_RETENTION:-500}
+      NOTIFY_ACTIVE_MINUTES: ${NOTIFY_ACTIVE_MINUTES:-30}
+      # Workflow 06's "Detect Format" Code node runs HERE -- see the note on the
+      # n8n service above. This is the copy that actually gates the JSON-body
+      # upload size. The runner parse cap is separate: a staged file under it is
+      # read and parsed; a larger one is left on disk and the ack names the host
+      # command. Both names must also be in n8n-task-runners.json allowed-env.
+      SPOTTER_UPLOAD_MAX_BYTES: ${SPOTTER_UPLOAD_MAX_BYTES:-94371840}
+      SPOTTER_RUNNER_PARSE_MAX_BYTES: ${SPOTTER_RUNNER_PARSE_MAX_BYTES:-1073741824}
+      SPOTTER_INGEST_STAGING_DIR: /data/ingest-staging
+      # Plain-text uploads use LLM extraction when no first-class parser matches.
+      # Default 'ingest' preserves today's behavior; set preview/quarantine to
+      # parse and return review-needed entities without writing them to the graph.
+      SPOTTER_LLM_TEXT_INGEST_MODE: ${SPOTTER_LLM_TEXT_INGEST_MODE:-ingest}
+      # Per-user campaign cap, enforced by WF16/WF18 via spotter_campaign_acl.
+      # Setting it here is NOT enough: it must also appear in the python runner's
+      # `allowed-env` in n8n-task-runners.json or the code node silently sees the
+      # module default (3) instead of this value.
+      SPOTTER_MAX_CAMPAIGNS_PER_USER: ${SPOTTER_MAX_CAMPAIGNS_PER_USER:-3}
+      # --- Technology context: CVE (NVD) + MITRE ATT&CK + PoC-in-GitHub ---
+      # WF14's enricher code node runs HERE, so this is the copy that decides
+      # where cve_cache.db, the ATT&CK STIX bundle, the RAG index and the
+      # PoC-in-GitHub mirror actually live. Without it the clients fall back to
+      # <scripts>/../.spotter-cache, which resolves inside the container's
+      # writable layer (/data/scripts is :ro but /data is not) and is discarded
+      # on every recreate — so every run re-downloads everything and the
+      # enrichment the workflow just computed is lost.
+      SPOTTER_CACHE_DIR: ${SPOTTER_CACHE_DIR:-/data/spotter-cache}
+      SPOTTER_RUNNER_GID: ${SPOTTER_RUNNER_GID:-1000}
+      # Raises the NVD limit from one request per 6s to one per 0.6s. Without a
+      # key, indexing a few hundred technology keywords takes hours, not minutes.
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      # Optional proxy for NVD CVE lookups. If unset, cve_client falls back to
+      # BUCKET_PROBE_PROXY so target-derived product/version strings can share
+      # the same managed egress path as domain recon.
+      NVD_PROXY_URL: ${NVD_PROXY_URL:-}
+      # Unset EMBEDDING_URL = rag_indexer falls back to deterministic pure-Python TF-IDF.
+      EMBEDDING_URL: ${EMBEDDING_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Alibaba-NLP/gte-modernbert-base}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      # PoC-in-GitHub mirror. Synced from the HOST by scripts/sync_poc_mirror.py;
+      # containers only ever read it. Also runtime-tunable from the Configuration
+      # panel, which stores overrides in (:SpotterMeta {key:'settings'}).
+      POC_MIRROR_DIR: ${POC_MIRROR_DIR:-}
+      POC_MIN_STARS: ${POC_MIN_STARS:-0}
+      POC_MAX_PER_CVE: ${POC_MAX_PER_CVE:-10}
+      POC_MIRROR_MAX_AGE_DAYS: ${POC_MIRROR_MAX_AGE_DAYS:-30}
+      CVE_MAX_PER_TECH: ${CVE_MAX_PER_TECH:-10}
+      TECH_ENRICH_MAX_NODES: ${TECH_ENRICH_MAX_NODES:-500}
+      # Nessus / Tenable CSV ingest (WF06) and contextualization (WF25). The four
+      # caps bound one upload; each reports what it dropped rather than truncating
+      # silently. INCLUDE_INFO=0 skips severity-None plugins as findings while
+      # still mining them for OS and CPE facts. MAX_ROWS, INCLUDE_INFO and
+      # NESSUS_CONTEXT_MAX_NODES are also runtime-tunable from the Configuration
+      # panel; nessus_parser re-reads them per parse (see _cap) so a panel
+      # override applies without recreating this container.
+      SPOTTER_NESSUS_MAX_ROWS: ${SPOTTER_NESSUS_MAX_ROWS:-300000}
+      SPOTTER_NESSUS_MAX_HOSTS: ${SPOTTER_NESSUS_MAX_HOSTS:-20000}
+      SPOTTER_NESSUS_MAX_PLUGINS: ${SPOTTER_NESSUS_MAX_PLUGINS:-5000}
+      SPOTTER_NESSUS_MAX_TECH: ${SPOTTER_NESSUS_MAX_TECH:-2000}
+      SPOTTER_NESSUS_MAX_HOST_DETAILS: ${SPOTTER_NESSUS_MAX_HOST_DETAILS:-50}
+      SPOTTER_NESSUS_INCLUDE_INFO: ${SPOTTER_NESSUS_INCLUDE_INFO:-0}
+      NESSUS_CONTEXT_MAX_NODES: ${NESSUS_CONTEXT_MAX_NODES:-1000}
+    volumes:
+      # The SAME variable as the n8n service above, deliberately. These two must
+      # resolve to one store: WF06 reads n8n's binary-data files directly out of
+      # /home/node/.n8n/storage, so a runner pointed at a different tree finds
+      # nothing and the upload fails with an unhelpful parse error.
+      - ${SPOTTER_N8N_DATA:-n8n_data}:/home/node/.n8n:ro
+      - ${SHARPHOUND_DROP_DIR:-${SPOTTER_HOME}/sharphound-drops}:/data/sharphound-drops
+      # See note on the n8n service above — pin via SPOTTER_SCRIPTS_DIR in .env.
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+      # Read-WRITE: WF14 writes cve_cache.db, the ATT&CK bundle and the RAG index
+      # here. A host bind mount rather than a named volume, matching spotter-auth's
+      # auth-data mount, so scripts/sync_poc_mirror.py can refresh the
+      # PoC-in-GitHub tree from the host without docker exec, and so an operator
+      # can see how big the cache has become. Keep in sync with the same mount on
+      # open-webui in docker-compose.llm.yml — they share one cache on purpose.
+      #
+      # Same absolute-path rule as SPOTTER_SCRIPTS_DIR above. The default is now
+      # derived from SPOTTER_HOME; it used to be "../.spotter-cache", which
+      # resolved against the compose working directory — under the multi-file
+      # invocation the Flowsint checkout, i.e. one dir too high. Any override of
+      # SPOTTER_CACHE_HOST_DIR must be absolute.
+      - ${SPOTTER_CACHE_HOST_DIR:-${SPOTTER_HOME}/.spotter-cache}:/data/spotter-cache
+      # Read-WRITE: WF06's "Parse EyeWitness" node copies web screenshots here, in a
+      # per-campaign subdir (/data/screenshots/<sketch_id>/). An ABSOLUTE host path,
+      # not "../screenshots" — this container and spotter-ui (docker-compose.frontend.yml)
+      # must mount the SAME directory: the runner writes it, spotter-ui serves it
+      # auth-gated at /screenshots/. It must be writable by uid 1000 (the runner uid);
+      # create it as `mkdir -p "$SPOTTER_HOME/screenshots" && chown 1000 …` before
+      # first ingest, or the copy fails and only metadata lands. The bootstrap does
+      # this for you.
+      - ${SPOTTER_SCREENSHOTS_DIR:-${SPOTTER_HOME}/screenshots}:/data/screenshots
+      # Read-WRITE: chunked browser uploads land here (written by spotter-ingest,
+      # uid 1000) and WF06 parses them in place, then unlinks the file after a
+      # successful import. Same host path as the spotter-ingest mount in
+      # docker-compose.frontend.yml. Not the SharpHound drop folder — that one
+      # is parsed inside the runner and returns the graph into n8n's SQLite.
+      # Writable by uid 1000. Absolute override only; a relative one resolves
+      # against vendor/flowsint.
+      - ${SPOTTER_INGEST_STAGING_DIR:-${SPOTTER_HOME}/ingest-staging}:/data/ingest-staging
+      # Same absolute-path rule as SPOTTER_SCRIPTS_DIR / SPOTTER_CACHE_HOST_DIR
+      # above, and the consequence here is worse than a missing directory. The
+      # default is now derived from SPOTTER_HOME. It used to be a bare
+      # "./n8n-task-runners.json", which resolves against the PROJECT directory —
+      # under the multi-file invocation the Flowsint checkout, where a stale copy
+      # of this file happens to exist. Compose then mounts that copy,
+      # the launcher applies ITS env-overrides, and the Python runner ends up
+      # enforcing an older import allowlist than the repo's. Nothing errors: a
+      # code node just dies at run time with "ModuleNotFoundError" for a module
+      # the repo has allowlisted, and `docker exec printenv` shows the LAUNCHER's
+      # correct value while the runner process disagrees.
+      - ${SPOTTER_RUNNERS_CONFIG:-${SPOTTER_HOME}/deployment/n8n-task-runners.json}:/etc/n8n-task-runners.json:ro
+    networks:
+      - flowsint_net
+
+  # Watches containers labelled autoheal=true and restarts them when
+  # their Docker HEALTHCHECK fails. Needed because Docker restart policy
+  # only fires on container EXIT, not on healthcheck failure.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: spotter-autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 10        # check every 10 s
+      AUTOHEAL_START_PERIOD: 90    # match the task-runners start_period
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  n8n_data:
+
+networks:
+  flowsint_net:
+    external: true
+    name: ${FLOWSINT_NETWORK:-flowsint_network_prod}

@@ -1,0 +1,110 @@
+{
+  "name": "14 - Tech Context Enricher & Indexer",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0b1c2d3-0014-0014-0014-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "Two triggers, one job. Weekly schedule + POST /webhook/tech-enrich (the Tech Intel tab's Enrich button). Resolves CVEs (NVD, by Shodan-known ID > CPE > product keyword), MITRE ATT&CK techniques, and public exploit availability (local PoC-in-GitHub mirror), then WRITES THEM BACK onto each Technology/Service node under nodeProperties.* -- cve_count, cves, mitre_techniques, poc_count, exploit_available, top_pocs, composite_risk. That write is what makes WF12's vulnerable_tech[] and the frontend's Vulnerable Technology panel populate; before it existed those fields had five readers and no writer. Also refreshes the MITRE STIX bundle and the RAG collections (cve_index, poc_index, mitre_index, tech_guides, asset_inventory). Responds onReceived: a full pass is minutes long at NVD's rate limit, so the webhook acks immediately and the operator re-runs Tech Inventory to see results. REQUIRES scripts/sync_poc_mirror.py to have been run on the host for exploit data."
+  },
+  "id": "vDcm9CPv2Vb4HO9p",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Tech Intel"
+    },
+    {
+      "name": "RAG"
+    },
+    {
+      "name": "CVE"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "a0b1c2d3-0014-0014-0014-000000000001",
+      "name": "Weekly Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                0
+              ],
+              "triggerAtHour": 4,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a0b1c2d3-0014-0014-0014-000000000004",
+      "name": "Tech Enrich Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tech-enrich",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "tech-enrich"
+    },
+    {
+      "id": "a0b1c2d3-0014-0014-0014-000000000002",
+      "name": "Enrich + Index Tech Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\nimport tech_enricher\nfrom poc_client import PoCClient\n\n# \u2500\u2500 request scope \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Two triggers reach this node: the weekly schedule (no body at all) and the\n# Tech Intel tab's \"Enrich\" button (POST /webhook/tech-enrich with a sketch_id).\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nif not isinstance(_sb, dict):\n    _sb = {}\n\n# A schedule trigger carries no sketch_id. Falling back to FLOWSINT_SKETCH_ID\n# pointed the whole pass at the throwaway default sketch that no campaign reads --\n# and enriching an empty sketch succeeds, so it failed silently. resolve_campaign_sketch\n# picks the most recent campaign from the shared registry instead.\nsketch_id = fc.resolve_campaign_sketch(str(_sb.get('sketch_id') or ''))\n\nresult = {'ok': True, 'sketch_id': sketch_id, 'steps': {}}\n\n# \u2500\u2500 bounds \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Configuration panel override > .env > built-in, resolved against ONE registry\n# read. Note resolve_int's second parameter is `_stored`, not a default value --\n# passing a number there makes the panel override silently inert.\nLIMIT, CVES = 500, 10\ntry:\n    import spotter_settings as _st\n    _cfg = _st.resolve_many([\n        'TECH_ENRICH_MAX_NODES', 'CVE_MAX_PER_TECH',\n        'POC_MAX_PER_CVE', 'POC_MIN_STARS', 'POC_MIRROR_MAX_AGE_DAYS',\n    ])\n    LIMIT = _cfg.get('TECH_ENRICH_MAX_NODES') or LIMIT\n    CVES  = _cfg.get('CVE_MAX_PER_TECH') or CVES\n    # poc_client reads its own caps from the environment so it stays usable\n    # standalone from the host. Publishing the resolved values here is what lets\n    # a Configuration-panel override actually reach it inside this run.\n    for _k in ('POC_MAX_PER_CVE', 'POC_MIN_STARS', 'POC_MIRROR_MAX_AGE_DAYS'):\n        if _cfg.get(_k) is not None:\n            os.environ[_k] = str(_cfg[_k])\nexcept Exception as e:\n    result['steps']['settings'] = {'error': str(e), 'using': 'built-in defaults'}\ntry:\n    if _sb.get('limit'):\n        LIMIT = max(1, min(5000, int(_sb['limit'])))\nexcept (TypeError, ValueError):\n    pass\n\n# \u2500\u2500 PoC mirror state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Reported FIRST and unconditionally. A mirror that was never synced, or is\n# months old, answers \"no public exploit\" for every recent CVE -- which is\n# indistinguishable from a real negative unless the age is on the record.\ntry:\n    _poc = PoCClient()\n    result['steps']['poc_mirror'] = _poc.mirror_status()\nexcept Exception as e:\n    result['steps']['poc_mirror'] = {'error': str(e), 'available': False}\n\n# \u2500\u2500 1. enrich Technology/Service nodes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# This is the step that makes the Tech Intel tab's Vulnerable Technology panel\n# populate: it writes cve_count / poc_count / exploit_available / composite_risk\n# back onto each node, under nodeProperties.* where every reader looks.\ncve_ids, techs = [], []\ntry:\n    _enr = tech_enricher.enrich_technology_nodes(\n        sketch_id=sketch_id, limit=LIMIT, cves_per_tech=CVES)\n    cve_ids = _enr.get('cve_ids') or []\n    techs   = _enr.get('technologies') or []\n    result['steps']['enrich'] = {\n        k: v for k, v in _enr.items()\n        if k not in ('poc_mirror', 'cve_ids', 'technologies')\n    }\n    if _enr.get('errors'):\n        result['ok'] = False\nexcept Exception as e:\n    result['ok'] = False\n    result['steps']['enrich'] = {'error': str(e)}\n\n# \u2500\u2500 2. refresh the MITRE ATT&CK bundle \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ntry:\n    from mitre_client import MITREClient\n    MITREClient().refresh()\n    result['steps']['mitre'] = {'refreshed': True}\nexcept Exception as e:\n    result['steps']['mitre'] = {'error': str(e)}\n\n# \u2500\u2500 3. rebuild the RAG collections \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# CVEs are indexed BY ID from the enrichment pass rather than by re-running a\n# keyword search: those are the CVEs that actually matched an asset, and every\n# lookup is a cache hit because step 1 just performed it.\ntry:\n    from rag_indexer import RAGIndexer\n    _ix = RAGIndexer()\n    _counts = {}\n    _counts['mitre']  = _ix.index_mitre()\n    _counts['guides'] = _ix.index_guides({\n        'KeePass memory dump': 'Dump KeePass master password from memory during active session using KeeThief or KeeDump.',\n        'SAP GUI credential store': 'Extract SAPUILandscape.xml and saved connection entries from %APPDATA%\\\\SAP\\\\Common.',\n        'Citrix ICA file theft': 'Steal .ica files from Downloads/temp and extract saved credentials from Credential Manager.',\n        'Mainframe TN3270 session hijack': 'Capture TN3270 traffic on TCP/23 or inject into terminal emulator process.',\n        'AS/400 TN5250 credential theft': 'Steal TN5250 connection profiles and keylog AS/400 signon credentials.',\n        'PAM vault pivot': 'Use extracted PAM user credentials to access the vault or transparent-auth to managed systems.',\n    })\n    _counts['cves'] = _ix.index_cve_ids(cve_ids) if cve_ids else 0\n    _counts['pocs'] = _ix.index_pocs(cve_ids) if cve_ids else 0\n    if techs:\n        _counts['asset_inventory'] = _ix.index_asset_inventory(techs)\n    result['steps']['rag'] = _counts\nexcept Exception as e:\n    result['ok'] = False\n    result['steps']['rag'] = {'error': str(e)}\n\n# \u2500\u2500 summary line \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_e = result['steps'].get('enrich', {})\n_m = result['steps'].get('poc_mirror', {})\nresult['summary'] = (\n    \"%s of %s technology nodes enriched; %s with CVEs, %s with public exploit code\"\n    % (_e.get('nodes_enriched', 0), _e.get('nodes_seen', 0),\n       _e.get('nodes_with_cves', 0), _e.get('nodes_with_exploits', 0))\n)\nif _m.get('stale'):\n    result['summary'] += (\n        \" | WARNING: PoC mirror is stale (age %s d) -- run scripts/sync_poc_mirror.py; \"\n        \"absence of exploit code is not evidence none exists\" % _m.get('age_days')\n    )\n\nreturn [{'json': result}]\n"
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Enrich + Index Tech Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tech Enrich Webhook": {
+      "main": [
+        [
+          {
+            "node": "Enrich + Index Tech Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

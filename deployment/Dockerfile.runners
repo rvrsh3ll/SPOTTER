@@ -1,0 +1,16 @@
+FROM n8nio/runners:2.26.6
+USER root
+# PySocks lets requests use a socks5h:// proxy -- needed only when
+# BUCKET_PROBE_PROXY routes workflow 13's bucket probe through the managed tunnel.
+#
+# Deliberately NOT installing scikit-learn here, though scripts/rag_indexer.py
+# once required it for its fallback embedding function. This base image is Alpine
+# (musl) on Python 3.13, so there is no scipy/scikit-learn wheel and pip falls
+# through to a source build that needs gcc, gfortran and a BLAS -- a large,
+# fragile addition to a runner image for one TF-IDF vectoriser. rag_indexer now
+# ships a pure-Python TF-IDF fallback instead, so WF14's RAG step works here with
+# no extra packages. For real embeddings set VLLM_EMBEDDING_MODE=remote AND
+# EMBEDDING_URL (the vllm-embed service in docker-compose.llm.yml); Ollama is gone.
+RUN /opt/runners/task-runner-python/.venv/bin/python -m ensurepip \
+ && /opt/runners/task-runner-python/.venv/bin/python -m pip install --no-cache-dir requests urllib3 PySocks
+USER runner

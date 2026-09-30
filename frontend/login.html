@@ -1,0 +1,215 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>SPOTTER — Sign in</title>
+<script>
+  /* Pre-paint theme so the login screen doesn't flash the wrong palette.
+     Mirrors the bootstrap in index.html. */
+  try {
+    var t = localStorage.getItem('s.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+</script>
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#111821; --line:#1e2a37; --fg:#d7e2ee; --muted:#7d8fa3;
+    --accent:#4da3ff; --err:#ff6b6b; --shadow:0 18px 50px rgba(0,0,0,.45);
+  }
+  :root[data-theme="light"] {
+    --bg:#eef2f6; --panel:#ffffff; --line:#d3dce5; --fg:#16202b; --muted:#5c6b7c;
+    --accent:#0b6bcb; --err:#c0392b; --shadow:0 18px 50px rgba(16,32,48,.13);
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .card {
+    width:100%; max-width:380px; background:var(--panel);
+    border:1px solid var(--line); border-radius:10px; padding:28px;
+    box-shadow:var(--shadow);
+  }
+  .brand { font-size:22px; font-weight:700; letter-spacing:.32em; margin:0 0 4px; }
+  .brand span { color:var(--accent); }
+  .tag { color:var(--muted); font-size:11px; letter-spacing:.16em; margin:0 0 24px; }
+  label { display:block; font-size:11px; letter-spacing:.12em; color:var(--muted); margin:0 0 6px; }
+  input {
+    width:100%; padding:10px 12px; margin:0 0 16px; background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; color:var(--fg);
+    font:inherit; outline:none;
+  }
+  input:focus { border-color:var(--accent); }
+  button {
+    width:100%; padding:11px; border:0; border-radius:6px; background:var(--accent);
+    color:#fff; font:inherit; font-weight:700; letter-spacing:.12em; cursor:pointer;
+  }
+  button:disabled { opacity:.55; cursor:default; }
+  .msg {
+    margin:16px 0 0; padding:10px 12px; border-radius:6px; font-size:12px;
+    background:rgba(255,107,107,.1); border:1px solid var(--err); color:var(--err);
+    display:none; word-break:break-word;
+  }
+  .msg.on { display:block; }
+  .foot {
+    margin:22px 0 0; padding-top:16px; border-top:1px solid var(--line);
+    color:var(--muted); font-size:11px; line-height:1.7;
+  }
+  .foot code { color:var(--fg); }
+  .foot a { color:var(--accent); }
+  details { margin:0 0 16px; }
+  summary { cursor:pointer; color:var(--muted); font-size:11px; letter-spacing:.08em; }
+  .key label { margin-top:8px; }
+  .hint { color:var(--muted); font-size:11px; line-height:1.6; margin:0 0 16px; }
+</style>
+
+<form class="card" id="form" autocomplete="on">
+  <h1 class="brand">SPOT<span>TER</span></h1>
+  <p class="tag" id="tag">AUTHORIZED ENGAGEMENT — SIGN IN</p>
+  <p class="hint" id="hint" hidden></p>
+
+  <label for="u" id="u-lbl">OPERATOR</label>
+  <input id="u" name="username" autocomplete="username" autocapitalize="none"
+         autocorrect="off" spellcheck="false" required autofocus>
+
+  <label for="p" id="p-lbl">PASSWORD</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+
+  <label for="p2" id="p2-lbl" hidden>CONFIRM PASSWORD</label>
+  <input id="p2" name="password2" type="password" autocomplete="new-password" hidden>
+
+  <details id="keys" hidden>
+    <summary>OPTIONAL VENDOR API KEYS</summary>
+    <p class="hint">Skip any you do not have. Values are encrypted on the host and are not shown again. Machine and engagement secrets stay on the CLI.</p>
+    <div id="key-fields" class="key"></div>
+  </details>
+
+  <button id="go" type="submit">SIGN IN</button>
+  <p class="msg" id="msg" role="alert"></p>
+
+  <p class="foot" id="foot">
+    Need an account? <a href="/register.html">Request access</a>.<br>
+    An administrator approves it before you can sign in.
+  </p>
+</form>
+
+<script>
+  const VENDOR_KEYS = [
+    ['FLARE_API_KEY', 'Flare.io'],
+    ['FLARE_TENANT_ID', 'Flare tenant id'],
+    ['FOFA_API_KEY', 'FOFA'],
+    ['SHODAN_API_KEY', 'Shodan'],
+    ['GRAYHATWARFARE_API_KEY', 'GreyHat Warfare'],
+    ['NVD_API_KEY', 'NVD'],
+    ['TAVILY_API_KEY', 'Tavily'],
+    ['SERP_API_KEY', 'SerpAPI'],
+    ['HH_APP_TOKEN', 'HeadHunter app token'],
+    ['HH_CLIENT_ID', 'HeadHunter client id'],
+    ['HH_CLIENT_SECRET', 'HeadHunter client secret'],
+  ];
+
+  const form = document.getElementById('form');
+  const msgEl = document.getElementById('msg');
+  const btn = document.getElementById('go');
+  let setupMode = false;
+
+  function showKeys() {
+    const box = document.getElementById('key-fields');
+    box.innerHTML = VENDOR_KEYS.map(([key, label]) =>
+      '<label for="k-' + key + '">' + label + '</label>' +
+      '<input id="k-' + key + '" data-key="' + key + '" type="password" autocomplete="off" spellcheck="false">'
+    ).join('');
+    document.getElementById('keys').hidden = false;
+  }
+
+  function enterSetup() {
+    setupMode = true;
+    document.getElementById('tag').textContent = 'AUTHORIZED ENGAGEMENT — ADMINISTRATOR SETUP';
+    document.getElementById('hint').hidden = false;
+    document.getElementById('hint').textContent =
+      'This runs once. It creates the administrator for this install. Later operators request an account and wait for approval.';
+    document.getElementById('u-lbl').textContent = 'ADMINISTRATOR';
+    document.getElementById('p').autocomplete = 'new-password';
+    document.getElementById('p2-lbl').hidden = false;
+    document.getElementById('p2').hidden = false;
+    document.getElementById('p2').required = true;
+    showKeys();
+    btn.textContent = 'CREATE ADMINISTRATOR';
+    document.getElementById('foot').textContent =
+      'After this, vendor keys can be replaced from the Admin tab. They are never displayed again.';
+  }
+
+  fetch('/auth/setup', { headers: { 'Accept': 'application/json' } })
+    .then((res) => res.ok ? res.json() : null)
+    .then((data) => { if (data && data.setup_required) enterSetup(); })
+    .catch(() => {});
+
+  function fail(text) {
+    msgEl.textContent = text;
+    msgEl.classList.add('on');
+    btn.disabled = false;
+    btn.textContent = setupMode ? 'CREATE ADMINISTRATOR' : 'SIGN IN';
+  }
+
+  /* Only same-origin paths are accepted as a post-login destination, so a
+     crafted ?next= cannot bounce an operator to an external site. */
+  function safeNext() {
+    const raw = new URLSearchParams(location.search).get('next') || '/';
+    return /^\/[^\/\\]/.test(raw) || raw === '/' ? raw : '/';
+  }
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    msgEl.classList.remove('on');
+    btn.disabled = true;
+    btn.textContent = 'SIGNING IN…';
+
+    const password = document.getElementById('p').value;
+    if (setupMode && password !== document.getElementById('p2').value) {
+      fail('Passwords do not match.');
+      return;
+    }
+
+    const secrets = {};
+    if (setupMode) {
+      document.querySelectorAll('#key-fields input').forEach((el) => {
+        if (el.value) secrets[el.dataset.key] = el.value;
+      });
+    }
+
+    try {
+      const res = await fetch(setupMode ? '/auth/setup' : '/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(setupMode ? {
+          username: document.getElementById('u').value.trim(),
+          password: password,
+          secrets: secrets,
+        } : {
+          username: document.getElementById('u').value.trim(),
+          password: password,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (setupMode && Array.isArray(data.secrets_failed) && data.secrets_failed.length) {
+          fail('Administrator created, but these keys were not stored: ' + data.secrets_failed.join(', ') + '. Set them from the Admin tab.');
+          setTimeout(() => location.replace(safeNext()), 4000);
+          return;
+        }
+        location.replace(safeNext());
+        return;
+      }
+      if (res.status === 429) { fail('Too many attempts — wait a minute and try again.'); return; }
+
+      const data = await res.json().catch(() => ({}));
+      fail(data.error === 'invalid credentials' || !data.error
+        ? 'Invalid credentials.' : String(data.error));
+      document.getElementById('p').value = '';
+    } catch (e) {
+      fail('Cannot reach the authentication service: ' + e.message);
+    }
+  });
+</script>

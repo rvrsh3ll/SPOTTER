@@ -1,0 +1,60 @@
+# SPOTTER — Caddy TLS front door overlay
+#
+# Add to the stack alongside the other compose files (already wired into
+# scripts/spotter_compose.sh's fixed -f list -- this is part of the default
+# stack, not an opt-in profile).
+#
+# Terminates TLS for every browser-facing surface on ONE port, 5443 by
+# default, using Caddy's built-in internal CA. spotter-ui (nginx) keeps doing
+# auth_request/CORS/routing unchanged; see deployment/Caddyfile for the
+# hostname-based vhosts this proxies to.
+#
+# docker-compose.frontend.yml no longer publishes 8080/8081/8082/8099 to the
+# host -- this is now the sole entry point. Add the vhost hostnames to
+# /etc/hosts, then open:
+#   https://spotter.localhost:5443       (dashboard)
+#   https://n8n.spotter.localhost:5443   (n8n editor)
+#   https://graph.spotter.localhost:5443 (Flowsint graph app)
+#   https://chat.spotter.localhost:5443  (Open WebUI chat)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: spotter-caddy
+    restart: unless-stopped
+    ports:
+      # Loopback-only, matching every other browser-facing port in this stack --
+      # reached through the operator's SSH tunnel, never opened to the LAN.
+      - "127.0.0.1:${SPOTTER_CADDY_PORT:-5443}:${SPOTTER_CADDY_PORT:-5443}"
+    environment:
+      - SPOTTER_CADDY_PORT=${SPOTTER_CADDY_PORT:-5443}
+      - SPOTTER_DASHBOARD_HOST=${SPOTTER_DASHBOARD_HOST:-spotter.localhost}
+      - SPOTTER_N8N_HOST=${SPOTTER_N8N_HOST:-n8n.spotter.localhost}
+      - SPOTTER_GRAPH_HOST=${SPOTTER_GRAPH_HOST:-graph.spotter.localhost}
+      - SPOTTER_CHAT_HOST=${SPOTTER_CHAT_HOST:-chat.spotter.localhost}
+    volumes:
+      - ${SPOTTER_HOME}/deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy's internal CA + issued certs. Persisted so the CA does not
+      # regenerate (forcing every browser to re-trust it) on every recreate.
+      - ${SPOTTER_CADDY_DATA_DIR:-spotter_caddy_data}:/data
+    networks:
+      - flowsint_net
+    depends_on:
+      - spotter-ui
+    healthcheck:
+      # Not an HTTP check: a bare TCP probe has no Host header, which would
+      # land on the BRc4 vhost (pinned to the literal IP) and its
+      # `limit_except POST` would 403 a healthcheck GET.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${SPOTTER_CADDY_PORT:-5443} || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  spotter_caddy_data:
+
+networks:
+  flowsint_net:
+    external: true
+    name: ${FLOWSINT_NETWORK:-flowsint_network_prod}

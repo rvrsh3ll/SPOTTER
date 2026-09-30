@@ -1,0 +1,96 @@
+{
+  "name": "23 - C2 Agent Roster",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "a0b1c2d3-0023-0023-0023-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/agents - Returns every C2Session in the campaign sketch (Cobalt Strike beacons from WF01 and Brute Ratel badgers from WF21) with full session detail, the HAS_BEACON owner, and the PIVOTS_TO topology. Backs the AGENTS tab.\n\nBody: {sketch_id, campaign_id, active_minutes?}. sketch_id is injected by the frontend's _scopeWebhookOpts; active_minutes defaults to 30 to match the c2_session_enricher liveness threshold.\n\nReads through fc.get_nodes_by_type / fc.get_edges_by_type, NOT fc.get_graph(): the REST graph path nulls every declared boolean and integer, which would blank is_admin, is_dead, is_pivot, pid, thread_id, sleep_seconds, jitter_pct and priority_score - eight of the fields this endpoint exists to serve."
+  },
+  "id": "spotter-workflow-23",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "C2"
+    }
+  ],
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agents",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a0b1c2d3-0023-0023-0023-000000000001",
+      "name": "C2 Agents Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "agents"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json\nfrom datetime import datetime, timezone\n\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n# Hard import on purpose. c2_common is on the runner's import allowlist and is\n# mounted at /data/scripts, so a failure here is a real deployment fault. The\n# tempting `try/except` + local fallback map would relabel every Brute Ratel\n# badger as a Cobalt Strike beacon and look like it worked -- exactly the bug\n# this tab exists to fix.\nfrom c2_common import framework_display\n\n# A UI webhook always carries a body, so read sketch_id from it and keep the env\n# value only as a last resort. resolve_campaign_sketch() is deliberately NOT used\n# here: it exists for body-less schedule/push triggers (WF01/WF02/WF21) and would\n# ignore the campaign the operator actually has open.\nSKETCH_ID = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nSKETCH_ID = _sb.get('sketch_id') or SKETCH_ID\n\n# Minutes since last check-in before a session stops counting as live. Matches\n# _ACTIVE_THRESHOLD_MINUTES in flowsint-custom/enrichers/c2_session_enricher.py so\n# the tab and the enricher never disagree about the same session.\ntry:\n    ACTIVE_MINUTES = int(_sb.get('active_minutes') or 30)\nexcept (TypeError, ValueError):\n    ACTIVE_MINUTES = 30\n\n# Tolerance for a check-in stamped slightly in the future. Target clocks drift\n# from SPOTTER's -- suspended VMs, hosts in another forest, no NTP on an isolated\n# segment -- and the enricher's bare `0 <= age` test reads a beacon whose host is\n# three minutes fast as stale while it is actively calling home. Anything further\n# ahead than this is a clock or ingest fault, not a live session, and is reported\n# as 'unknown' rather than guessed either way.\nSKEW_MINUTES = 5\n\nNOW = datetime.now(timezone.utc)\n\n\ndef _truthy(v):\n    \"\"\"Flowsint's custom-type layer can hand a declared boolean back as the string\n    'False', which is truthy in both Python's and JS's eyes. Compare on the text.\n    Same helper WF05 carries -- see 05-dossier-exporter.json 'Compile Dossier'.\"\"\"\n    if isinstance(v, bool):\n        return v\n    return str(v).strip().lower() in ('true', '1', 'yes')\n\n\ndef _tri(v):\n    \"\"\"is_admin is deliberately three-state: True / False / None = UNKNOWN. Callers\n    must not collapse None into False -- an unknown-privilege session is not the\n    same claim as a confirmed unprivileged one.\"\"\"\n    if v is None or v == '':\n        return None\n    if isinstance(v, bool):\n        return v\n    s = str(v).strip().lower()\n    if s in ('true', '1', 'yes'):\n        return True\n    if s in ('false', '0', 'no'):\n        return False\n    return None\n\n\ndef _int(v):\n    if v is None or v == '':\n        return None\n    try:\n        return int(v)\n    except (TypeError, ValueError):\n        return None\n\n\ndef _list(v):\n    \"\"\"process_list / tech_stack are declared `array` in C2SESSION_SCHEMA but land\n    in Neo4j as a JSON string. WF12 and WF05 both carry this same guard.\"\"\"\n    if isinstance(v, list):\n        return v\n    if isinstance(v, str) and v.strip():\n        try:\n            parsed = json.loads(v)\n            return parsed if isinstance(parsed, list) else [v]\n        except Exception:\n            return [v]\n    return []\n\n\ndef _parse_dt(v):\n    if not v:\n        return None\n    txt = str(v).strip()\n    if txt.endswith('Z'):\n        txt = txt[:-1] + '+00:00'\n    try:\n        dt = datetime.fromisoformat(txt)\n    except (TypeError, ValueError):\n        return None\n    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)\n\n\nerrors = []\n\ntry:\n    # Both labels, always. C2Session is current; CobaltBeacon is the legacy type\n    # and both are still registered, so querying one silently halves the roster.\n    nodes = fc.get_nodes_by_type(['C2Session', 'CobaltBeacon'], sketch_id=SKETCH_ID)\nexcept Exception as e:\n    nodes = []\n    errors.append('node_read_failed: ' + str(e))\n\ntry:\n    owner_edges = fc.get_edges_by_type(\n        ['HAS_BEACON'], sketch_id=SKETCH_ID, resolve_endpoints=True, timeout=300)\nexcept Exception as e:\n    owner_edges = []\n    errors.append('has_beacon_read_failed: ' + str(e))\n\ntry:\n    pivot_edges = fc.get_edges_by_type(\n        ['PIVOTS_TO'], sketch_id=SKETCH_ID, resolve_endpoints=True, timeout=300)\nexcept Exception as e:\n    pivot_edges = []\n    errors.append('pivots_to_read_failed: ' + str(e))\n\n# \u2500\u2500 Index the sessions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nsessions = {}\nfor n in nodes:\n    ntype = (n.get('nodeType') or '').lower()\n    if ntype not in ('c2session', 'cobaltbeacon'):\n        continue\n    sessions[n.get('id', '')] = (n, n.get('nodeProperties') or n.get('data') or {})\n\n# \u2500\u2500 Resolve owners \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# HAS_BEACON is written individual -> session, but a reader must not assume the\n# direction: WF12 handles both orientations and so does WF05's dossier compile.\nowner_by_session = {}\nfor e in owner_edges:\n    src, tgt = e.get('source', ''), e.get('target', '')\n    if src in sessions and tgt not in sessions:\n        owner_by_session[src] = (tgt, e.get('target_label') or '')\n    elif tgt in sessions and src not in sessions:\n        owner_by_session[tgt] = (src, e.get('source_label') or '')\n\n# \u2500\u2500 Pivot topology \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\npivot_chains = []\nchildren_of = {}\nparent_of = {}\nfor e in pivot_edges:\n    parent, child = e.get('source', ''), e.get('target', '')\n    if not parent or not child:\n        continue\n    children_of.setdefault(parent, []).append(child)\n    parent_of[child] = parent\n    p_props = sessions.get(parent, (None, {}))[1]\n    c_props = sessions.get(child, (None, {}))[1]\n    pivot_chains.append({\n        'parent_id': parent,\n        'child_id': child,\n        'parent_session_id': p_props.get('session_id') or p_props.get('beacon_id'),\n        'child_session_id': c_props.get('session_id') or c_props.get('beacon_id'),\n        'parent_label': e.get('source_label') or '',\n        'child_label': e.get('target_label') or '',\n        'channel': c_props.get('pivot_channel'),\n    })\n\n# \u2500\u2500 Build the roster \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nagents = []\nfor sid, (node, p) in sessions.items():\n    fw = (p.get('c2_framework') or 'cobalt_strike').strip().lower()\n    disp = framework_display(fw)\n\n    last_checkin = p.get('last_checkin')\n    dt = _parse_dt(last_checkin)\n    age_minutes = None\n    if dt is not None:\n        age_minutes = round((NOW - dt).total_seconds() / 60.0, 1)\n\n    is_dead = _truthy(p.get('is_dead'))\n    if is_dead:\n        status = 'dead'\n    elif age_minutes is None or age_minutes < -SKEW_MINUTES:\n        # No parseable check-in, or one stamped implausibly far in the future.\n        # Reported honestly rather than folded into 'stale', so an ingest that\n        # never wrote a usable timestamp shows up as the data problem it is\n        # instead of looking like a quiet beacon.\n        status = 'unknown'\n    elif age_minutes < ACTIVE_MINUTES:\n        status = 'live'\n    else:\n        status = 'stale'\n\n    owner_id, owner_label = owner_by_session.get(sid, ('', ''))\n\n    agents.append({\n        'id': sid,\n        'node_label': node.get('nodeLabel') or '',\n        'framework': fw,\n        'framework_label': disp['label'],\n        'agent_noun': disp['noun'],\n        'status': status,\n        'age_minutes': age_minutes,\n\n        # Legacy keys are COALESCEd the way migrate_c2session.py does: nodes\n        # written before the C2Session migration carry beacon_id / cs_server.\n        'session_id': p.get('session_id') or p.get('beacon_id'),\n        'session_key': p.get('session_key'),\n        'c2_server': p.get('c2_server') or p.get('cs_server'),\n        'listener': p.get('listener'),\n        'listener_ip': p.get('listener_ip'),\n\n        'hostname': p.get('hostname'),\n        'internal_ip': p.get('internal_ip'),\n        'external_ip': p.get('external_ip'),\n        'os_version': p.get('os_version'),\n        'arch': p.get('arch'),\n\n        'username': p.get('username'),\n        'sam_account_name': p.get('sam_account_name'),\n        'owner_id': owner_id,\n        'owner_label': owner_label,\n\n        'process_name': p.get('process_name'),\n        'pid': _int(p.get('pid')),\n        'thread_id': _int(p.get('thread_id')),\n        'process_list': _list(p.get('process_list')),\n        'tech_stack': _list(p.get('tech_stack')),\n\n        'last_checkin': last_checkin,\n        'sleep_seconds': _int(p.get('sleep_seconds')),\n        'jitter_pct': _int(p.get('jitter_pct')),\n        'is_admin': _tri(p.get('is_admin')),\n        'priority_score': _int(p.get('priority_score')) or 0,\n\n        'is_pivot': _truthy(p.get('is_pivot')),\n        'pivot_parent': p.get('pivot_parent'),\n        'pivot_channel': p.get('pivot_channel'),\n        'pivot_child_ids': children_of.get(sid, []),\n        'is_dead': is_dead,\n        'note': p.get('note'),\n        'source': p.get('source'),\n    })\n\n# Highest-value live sessions first; that is the order an operator reads in.\n_ORDER = {'live': 0, 'unknown': 1, 'stale': 2, 'dead': 3}\nagents.sort(key=lambda a: (_ORDER.get(a['status'], 9), -(a.get('priority_score') or 0),\n                           str(a.get('hostname') or '')))\n\nby_framework = {}\nfor a in agents:\n    by_framework[a['framework']] = by_framework.get(a['framework'], 0) + 1\n\nstats = {\n    'total':   len(agents),\n    'live':    sum(1 for a in agents if a['status'] == 'live'),\n    'stale':   sum(1 for a in agents if a['status'] == 'stale'),\n    'dead':    sum(1 for a in agents if a['status'] == 'dead'),\n    'unknown': sum(1 for a in agents if a['status'] == 'unknown'),\n    'admin':   sum(1 for a in agents if a['is_admin'] is True),\n    'pivots':  len(pivot_chains),\n    'by_framework': by_framework,\n}\n\nreturn [{'json': {\n    'agents': agents,\n    'pivot_chains': pivot_chains,\n    'stats': stats,\n    'sketch_id': SKETCH_ID,\n    'active_minutes': ACTIVE_MINUTES,\n    'generated_at': NOW.isoformat(),\n    'errors': errors,\n}}]\n"
+      },
+      "id": "a0b1c2d3-0023-0023-0023-000000000002",
+      "name": "Build Agent Roster",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a0b1c2d3-0023-0023-0023-000000000003",
+      "name": "Return Agent Roster",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "C2 Agents Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Agent Roster",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Agent Roster": {
+      "main": [
+        [
+          {
+            "node": "Return Agent Roster",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

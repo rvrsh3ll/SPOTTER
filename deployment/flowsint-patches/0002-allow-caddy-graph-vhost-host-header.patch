@@ -1,0 +1,33 @@
+From: SPOTTER <deployment/flowsint-patches>
+Subject: [PATCH] Allow the Caddy graph vhost through Flowsint's Host allowlist
+
+flowsint-app/nginx.conf default-denies any Host header not on its
+$is_flowsint_host allowlist (DNS-rebinding defense) -- localhost / 127.0.0.1 /
+::1 only. SPOTTER's dashboard (deployment/docker-compose.caddy.yml) now reaches
+this app through Caddy on graph.spotter.localhost, a hostname the vendored
+allowlist has never heard of, so every request 403s before it reaches the app
+at all -- despite passing SPOTTER's own auth gate first.
+
+If SPOTTER_GRAPH_HOST is changed from its default in .env, update the regex
+below to match (or edit vendor/flowsint/flowsint-app/nginx.conf directly and
+regenerate this patch with `git -C vendor/flowsint diff`).
+
+Apply with:  git -C "$FLOWSINT_HOME" apply <this file>
+scripts/bootstrap.sh does it automatically.
+
+diff --git a/flowsint-app/nginx.conf b/flowsint-app/nginx.conf
+index 3040519..9a02ec0 100644
+--- a/flowsint-app/nginx.conf
++++ b/flowsint-app/nginx.conf
+@@ -64,6 +64,11 @@ http {
+         "~*^\[::1\](:[0-9]+)?$"      1;
+         # "~*^flowsint\.example\.com$"   1;
+         # "~*^192\.168\.1\.42(:[0-9]+)?$" 1;
++        # SPOTTER's Caddy front door (deployment/Caddyfile) reaches this app
++        # on its own hostname rather than localhost/127.0.0.1 -- see
++        # deployment/flowsint-patches/0002-*. Update this line to match if
++        # SPOTTER_GRAPH_HOST in .env is changed from its default.
++        "~*^graph\.spotter\.localhost(:[0-9]+)?$" 1;
+     }
+ 
+     server {

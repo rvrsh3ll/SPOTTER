@@ -1,0 +1,8 @@
+FROM python:3.12-alpine
+
+COPY llm-gateway.py /app/llm-gateway.py
+WORKDIR /app
+
+USER nobody
+EXPOSE 8080
+ENTRYPOINT ["python", "/app/llm-gateway.py"]

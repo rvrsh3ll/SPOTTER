@@ -1,0 +1,96 @@
+{
+  "name": "15 - Photo Verification",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0b1c2d3-0015-0015-0015-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/photo-verify — Operator action to verify or mark false-positive a photo on an Individual node. Body: { individual_id, action: 'verify'|'false_positive', photo_url }. Persists photo_verified_url or photo_false_positives to the graph via Flowsint API."
+  },
+  "id": "spotter-workflow-15",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Dossier"
+    },
+    {
+      "name": "Photo"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "a0b1c2d3-0015-0015-0015-000000000001",
+      "name": "Photo Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "photo-verify",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "photo-verify"
+    },
+    {
+      "id": "a0b1c2d3-0015-0015-0015-000000000002",
+      "name": "Update Photo Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport requests as req\nimport flowsint_client as fc\n\nFLOWSINT_URL = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api:5001').rstrip('/')\nKEY          = os.environ.get('FLOWSINT_API_KEY', '')\nSK = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nSK = _sb.get('sketch_id') or SK\nHJ           = {'Authorization': f'Bearer {KEY}', 'Content-Type': 'application/json'}\n\nitem = _items[0].get('json', {}) if _items else {}\nbody = item.get('body', item) if isinstance(item.get('body'), dict) else item\n\nind_id   = (body.get('individual_id') or '').strip()\naction   = (body.get('action') or '').strip().lower()\nphoto_url = (body.get('photo_url') or '').strip()\n\nif not ind_id:\n    return [{'json': {'ok': False, 'error': 'individual_id is required'}}]\nif action not in ('verify', 'false_positive'):\n    return [{'json': {'ok': False, 'error': \"action must be 'verify' or 'false_positive'\"}}]\nif not photo_url:\n    return [{'json': {'ok': False, 'error': 'photo_url is required'}}]\n\n# Fetch current node properties to merge false positives list.\n# Looked up by elementId directly rather than by downloading the whole sketch and\n# scanning it: GET /graph is unpaginated and runs 110-235s on an AD-sized sketch,\n# so this single-node read used to risk the 120s timeout to find one node.\ntry:\n    node = fc.get_node_by_id(ind_id, sketch_id=SK)\n    if not node:\n        return [{'json': {'ok': False, 'error': f'Individual {ind_id} not found'}}]\n    props = node.get('nodeProperties') or {}\nexcept Exception as e:\n    return [{'json': {'ok': False, 'error': f'Graph fetch failed: {e}'}}]\n\nupd = {}\nif action == 'verify':\n    upd['nodeProperties.photo_verified_url'] = photo_url\n    # Remove from false positives if it was previously flagged\n    raw_fp = props.get('photo_false_positives') or '[]'\n    try:\n        fp_list = json.loads(raw_fp) if isinstance(raw_fp, str) else (raw_fp if isinstance(raw_fp, list) else [])\n    except Exception:\n        fp_list = []\n    if photo_url in fp_list:\n        fp_list.remove(photo_url)\n        upd['nodeProperties.photo_false_positives'] = json.dumps(fp_list)\nelse:  # false_positive\n    raw_fp = props.get('photo_false_positives') or '[]'\n    try:\n        fp_list = json.loads(raw_fp) if isinstance(raw_fp, str) else (raw_fp if isinstance(raw_fp, list) else [])\n    except Exception:\n        fp_list = []\n    if photo_url not in fp_list:\n        fp_list.append(photo_url)\n    upd['nodeProperties.photo_false_positives'] = json.dumps(fp_list)\n    # If the verified photo is the one being flagged, clear it\n    if props.get('photo_verified_url') == photo_url:\n        upd['nodeProperties.photo_verified_url'] = ''\n\ntry:\n    r2 = req.put(f'{FLOWSINT_URL}/api/sketches/{SK}/nodes/edit', headers=HJ,\n                 json={'nodeId': ind_id, 'updates': upd}, timeout=20)\n    r2.raise_for_status()\n    return [{'json': {'ok': True, 'individual_id': ind_id, 'action': action, 'photo_url': photo_url}}]\nexcept Exception as e:\n    return [{'json': {'ok': False, 'error': f'Node update failed: {e}'}}]\n"
+      }
+    },
+    {
+      "id": "a0b1c2d3-0015-0015-0015-000000000003",
+      "name": "Return Status",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      }
+    }
+  ],
+  "connections": {
+    "Photo Verify Webhook": {
+      "main": [
+        [
+          {
+            "node": "Update Photo Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Photo Status": {
+      "main": [
+        [
+          {
+            "node": "Return Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,199 @@
+{
+  "name": "01 - Cobalt Strike Beacon Ingestor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import os, json, ssl\nimport urllib.request\nimport urllib.error\n\ncs_url = os.environ.get('CS_API_URL', '').strip()\ncs_token = os.environ.get('CS_API_TOKEN', '').strip()\n\n# The shipped .env carries REPLACE_WITH_* placeholders. Treat those as \"not\n# configured\" so a stack that never wired up Cobalt Strike does not attempt a\n# doomed connection on every 5-minute tick.\ndef _placeholder(v):\n    return v.upper().startswith('REPLACE_WITH')\n\nif not cs_url or _placeholder(cs_url):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'CS_API_URL is not set (or still the .env placeholder)',\n                      'beacons': []}}]\nif _placeholder(cs_token):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'CS_API_TOKEN is still the .env placeholder',\n                      'beacons': []}}]\n\nctx = ssl.create_default_context()\nctx.check_hostname = False\nctx.verify_mode = ssl.CERT_NONE\n\nheaders = {}\nif cs_token:\n    if cs_token.lower().startswith(('token ', 'bearer ')):\n        headers['Authorization'] = cs_token\n    else:\n        headers['Authorization'] = f'Token {cs_token}'\n\ntry:\n    req = urllib.request.Request(\n        cs_url.rstrip('/') + '/beacons',\n        headers=headers,\n        method='GET',\n    )\n    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:\n        payload = json.loads(r.read())\n\n    if isinstance(payload, dict):\n        beacons = payload.get('beacons')\n        if beacons is None:\n            beacons = payload.get('data')\n        if beacons is None:\n            beacons = [payload]\n    elif isinstance(payload, list):\n        beacons = payload\n    else:\n        beacons = []\n\n    return [{'json': {'fetch_ok': True, 'error': '', 'beacons': beacons}}]\nexcept urllib.error.HTTPError as e:\n    body = ''\n    try:\n        body = e.read().decode('utf-8', errors='replace')[:300]\n    except Exception:\n        body = ''\n    return [{'json': {'fetch_ok': False, 'error': f'CS API HTTP {e.code}: {body}', 'beacons': []}}]\nexcept Exception as e:\n    return [{'json': {'fetch_ok': False, 'error': f'CS API request failed: {e}', 'beacons': []}}]\n"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "name": "Fetch CS Beacons",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nfrom cobalt_normalizer import normalise_beacon\n\ncs_url = os.environ.get('CS_API_URL', '')\nraw = _items[0].get('json', {}) if _items else {}\n\nif isinstance(raw, dict) and raw.get('fetch_ok') is False:\n    # Emit NO items so the run ends here. Everything downstream begins with\n    # \"Get Flowsint Graph\", a whole-graph fetch that is ~90 MB / ~18 s on a\n    # campaign this size and then gets pushed through three more code nodes -\n    # far longer than the 5-minute schedule. Returning a sentinel item instead\n    # of nothing meant every failed poll paid that cost, so runs overlapped and\n    # piled up until the 90-minute execution timeout.\n    print('cobalt-strike ingest skipped: ' + str(raw.get('error', 'fetch_failed')))\n    return []\n\nif isinstance(raw, dict):\n    beacons = raw.get('beacons', [raw])\nelse:\n    beacons = raw if isinstance(raw, list) else [raw]\n\nif not beacons:\n    return []\n\nnormalised = [normalise_beacon(b, cs_url) for b in beacons if isinstance(b, dict)]\nreturn [{'json': b} for b in normalised]\n"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000004",
+      "name": "Normalise Beacons",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule/push triggers carry no request body, so there is no sketch_id to read\n# the way a UI webhook supplies one. Falling straight back to FLOWSINT_SKETCH_ID\n# pointed every ingest at the throwaway default sketch, which no campaign reads \u2014\n# and writing to an empty sketch succeeds, so it failed silently. Resolve the\n# most recent campaign from the shared registry instead (same rule the frontend\n# uses on boot), with the env value still the last resort.\nsketch_id = fc.resolve_campaign_sketch()\n\n# The graph is fetched HERE rather than by an upstream HTTP Request node. That node\n# ran once per beacon and its response REPLACED each beacon item, so by the time\n# this node read _items every beacon had been overwritten by a copy of the graph -\n# the loop below then treated graph dicts as beacons and upserted junk Individuals\n# named 'unknown'.\n# Only the three labels this dedup actually inspects are read. The full-graph\n# endpoint it used to call is unpaginated (110-235s, ~0.5 GB on an AD-sized sketch)\n# and truncates at 100k nodes, which would silently drop existing sessions from the\n# dedup map and re-create them.\ntry:\n    existing_nodes = fc.get_nodes_by_type(\n        ['C2Session', 'CobaltBeacon', 'individual'], sketch_id=sketch_id)\nexcept Exception as e:\n    print('cobalt-strike ingest skipped: graph fetch failed: ' + str(e))\n    return []\n\nexisting_beacons = {}\nexisting_individuals = {}\n\nfor n in existing_nodes:\n    ntype = (n.get('nodeType') or (n.get('data') or {}).get('type') or '').lower()\n    props = n.get('nodeProperties') or n.get('data') or {}\n\n    # c2session is the current type; cobaltbeacon is the pre-migration one.\n    # Key on session_key so a CS beacon and a BR badger sharing an id stay\n    # distinct, falling back to the legacy beacon_id for un-migrated nodes.\n    if ntype in ('c2session', 'cobaltbeacon'):\n        skey = props.get('session_key', '')\n        if not skey:\n            sid = props.get('session_id') or props.get('beacon_id') or ''\n            fw = props.get('c2_framework') or 'cobalt_strike'\n            skey = f'{fw}:{sid}' if sid else ''\n        if skey:\n            existing_beacons[skey] = n.get('id')\n    elif ntype == 'individual':\n        sam = (props.get('sam_account_name') or props.get('username') or '').lower()\n        if sam:\n            existing_individuals[sam] = n.get('id')\n\nresult = []\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest'):\n        result.append({'json': b})\n        continue\n\n    b['_existing_beacon_id'] = existing_beacons.get(b.get('session_key', ''), '')\n    b['_existing_individual_id'] = existing_individuals.get((b.get('sam_account_name') or '').lower(), '')\n    result.append({'json': b})\n\nreturn result\n"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000006",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule/push triggers carry no request body, so there is no sketch_id to read\n# the way a UI webhook supplies one. Falling straight back to FLOWSINT_SKETCH_ID\n# pointed every ingest at the throwaway default sketch, which no campaign reads \u2014\n# and writing to an empty sketch succeeds, so it failed silently. Resolve the\n# most recent campaign from the shared registry instead (same rule the frontend\n# uses on boot), with the env value still the last resort.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\n\ndef _np(props):\n    \"\"\"Prefix an edit_node patch into the nodeProperties namespace.\n\n    add_node nests whatever it is given under nodeProperties.*, but edit_node\n    passes `updates` keys through verbatim, so a bare key lands at the node's\n    TOP level -- a second namespace that get_nodes_by_type, the dossier query and\n    the Technology catalog all read straight past. The write reports success and\n    the value is genuinely in Neo4j, just not where anything looks, which is why\n    a beacon kept its first-contact last_checkin no matter how many times the\n    5-minute poll saw it. Every other workflow that calls edit_node prefixes the\n    same way (WF09/WF12/WF13/WF21).\n    \"\"\"\n    return {'nodeProperties.' + k: v for k, v in props.items()}\n\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest'):\n        results.append({'json': {**b, 'upsert_status': 'skipped'}})\n        continue\n\n    sam = (b.get('sam_account_name') or b.get('username', 'unknown')).split('\\\\')[-1]\n    ind_id = b.get('_existing_individual_id', '')\n    beacon_id_node = b.get('_existing_beacon_id', '')\n    item_errors = []\n\n    try:\n        ind_props = {\n            'username': b.get('username'),\n            'sam_account_name': sam,\n            'hostname': b.get('hostname'),\n            'source': b.get('c2_framework', 'cobalt_strike'),\n            'last_seen': b.get('last_checkin'),\n            'active_beacon': True,\n        }\n        if not ind_id:\n            # Lowercase: 'individual' is a Flowsint built-in and Neo4j labels are\n            # case-sensitive, with no normalisation in create_node. 'Individual'\n            # created a second, unregistered label that this workflow's own dedup\n            # (which reads 'individual') could never see, so a session never linked\n            # to the SharpHound identity and active_beacon landed on a node the\n            # dossier and Targets tab do not query.\n            node = fc.add_node(\n                label=b.get('username') or sam,\n                node_type='individual',\n                properties=ind_props,\n                sketch_id=sketch_id,\n            )\n            ind_id = node.get('id', '')\n        else:\n            # Drop empty values before patching an EXISTING individual: this is\n            # frequently a SharpHound-ingested identity, so a beacon record with\n            # no user or an unparseable last-checkin must not blank the username /\n            # last_seen the AD ingest already established.\n            fc.edit_node(\n                ind_id,\n                _np({k: v for k, v in ind_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n    except Exception as e:\n        item_errors.append(f'individual_upsert_failed: {e}')\n\n    try:\n        # Every key normalise_beacon() + finalize_session() produce and\n        # C2SESSION_SCHEMA declares. Ten of these used to be normalised and then\n        # dropped on write (username, sam_account_name, os_version, arch, pid,\n        # sleep_seconds, jitter_pct, listener, note, source), so a Cobalt Strike\n        # session showed blanks in the AGENTS tab wherever a Brute Ratel badger\n        # showed data -- WF21 has always written its equivalents.\n        #\n        # Deliberately absent: last_checkin_dt (a raw datetime, not JSON\n        # serialisable and not in the schema -- last_checkin is the ISO string),\n        # and listener_ip / thread_id, which are Brute Ratel-only and would only\n        # ever write None from a CS beacon.\n        beacon_props = {\n            'c2_framework': b.get('c2_framework', 'cobalt_strike'),\n            'session_id': b.get('session_id'),\n            'session_key': b.get('session_key'),\n            'c2_server': b.get('c2_server'),\n            'hostname': b.get('hostname'),\n            'internal_ip': b.get('internal_ip'),\n            'external_ip': b.get('external_ip'),\n            'os_version': b.get('os_version'),\n            'arch': b.get('arch'),\n            'username': b.get('username'),\n            'sam_account_name': sam,\n            'process_name': b.get('process_name'),\n            'pid': b.get('pid'),\n            'is_admin': b.get('is_admin'),\n            'last_checkin': b.get('last_checkin'),\n            'sleep_seconds': b.get('sleep_seconds'),\n            'jitter_pct': b.get('jitter_pct'),\n            'listener': b.get('listener'),\n            'note': b.get('note'),\n            'priority_score': b.get('priority_score'),\n            'process_list': b.get('process_list', []),\n            'tech_stack': b.get('tech_stack', []),\n            'is_dead': b.get('is_dead', False),\n            'is_pivot': b.get('is_pivot'),\n            'pivot_parent': b.get('pivot_parent'),\n            'pivot_channel': b.get('pivot_channel'),\n            'source': b.get('source', 'cobalt_strike'),\n        }\n        if beacon_id_node:\n            # Same empty-value guard. CS's /beacons listing usually carries no\n            # process list -- that only arrives from a ps -- so patching the empty\n            # process_list/tech_stack in would wipe any enrichment on every\n            # 5-minute poll. Only None and [] are dropped: False and 0 are real\n            # values (is_dead, priority_score), and the create path below keeps the\n            # empty lists so the property exists with the right type from the start.\n            fc.edit_node(\n                beacon_id_node,\n                _np({k: v for k, v in beacon_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n        else:\n            beacon_node = fc.add_node(\n                label=f\"Beacon:{b.get('session_id')}@{b.get('hostname')}\",\n                node_type='C2Session',\n                properties=beacon_props,\n                sketch_id=sketch_id,\n            )\n            beacon_id_node = beacon_node.get('id', '')\n    except Exception as e:\n        item_errors.append(f'beacon_upsert_failed: {e}')\n\n    status = 'ok' if not item_errors else 'partial'\n    results.append({'json': {\n        **b,\n        '_ind_id': ind_id,\n        '_beacon_node_id': beacon_id_node,\n        'upsert_status': status,\n        'upsert_errors': item_errors,\n    }})\n\nreturn results\n"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000007",
+      "name": "Upsert Individual + Beacon",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule/push triggers carry no request body, so there is no sketch_id to read\n# the way a UI webhook supplies one. Falling straight back to FLOWSINT_SKETCH_ID\n# pointed every ingest at the throwaway default sketch, which no campaign reads \u2014\n# and writing to an empty sketch succeeds, so it failed silently. Resolve the\n# most recent campaign from the shared registry instead (same rule the frontend\n# uses on boot), with the env value still the last resort.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest'):\n        results.append({'json': {**b, 'rel_status': 'skipped_fetch_error'}})\n        continue\n\n    ind_id = b.get('_ind_id', '')\n    beacon_node_id = b.get('_beacon_node_id', '')\n    tech_stack = b.get('tech_stack', [])\n    rel_errors = []\n    edges_created = 0\n\n    if not ind_id:\n        results.append({'json': {**b, 'rel_status': 'skipped_no_ind', 'rel_errors': ['missing individual id']}})\n        continue\n\n    if beacon_node_id:\n        try:\n            fc.create_edge(ind_id, beacon_node_id, 'HAS_BEACON', sketch_id)\n            edges_created += 1\n        except Exception as e:\n            rel_errors.append(f'HAS_BEACON: {e}')\n\n    for tech in tech_stack:\n        if not tech:\n            continue\n        try:\n            tnode = fc.add_node(\n                label=tech,\n                node_type='Technology',\n                # 'name' is REQUIRED on the built-in Technology type. Flowsint's graph\n                # serializer retries once with invalid fields stripped, but a *missing*\n                # required field cannot be recovered that way, so a single name-less\n                # Technology node makes GET /graph return 500 for the entire sketch.\n                properties={'name': tech, 'source': b.get('c2_framework', 'cobalt_strike')},\n                sketch_id=sketch_id,\n            )\n            tid = tnode.get('id', '')\n            if tid:\n                fc.create_edge(ind_id, tid, 'USES_TECH', sketch_id)\n                edges_created += 1\n        except Exception as e:\n            rel_errors.append(f'USES_TECH[{tech}]: {e}')\n\n    # Pivot topology: link a pivoted beacon to the session relaying it. CS has\n    # always written is_pivot/pivot_parent onto the node but never the edge, so a\n    # linked/SMB beacon chain was invisible as a chain -- WF21 was the only\n    # PIVOTS_TO writer. Both ends must already exist, so a child that checks in\n    # before its parent records the miss; the next 5-minute poll creates the edge.\n    if beacon_node_id and b.get('is_pivot') and b.get('pivot_parent'):\n        parent_key = 'cobalt_strike:' + str(b.get('pivot_parent'))\n        try:\n            matches = fc.search_nodes(parent_key, node_type='C2Session', sketch_id=sketch_id) or []\n            parent_id = ''\n            for m in matches:\n                props = m.get('nodeProperties') or m.get('data') or {}\n                if props.get('session_key') == parent_key:\n                    parent_id = m.get('id', '')\n                    break\n            if parent_id:\n                fc.create_edge(parent_id, beacon_node_id, 'PIVOTS_TO', sketch_id)\n                edges_created += 1\n            else:\n                rel_errors.append('PIVOTS_TO: parent ' + parent_key + ' not in graph yet')\n        except Exception as e:\n            rel_errors.append('PIVOTS_TO: ' + str(e))\n\n    rel_status = 'ok' if not rel_errors else ('partial' if edges_created > 0 else 'error')\n    results.append({'json': {\n        **b,\n        'rel_status': rel_status,\n        'rel_errors': rel_errors[:10],\n        'edges_created': edges_created,\n    }})\n\nreturn results\n"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000008",
+      "name": "Create Relationships",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch CS Beacons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch CS Beacons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch CS Beacons": {
+      "main": [
+        [
+          {
+            "node": "Normalise Beacons",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Beacons": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "Upsert Individual + Beacon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Individual + Beacon": {
+      "main": [
+        [
+          {
+            "node": "Create Relationships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "a1b2c3d4-0001-0001-0001-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "spotter-workflow-01",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "CobaltStrike"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+#
+# shareacl.cna - Cobalt Strike Aggressor script for the shareacl BOF.
+#
+# Usage:
+#   beacon> shareacl FILESERVER
+#   beacon> shareacl \\FILESERVER\Finance$
+#
+# The BOF emits one JSON object per share, prefixed with "[shareacl] ", which
+# can be copied into scripts/shareacl_normalizer.py for SPOTTER/Flowsint import.
+#
+# Safe-use: authorized red-team / penetration-test engagements only.
+#
+
+alias shareacl {
+    local('$handle $data $args $barch $cmdline $i');
+
+    if (size(@_) < 2) {
+        berror($1, "Usage: shareacl <host> | shareacl \\\\server\\share | shareacl --computers [--ldaps]");
+        return;
+    }
+
+    $barch = barch($1);
+    $handle = openf(script_resource("shareacl." . $barch . ".o"));
+    $data = readb($handle, -1);
+    closef($handle);
+
+    $cmdline = "";
+    for ($i = 2; $i <= size(@_); $i++) {
+        if ($i > 2) {
+            $cmdline .= " ";
+        }
+        $cmdline .= @_[$i - 1];
+    }
+
+    $args = bof_pack($1, "z", $cmdline);
+    beacon_inline_execute($1, $data, "go", $args);
+}
+
+beacon_command_register(
+    "shareacl",
+    "Enumerate SMB share ACLs under the current Beacon context.",
+    "Usage: shareacl <host> | shareacl \\\\server\\share | shareacl --computers [--ldaps]\n" .
+    "--computers queries AD for enabled computer objects and scans each one; --ldaps switches LDAP discovery to TLS on port 636.\n" .
+    "Emits JSON per share for SPOTTER/Flowsint ingestion."
+);

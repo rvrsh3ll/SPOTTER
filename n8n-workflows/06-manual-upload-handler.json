@@ -1,0 +1,869 @@
+{
+  "name": "06 - Manual Upload Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "upload",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryData": true,
+          "rawBody": true,
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        },
+        "responseData": "noData"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000001",
+      "name": "Upload Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "upload"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, base64, json, time, uuid, glob\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import detect_format, hint_format, WEAK_FORMATS, zip_encryption\n\ndef _reject(message, fmt=''):\n    # Blocking failure: reported in the ack AND routed to the switch's dead-end\n    # so the parse pipeline never runs on bytes we know are unusable.\n    return [{'json': {\n        'file_path': '', 'filename': filename or 'upload', 'detected_format': fmt,\n        'sketch_id': sketch_id, 'size': 0, 'context': context,\n        'accepted': False, 'errors': [message], 'error': message,\n    }}]\n\nitem = _items[0] if _items else {}\n_j = item.get('json', {}) if isinstance(item.get('json'), dict) else {}\n# n8n webhook v2 nests the POST body under item.json.body - read that, with fallback.\nbody = _j.get('body', _j) if isinstance(_j.get('body'), dict) else _j\nbinary = item.get('binary') if isinstance(item, dict) else None\n\nfilename = body.get('filename', '')\nsketch_id = body.get('sketch_id', '')\nfmt = body.get('type', '')\n# Analyst's description of the payload, from the Ingest tab's Context field.\ncontext = str(body.get('context') or '')[:2000]\nraw_bytes = b''\n\n# A chunked upload arrives as a staged id, not as bytes. The file is already\n# on the shared staging mount. Resolve it, classify from the central directory\n# or a bounded header, and hand the path to the parser. Do not copy it into\n# /tmp and do not put the bytes on this item.\n# SPOTTER_INGEST_STAGING_DIR and SPOTTER_RUNNER_PARSE_MAX_BYTES are read here\n# so a value set only on the n8n service (or missing from the runner allowlist)\n# cannot silently fall back. ingest_staging reads the same names.\nstaged_id = str(body.get('staged_id') or '').strip()\nif staged_id:\n    os.environ.get('SPOTTER_INGEST_STAGING_DIR', '/data/ingest-staging')\n    _runner_cap = int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024 ** 3)))\n    from ingest_staging import resolve_staged, host_command, StagingError\n    from upload_router import detect_format_path, zip_encryption_path\n    try:\n        staged = resolve_staged(staged_id)\n    except StagingError as _se:\n        return _reject(str(_se), 'staged')\n    filename = filename or staged.get('filename') or 'upload'\n    file_path = staged['path']\n    size = int(staged.get('size') or 0)\n    _enc, _total = zip_encryption_path(file_path)\n    fmt = detect_format_path(file_path, filename, max_read=_runner_cap)\n    if context and fmt in WEAK_FORMATS:\n        _fd = os.open(file_path, os.O_RDONLY)\n        try:\n            _head = os.read(_fd, 1024 * 1024)\n        finally:\n            os.close(_fd)\n        fmt = hint_format(context, _head, fmt)\n    if _total and _enc == _total:\n        return _reject(\n            f'archive is password-protected: all {_total} files inside are encrypted, '\n            f'so nothing could be read. Detected as {fmt!r} from the member names '\n            f'only. Re-upload the output zipped WITHOUT a password.',\n            fmt)\n    if size > _runner_cap:\n        return _reject(\n            f'{filename} ({size} bytes) is on disk at {file_path} but is over the '\n            f'{_runner_cap} byte in-runner parse cap, so it was not read. '\n            f'Ingest it on the host: {host_command(fmt, file_path)}',\n            fmt or 'oversize')\n    return [{'json': {\n        'file_path': file_path,\n        'filename': filename,\n        'detected_format': fmt,\n        'sketch_id': sketch_id,\n        'size': size,\n        'context': context,\n        'accepted': True,\n        'staged': True,\n        'errors': ([f'{_enc} of {_total} files in this archive are password-protected '\n                    f'and were skipped'] if _enc else []),\n    }}]\n\n\n# Which explicit payload field the caller used, if any. The webhook runs with\n# rawBody: true, so item.binary is populated on EVERY request -- for a plain JSON\n# POST it holds the request envelope itself. Resolving binary first therefore\n# hijacked every csv_text / text (paste) upload and wrote the ~150-byte JSON\n# envelope as though it were the uploaded file, which then \"ingested\" as generic\n# JSON and produced nothing. Explicit fields are checked first; binary is the\n# multipart-upload fallback. An explicit field that carries no bytes is an error,\n# never a reason to fall back to the envelope.\n_payload_field = ''\nfor _k in ('zip_b64', 'csv_text', 'text', 'data'):\n    if _k in body:\n        _payload_field = _k\n        break\n\nMAX_UPLOAD_BYTES = int(os.environ.get('SPOTTER_UPLOAD_MAX_BYTES', str(32 * 1024 * 1024)))\n\ndef _read_n8n_fs(bin_id):\n    # bin_id: 'filesystem-v2:workflows/WF/executions/temp/binary_data/UUID'\n    if not (isinstance(bin_id, str) and bin_id.startswith('filesystem-v2:')):\n        return b''\n    rel = bin_id[len('filesystem-v2:'):]\n    fpath = '/home/node/.n8n/storage/' + rel\n    try:\n        sz = os.path.getsize(fpath)\n        fd = os.open(fpath, os.O_RDONLY)\n        data = os.read(fd, sz)\n        os.close(fd)\n        return data\n    except Exception:\n        return b''\n\nif _payload_field == 'zip_b64':\n    try:\n        raw_bytes = base64.b64decode(body['zip_b64'] or '')\n    except Exception as e:\n        return _reject(f'base64 decode failed: {e}', fmt)\nelif _payload_field in ('csv_text', 'text'):\n    raw_bytes = (body.get(_payload_field) or '').encode()\n    filename = filename or 'paste.txt'\nelif _payload_field == 'data':\n    d = body['data']\n    raw_bytes = json.dumps(d).encode() if isinstance(d, (dict, list)) else str(d).encode()\nelif binary:\n    # binary: {'file': {'mimeType':..,'data':'filesystem-v2','id':'filesystem-v2:..','fileName':..}}\n    bin_obj = None\n    if isinstance(binary, dict):\n        if 'mimeType' in binary or ('data' in binary and 'id' in binary):\n            bin_obj = binary  # flat (older n8n)\n        else:\n            for v in binary.values():\n                if isinstance(v, dict):\n                    bin_obj = v\n                    break\n    if isinstance(bin_obj, dict):\n        if not filename:\n            filename = bin_obj.get('fileName', '') or bin_obj.get('name', '')\n        data_val = bin_obj.get('data', '')\n        bin_id = bin_obj.get('id', '')\n        if data_val and data_val != 'filesystem-v2' and not data_val.startswith('filesystem-v2:'):\n            try:\n                pad = (4 - len(data_val) % 4) % 4\n                raw_bytes = base64.b64decode(data_val + '=' * pad)\n            except Exception:\n                raw_bytes = b''\n        else:\n            raw_bytes = _read_n8n_fs(bin_id)\n\n# An explicit payload field that produced nothing is a failed upload, not an\n# empty one: report it instead of continuing into a 0-entity \"success\".\nif _payload_field and not raw_bytes:\n    return _reject(\n        f\"upload field '{_payload_field}' was present but carried no data\",\n        'empty')\n\nif raw_bytes and len(raw_bytes) > MAX_UPLOAD_BYTES:\n    return _reject(\n        f'upload too large ({len(raw_bytes)} bytes > {MAX_UPLOAD_BYTES})',\n        fmt or 'oversize')\n\nif not fmt and raw_bytes:\n    fmt = detect_format(raw_bytes, filename)\n\n# Bytes beat prose. Only the weak verdicts (text / json / zip_unknown) are open to\n# the analyst's context, and hint_format still requires the payload to corroborate\n# the hint -- so \"process list\" typed above an nmap paste stays nmap.\nif raw_bytes and context and fmt in WEAK_FORMATS:\n    fmt = hint_format(context, raw_bytes, fmt)\n\n# A password-protected archive parses to zero nodes no matter which format it\n# was detected as. Catch it before the pipeline runs, while the ack can still\n# report it -- see zip_encryption() in upload_router.\n_enc, _total = zip_encryption(raw_bytes) if raw_bytes else (0, 0)\nif _total and _enc == _total:\n    return _reject(\n        f'archive is password-protected: all {_total} files inside are encrypted, '\n        f'so nothing could be read. Detected as {fmt!r} from the member names '\n        f'only. Re-upload the output zipped WITHOUT a password.',\n        fmt)\n\n# Persist bytes to the shared drop mount and pass only the PATH downstream.\n# Multi-MB base64 payloads passed between n8n code nodes choke the runner/broker.\nDROP_DIR = '/tmp/spotter_ingest'  # runner-writable (uid 1000)\nfile_path = ''\nif raw_bytes:\n    try:\n        os.makedirs(DROP_DIR, exist_ok=True)\n\n        # Best-effort cleanup of stale temp files only; do not delete active uploads.\n        now = time.time()\n        for _old in glob.glob(f'{DROP_DIR}/_ingest_*'):\n            try:\n                if now - os.path.getmtime(_old) > 3600:\n                    os.remove(_old)\n            except Exception:\n                pass\n\n        safe = ''.join(ch if (ch.isalnum() or ch in '._-') else '_' for ch in (filename or 'upload'))\n        file_path = f'{DROP_DIR}/_ingest_{uuid.uuid4().hex}_{safe}'\n        _fd = os.open(file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)\n        os.write(_fd, raw_bytes)\n        os.close(_fd)\n    except Exception as _e:\n        return _reject(f'temp write failed: {_e}', fmt)\n\nreturn [{'json': {\n    'file_path': file_path,\n    'filename': filename,\n    'detected_format': fmt,\n    'sketch_id': sketch_id,\n    'size': len(raw_bytes),\n    'context': context,\n    'accepted': True,\n    # Partially-encrypted archives still parse; route_bytes reports what it\n    # skipped. Only a wholly unreadable one is rejected above.\n    'errors': ([f'{_enc} of {_total} files in this archive are password-protected '\n                f'and were skipped'] if _enc else []),\n}}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000002",
+      "name": "Detect Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-rejected",
+                    "leftValue": "={{ $json.accepted === false }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "rejected"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-sharphound",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "sharphound",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sharphound"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-nmap",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "nmap",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "nmap"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-amass",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "amass",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "amass"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-csv",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "csv",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "csv"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-cobalt",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "cobalt",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cobalt"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-cobalt_log",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "cobalt_log",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cobalt_log"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-json",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "json",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "json"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-pingcastle",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "pingcastle",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pingcastle"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-process_list",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "process_list",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "process_list"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-cloudschism",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "cloudschism",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cloudschism"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-nessus",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "nessus",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "nessus"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fmt-eyewitness",
+                    "leftValue": "={{ $json.detected_format }}",
+                    "rightValue": "eyewitness",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "eyewitness"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "text"
+        }
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000003",
+      "name": "Route by Format",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Parse and ingest via upload_router (handles all format-specific logic)\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nfmt = item.get('detected_format', 'text')\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', ''), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\n# Strip the bulky nodes/edges arrays before returning \u2014 a ~40MB node output\n# overwhelms n8n's inter-node serialization and destabilises the execution.\n# Downstream (Launch SPOTTER Flow) only needs counts + ingest status.\nsummary = {k: v for k, v in result.items() if k not in ('nodes', 'edges')}\nsummary['sketch_id'] = sketch_id\nreturn [{'json': summary}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000004",
+      "name": "Parse SharpHound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'scan.xml'), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000005",
+      "name": "Parse nmap",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'amass.txt'), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000006",
+      "name": "Parse Amass",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'targets.csv'), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000007",
+      "name": "Parse CSV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'data.json'), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000008",
+      "name": "Parse JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# PingCastle AD health check (ad_hc_<domain>.xml / .json) -> Flowsint.\n# upload_router.route_bytes() delegates to pingcastle_parser and, when ingesting,\n# first checks that the ADRisk custom type is registered: an unresolvable nodeType\n# makes GET /graph return HTTP 500 for the WHOLE sketch, so risk nodes are dropped\n# (with an error in `errors`) rather than taking the campaign's graph offline.\n# Run scripts/register_pingcastle_type.py --apply once per install to enable them.\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\n\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'ad_hc_report.xml'),\n                     ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\n\n# Drop the bulky nodes/edges arrays before returning; downstream only needs\n# counts, ingest status and the report summary (scores + top risk rules).\nsummary = {k: v for k, v in result.items() if k not in ('nodes', 'edges')}\nsummary['sketch_id'] = sketch_id\nreport = summary.get('report') or {}\nsummary['domain'] = report.get('domain', '')\nsummary['pingcastle_scores'] = report.get('scores', {})\nsummary['high_risk_rules'] = report.get('high_risk_rules', 0)\nreturn [{'json': summary}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000012",
+      "name": "Parse PingCastle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Plain text / paste \u2014 route through LLM entity extraction\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\n# This is the switch's fallback output, so it also receives Detect Format's error\n# items (empty payload, oversize, temp-write failure). Those carry no bytes --\n# short-circuit rather than pay for an LLM extraction on nothing.\nif item.get('error') or not raw:\n    return [{'json': {\n        'format': item.get('detected_format', 'empty'),\n        'nodes_count': 0,\n        'edges_count': 0,\n        'ingestion': None,\n        'ingest_ok': False,\n        'errors': [item.get('error') or 'upload carried no bytes'],\n        'sketch_id': sketch_id,\n    }}]\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename='paste.txt', ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000009",
+      "name": "Parse Text (LLM)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Auto-launch enrichment and attack path analysis after any successful ingest.\n# 1. Queries Flowsint for all Individual node IDs and launches the SPOTTER flow.\n# 2. Fires the n8n enrichment orchestrator (WF03) for Gravatar/breach/Maigret.\n# 3. Fires the n8n attack path analyzer (WF04) to score all paths.\nimport sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nflow_id   = os.environ.get('SPOTTER_FLOW_ID', '63c06ea5-558a-4c01-94e8-07dc59d1b675')\napi_url   = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api:5001').rstrip('/')\napi_key   = os.environ.get('FLOWSINT_API_KEY', '')\nn8n_base  = os.environ.get('N8N_WEBHOOK_BASE_URL', 'http://localhost:5678').rstrip('/')\n\nitem = _items[0].get('json', {}) if _items else {}\nnodes_ingested = int(item.get('nodes_count', 0) or 0)\nfmt = item.get('format', 'unknown')\nimport_errors = item.get('errors', [])\ningest_ok = bool(item.get('ingest_ok', nodes_ingested > 0 and not import_errors))\n\nimport urllib.request\nerrors = list(import_errors)  # carry forward any ingestion errors from parse node\n\nif not ingest_ok:\n    return [{'json': {\n        'status': 'skipped',\n        'reason': 'ingest_failed',\n        'nodes_ingested': nodes_ingested,\n        'format': fmt,\n        'errors': errors,\n    }}]\n\ndef _api(method, path, body=None):\n    req = urllib.request.Request(\n        api_url + path,\n        data=json.dumps(body).encode() if body else None,\n        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},\n        method=method,\n    )\n    with urllib.request.urlopen(req, timeout=30) as r:\n        return json.loads(r.read())\n\ndef _n8n_fire(path, payload=None):\n    # Fire-and-forget: these webhooks respond immediately (responseMode: onReceived)\n    req = urllib.request.Request(\n        n8n_base + path,\n        data=json.dumps(payload or {}).encode(),\n        headers={'Content-Type': 'application/json'},\n        method='POST',\n    )\n    try:\n        with urllib.request.urlopen(req, timeout=15) as r:\n            r.read()\n    except Exception:\n        pass\n\n# Get all Individual node IDs currently in the sketch. Read by label rather than\n# through GET /graph: that endpoint is unpaginated (110-235s, ~0.5 GB on an AD-sized\n# sketch, against this node's 30s urllib timeout) and truncates at 100k nodes, so a\n# large import would launch the flow over an arbitrary subset of what it just ingested.\ntry:\n    graph_nodes = fc.get_nodes_by_type('individual', sketch_id=sketch_id, properties=[])\n    individual_ids = [n['id'] for n in graph_nodes if n.get('id')]\nexcept Exception as e:\n    errors.append(f'Flowsint graph query failed: {e}')\n    return [{'json': {\n        'status': 'error',\n        'reason': 'graph_query_failed',\n        'errors': errors,\n        'nodes_ingested': nodes_ingested,\n        'format': fmt,\n    }}]\n\nif not individual_ids:\n    return [{'json': {\n        'status': 'skipped',\n        'reason': 'no Individual nodes in graph after import',\n        'nodes_ingested': nodes_ingested,\n        'import_errors': errors,\n        'format': fmt,\n        'debug': {\n            'sketch_id': sketch_id,\n            'individual_nodes_found': len(graph_nodes),\n        },\n    }}]\n\n# Launch the Flowsint SPOTTER enrichment flow (AD perms, Cobalt beacons, tech stack)\ntask_id = ''\nflow_launched = False\ntry:\n    result = _api('POST', f'/api/flows/{flow_id}/launch', {\n        'node_ids': individual_ids,\n        'sketch_id': sketch_id,\n    })\n    task_id = result.get('id', '')\n    flow_launched = True\nexcept Exception as e:\n    errors.append(f'Flowsint flow launch failed (flow_id={flow_id}): {e}')\n\n# Trigger n8n enrichment orchestrator (Gravatar, breach check, Maigret) on all Individuals\n_n8n_fire('/webhook/enrich-individual', {'sketch_id': sketch_id})\n\n# Trigger n8n attack path analyzer on the full graph\n_n8n_fire('/webhook/attack-path-analyze', {'sketch_id': sketch_id})\n\nreturn [{'json': {\n    'status': 'launched' if flow_launched else 'partial',\n    'task_id': task_id,\n    'individuals_queued': len(individual_ids),\n    'nodes_ingested': nodes_ingested,\n    'format': fmt,\n    'errors': errors,\n}}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000010",
+      "name": "Launch SPOTTER Flow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Call the Titus credential scanner (workflow 11) with the uploaded file.\n# Runs in parallel with the parse+import branch \u2014 does not block the main pipeline.\n# raw_b64 and filename come from the 'Detect Format' node output.\nimport os, json\nimport urllib.request\n\nitem = _items[0].get('json', {}) if _items else {}\nfilename  = item.get('filename', 'upload.bin')\nfmt       = item.get('detected_format', '')\nn8n_base  = os.environ.get('N8N_WEBHOOK_BASE_URL', 'http://localhost:5678')\n\n# Campaign scoping. This node used to read FLOWSINT_SKETCH_ID and nothing else, so\n# every credential WF11 recovered from a web upload was written to the env fallback\n# sketch rather than the campaign the operator uploaded under \u2014 findings for one\n# engagement landing in another graph, with no error anywhere. Detect Format passes\n# sketch_id through on the item; the webhook body is the fallback and the env var\n# only the last resort, matching the sibling parse nodes.\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = item.get('sketch_id') or _sb.get('sketch_id') or sketch_id\n\n# Credential scanning targets text/credential dumps, not AD collection zips or\n# process listings (a tasklist holds no secrets, so scanning one is pure cost).\n# A rejected upload has no readable bytes at all -- nothing to scan.\nif item.get('accepted') is False:\n    return [{'json': {'status': 'skipped', 'sketch_id': sketch_id,\n                      'reason': 'upload rejected before parsing'}}]\n\nif fmt in ('sharphound', 'cloudschism', 'zip_unknown', 'process_list', 'eyewitness'):\n    return [{'json': {'status': 'skipped', 'sketch_id': sketch_id,\n                      'reason': f'format {fmt} not credential-scannable'}}]\n\n# Titus re-encodes the whole file into another webhook. Skip before the read\n# when the file is over the credential-scan cap \u2014 a staged report, or an 80 MB\n# JSON-path file, must not be base64'd back onto the wire.\n_cred_max = int(os.environ.get('SPOTTER_CRED_SCAN_MAX_BYTES', str(10 * 1024 * 1024)))\nif int(item.get('size') or 0) > _cred_max:\n    return [{'json': {'status': 'skipped', 'sketch_id': sketch_id,\n                      'reason': 'file too large for credential scan'}}]\n\nimport base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and os.path.exists(_fp):\n    _fd = os.open(_fp, os.O_RDONLY)\n    raw_b64 = _b64.b64encode(os.read(_fd, os.path.getsize(_fp))).decode()\n    os.close(_fd)\nelse:\n    raw_b64 = item.get('raw_b64', '')\nif not raw_b64:\n    return [{'json': {'status': 'skipped', 'sketch_id': sketch_id, 'reason': 'no file bytes'}}]\n\nbody = json.dumps({'raw_b64': raw_b64, 'filename': filename, 'sketch_id': sketch_id}).encode()\nreq = urllib.request.Request(\n    f'{n8n_base}/webhook/credential-scan',\n    data=body,\n    headers={'Content-Type': 'application/json'},\n    method='POST',\n)\ntry:\n    with urllib.request.urlopen(req, timeout=180) as r:\n        result = json.loads(r.read())\n    return [{'json': {'status': 'ok', 'sketch_id': sketch_id, 'cred_scan': result}}]\nexcept Exception as e:\n    return [{'json': {'status': 'error', 'sketch_id': sketch_id, 'error': str(e)}}]\n"
+      },
+      "id": "f0600000-0006-0006-0006-000000000011",
+      "name": "Scan Credentials (Titus)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        400
+      ],
+      "continueOnFail": true
+    },
+    {
+      "id": "upload-ack-0001",
+      "name": "Ack Started",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        180,
+        160
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"message\": $json.accepted === false ? \"Upload rejected\" : \"Workflow was started\", \"accepted\": $json.accepted !== false, \"format\": $json.detected_format || \"unknown\", \"filename\": $json.filename || \"\", \"size\": $json.size || 0, \"errors\": $json.errors || [] } }}"
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Process listing (tasklist / Get-Process / beacon ps / ps aux). Reached only\n# when the analyst's Context field says so AND the bytes corroborate it --\n# see hint_format in upload_router.py.\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'processes.txt'), ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\nresult['sketch_id'] = sketch_id\nreturn [{'json': result}]\n"
+      },
+      "id": "f6a7b8c9-0006-0006-0006-000000000014",
+      "name": "Parse Process List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# CloudSchism cloud posture scan (zipped output directory, or one of its\n# JSON exports) -> Flowsint.\n#\n# upload_router.route_bytes() delegates to cloudschism_parser and, when ingesting,\n# first checks that the CloudFinding custom type is registered: an unresolvable\n# nodeType makes GET /graph return HTTP 500 for the WHOLE sketch, so finding nodes\n# are dropped (with an error in `errors`) rather than taking the campaign's graph\n# offline. Run scripts/register_cloudschism_type.py --apply once per install.\n#\n# Only upload_router is imported here. cloudschism_parser is NOT on the runner's\n# external-package allowlist and importing it directly would kill this node before\n# line 1; upload_router reaches it internally, which the static scan does not gate.\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\n\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'cloudschism-scan.zip'),\n                     ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\n\n# Drop the bulky nodes/edges arrays before returning; a large tenant scan can carry\n# tens of thousands of nodes and a ~40MB node output destabilises the execution.\n# Downstream (Launch SPOTTER Flow) only needs counts + ingest status.\nsummary = {k: v for k, v in result.items() if k not in ('nodes', 'edges')}\nsummary['sketch_id'] = sketch_id\nreport = summary.get('report') or {}\nsummary['artifacts_read'] = report.get('sources', [])\nsummary['nodes_by_type'] = report.get('nodes_by_type', {})\nsummary['cloud_provider'] = (report.get('scan') or {}).get('provider', '')\nsummary['findings_ingested'] = report.get('findings_ingested', False)\nsummary['attack_paths_ingested'] = report.get('attack_paths_ingested', False)\nreturn [{'json': summary}]\n"
+      },
+      "id": "spotter-wf06-parse-cloudschism",
+      "name": "Parse CloudSchism",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Nessus / Tenable vulnerability export (CSV) -> Flowsint.\n#\n# upload_router.route_bytes() delegates to nessus_parser and, when ingesting,\n# first checks that the Vulnerability custom type is registered: an unresolvable\n# nodeType makes GET /graph return HTTP 500 for the WHOLE sketch, so the finding\n# nodes are dropped (with an error in `errors`) rather than taking the campaign's\n# graph offline. Run scripts/register_nessus_type.py --apply once per install.\n#\n# Only upload_router is imported here. nessus_parser does not need to be on the\n# runner's external-package allowlist for this node -- upload_router reaches it\n# internally, which the static import scan does not gate. It is allowlisted\n# anyway so scripts/ and other nodes can import it directly.\nimport sys, os, base64\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\n\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'nessus-scan.csv'),\n                     ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\n\n# Drop the bulky nodes/edges arrays before returning; a 100k-row report carries\n# tens of thousands of edges and a multi-MB node output destabilises the\n# execution. Downstream (Launch SPOTTER Flow) only needs counts + ingest status.\nsummary = {k: v for k, v in result.items() if k not in ('nodes', 'edges')}\nsummary['sketch_id'] = sketch_id\nreport = summary.get('report') or {}\nsummary['severity_counts'] = report.get('severity_counts', {})\nsummary['hosts_scanned'] = report.get('hosts', 0)\nsummary['findings'] = report.get('findings', 0)\nsummary['plugins'] = report.get('plugins', 0)\nsummary['cve_count'] = report.get('cve_count', 0)\nsummary['exploitable_findings'] = report.get('exploitable_findings', 0)\nsummary['rows_skipped_info'] = report.get('rows_skipped_info', 0)\nsummary['vuln_nodes_ingested'] = report.get('vuln_nodes_ingested', False)\n# Trimmed: the ack only needs enough to show the operator what landed.\nsummary['top_findings'] = (report.get('top_findings') or [])[:10]\nsummary['top_hosts'] = (report.get('top_hosts') or [])[:10]\n\n# Fire the contextualization pass (WF25) so exploit availability, ATT&CK context\n# and the per-host rollup are ready by the time the operator opens Tech Intel.\n# Fire-and-forget: WF25 acks immediately (responseMode onReceived) and a slow\n# PoC pass must not hold this webhook open. A failure here is NOT an ingest\n# failure -- the findings are already in the graph, just not yet contextualised --\n# so it is reported without touching ingest_ok.\nif result.get('ingest_ok') and report.get('vuln_nodes_ingested'):\n    import json as _json, urllib.request as _url\n    _base = os.environ.get('N8N_WEBHOOK_BASE_URL', 'http://n8n:5678').rstrip('/')\n    try:\n        _req = _url.Request(_base + '/webhook/vuln-context',\n                            data=_json.dumps({'sketch_id': sketch_id}).encode(),\n                            headers={'Content-Type': 'application/json'},\n                            method='POST')\n        with _url.urlopen(_req, timeout=15) as _r:\n            _r.read()\n        summary['context_launched'] = True\n    except Exception as _e:\n        summary['context_launched'] = False\n        summary['errors'] = list(summary.get('errors') or []) + [\n            'vulnerability contextualization was not launched (%s) -- findings are '\n            'in the graph but carry no exploit/ATT&CK context yet; re-run it from '\n            'the Tech Intel tab' % _e]\n\nreturn [{'json': summary}]\n"
+      },
+      "id": "spotter-wf06-parse-nessus",
+      "name": "Parse Nessus",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# EyeWitness web-recon output (zip: Requests.csv + screens/*.png) -> Flowsint.\n#\n# Website is a BUILT-IN Flowsint type, so unlike the Nessus/CloudSchism/PingCastle\n# parsers there is no custom-type registration guard here -- a Website node cannot\n# 500 the sketch as long as its required `url` is present, which the parser\n# enforces (rows without a usable http(s) URL are dropped).\n#\n# Only upload_router is imported here. eyewitness_parser does NOT need to be on\n# the runner's external-package allowlist -- upload_router reaches it internally,\n# which the static import scan does not gate.\nimport sys, os\nsys.path.insert(0, '/data/scripts')\nfrom upload_router import route_bytes\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\n\nitem = _items[0].get('json', {}) if _items else {}\nimport os as _os, base64 as _b64\n_fp = item.get('file_path', '')\nif _fp and _os.path.exists(_fp):\n    _fd = _os.open(_fp, _os.O_RDONLY)\n    raw = _os.read(_fd, _os.path.getsize(_fp))\n    _os.close(_fd)\nelse:\n    raw = _b64.b64decode(item.get('raw_b64', ''))\n\nctx = item.get('context', '')\nresult = route_bytes(raw, filename=item.get('filename', 'eyewitness.zip'),\n                     ingest=True, sketch_id=sketch_id, context=ctx, max_bytes=(int(os.environ.get('SPOTTER_RUNNER_PARSE_MAX_BYTES', str(1024**3))) if item.get('staged') else None), source_path=(item.get('file_path') if item.get('staged') else None))\n\n# Drop the bulky nodes/edges arrays; the ack only needs counts + what landed.\nsummary = {k: v for k, v in result.items() if k not in ('nodes', 'edges')}\nsummary['sketch_id'] = sketch_id\nreport = summary.get('report') or {}\nsummary['hosts'] = report.get('hosts', 0)\nsummary['with_screenshot'] = report.get('with_screenshot', 0)\nsummary['with_default_creds'] = report.get('with_default_creds', 0)\nsummary['high_value'] = report.get('high_value', 0)\nsummary['by_category'] = report.get('by_category', {})\n\nreturn [{'json': summary}]\n"
+      },
+      "id": "spotter-wf06-parse-eyewitness",
+      "name": "Parse EyeWitness",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        900
+      ]
+    }
+  ],
+  "connections": {
+    "Upload Webhook": {
+      "main": [
+        [
+          {
+            "node": "Detect Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Format": {
+      "main": [
+        [
+          {
+            "node": "Ack Started",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Format": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Parse SharpHound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse nmap",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Amass",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse CSV",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse JSON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse PingCastle",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Process List",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse CloudSchism",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Nessus",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse EyeWitness",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Text (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse SharpHound": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse nmap": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Amass": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CSV": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Text (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ack Started": {
+      "main": [
+        [
+          {
+            "node": "Route by Format",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scan Credentials (Titus)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse PingCastle": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Process List": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CloudSchism": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Nessus": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse EyeWitness": {
+      "main": [
+        [
+          {
+            "node": "Launch SPOTTER Flow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "cfa019a7-ac47-462d-97a9-ff2f76a2c8ea",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "Upload endpoint: POST http://n8n:5678/webhook/upload\nResponds immediately (202 Accepted) \u2014 import runs in background (~5 min for large ZIPs).\nJSON body examples:\n  SharpHound ZIP: multipart file upload\n  CSV:            {\"csv_text\": \"username,email\\njdoe,...\", \"filename\": \"users.csv\"}\n  nmap XML:       {\"zip_b64\": \"<base64-xml>\", \"filename\": \"scan.xml\"}\n  PingCastle:     {\"zip_b64\": \"<base64-xml>\", \"filename\": \"ad_hc_corp.local.xml\"}\n  Nessus CSV:     {\"csv_text\": \"Plugin ID,CVE,Risk,Host,...\", \"filename\": \"scan.csv\"}\n  Plain text:     {\"text\": \"nmap output or paste...\", \"filename\": \"paste.txt\"}\nCheck Flowsint graph to verify import completed.\nNessus route requires scripts/register_nessus_type.py --apply; without it the Vulnerability nodes are dropped and hosts/technologies still ingest. On success it fires WF25 (/webhook/vuln-context) to attach exploit availability and roll findings up onto the hosts."
+  },
+  "id": "spotter-workflow-06",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Upload"
+    }
+  ]
+}

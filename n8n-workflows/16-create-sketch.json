@@ -1,0 +1,93 @@
+{
+  "name": "16 - Create Campaign Sketch",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "create-sketch",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0016-0016-0016-000000000001",
+      "name": "Create Sketch Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "create-sketch"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Provision a dedicated Flowsint sketch for a SPOTTER campaign so each\n# engagement's ingested data stays isolated in its own graph.\n# Returns {sketch_id, investigation_id, campaign_id} or {error, sketch_id:''}.\ntry:\n    import sys, os, json\n    sys.path.insert(0, '/data/scripts')\n    import flowsint_client as fc\n    import spotter_campaign_acl as acl\n\n    item = _items[0].get('json', {}) if _items else {}\n    body = item.get('body', item) if isinstance(item.get('body'), dict) else item\n\n    campaign_id   = str(body.get('campaign_id', '') or '')\n    campaign_name = str(body.get('campaign_name', '') or campaign_id or 'SPOTTER Campaign')\n\n    # Defence in depth for the per-user campaign cap. WF18 is the authoritative\n    # enforcement point, but provisioning happens on a separate call, so without\n    # this check a client that ignored a quota_exceeded response would still\n    # leave an orphan sketch behind on every attempt.\n    user = acl.caller(_items)\n    if not user:\n        return [{'json': {'error': 'unauthenticated', 'sketch_id': ''}}]\n    _camps = acl.read_campaigns()\n    _existing = next((c for c in _camps if str(c.get('id')) == campaign_id), None)\n    if _existing is None or not acl.can_write(_existing, user):\n        _quota = acl.quota_state(_camps, user)\n        if _quota['remaining'] <= 0:\n            return [{'json': {'error': 'campaign limit reached', 'quota_exceeded': True,\n                              'quota': _quota, 'sketch_id': ''}}]\n\n    def _id(obj):\n        # Flowsint objects expose their id as 'id' (fall back to '_id').\n        if isinstance(obj, dict):\n            return obj.get('id') or obj.get('_id') or ''\n        return ''\n\n    # Resolve the single investigation that groups all SPOTTER campaign sketches.\n    # Find-or-create by name so no extra env/config wiring is required.\n    inv_name = 'SPOTTER Campaigns'\n    inv_id = ''\n    try:\n        for inv in (fc.list_investigations() or []):\n            if str(inv.get('name', '')).strip().lower() == inv_name.lower():\n                inv_id = _id(inv)\n                break\n    except Exception as e:\n        # Non-fatal: fall through to create.\n        pass\n    if not inv_id:\n        inv_id = _id(fc.create_investigation(inv_name, 'SPOTTER per-campaign sketch container'))\n    if not inv_id:\n        return [{'json': {'error': 'could not resolve or create investigation', 'sketch_id': ''}}]\n\n    sketch = fc.create_sketch(campaign_name, inv_id, f'SPOTTER campaign {campaign_id}'.strip())\n    sketch_id = _id(sketch)\n    if not sketch_id:\n        return [{'json': {'error': 'sketch creation returned no id', 'raw': str(sketch)[:300], 'sketch_id': ''}}]\n\n    return [{'json': {'sketch_id': sketch_id, 'investigation_id': inv_id, 'campaign_id': campaign_id}}]\nexcept Exception as e:\n    return [{'json': {'error': str(e)[:400], 'sketch_id': ''}}]\n"
+      },
+      "id": "e7f8a9b0-0016-0016-0016-000000000002",
+      "name": "Provision Sketch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0016-0016-0016-000000000003",
+      "name": "Return Sketch",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Create Sketch Webhook": {
+      "main": [
+        [
+          {
+            "node": "Provision Sketch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Provision Sketch": {
+      "main": [
+        [
+          {
+            "node": "Return Sketch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e7f8a9b0-0016-0016-0016-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/create-sketch {campaign_id, campaign_name} - Creates a dedicated Flowsint sketch for a SPOTTER campaign (find-or-create the 'SPOTTER Campaigns' investigation, then create the sketch). Returns {sketch_id, investigation_id, campaign_id} or {error, sketch_id:''}. Underpins per-campaign data isolation."
+  },
+  "id": "spotter-workflow-16",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

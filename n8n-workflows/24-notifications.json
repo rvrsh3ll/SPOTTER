@@ -1,0 +1,96 @@
+{
+  "name": "24 - Notifications",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "a0b1c2d3-0024-0024-0024-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/notifications {action:'list'|'mark_read', campaign_id, limit?, since?, ids?, all?} - Feed behind the SPOTTER header ticker. On 'list' it takes a rate-limited lease and sweeps the campaign graph for anything new (high-value attack paths from WF04, C2 agent status transitions, FlareBreach records, enricher alert tags, open CloudAsset buckets from WF13), then returns the newest notifications with per-operator read state. No producer workflow emits into this - the sweep derives everything from nodes those workflows already write, so WF01/04/09/13/21 are untouched. Storage is (:SpotterMeta:SpotterNotification) nodes: dual-labelled so WF07's orphan sweep (guarded AND NOT n:SpotterMeta) cannot delete the feed, and carrying NO sketch_id so an unresolvable nodeType can never 500 a sketch. sketch_id is derived from the campaign registry, never from the request body, so one operator cannot sweep another's graph. Returns {notifications:[{id,ts,kind,severity,title,detail,target_label,target_kind,target_id,campaign_id,read}], unread, swept, created, generated_at, errors}. All logic lives in scripts/spotter_notify.py."
+  },
+  "id": "spotter-workflow-24",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Notifications"
+    }
+  ],
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "notifications",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a0b1c2d3-0024-0024-0024-000000000001",
+      "name": "Notifications Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "notifications"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys\nsys.path.insert(0, '/data/scripts')\n\n# Hard import on purpose. spotter_notify is on the runner's import allowlist\n# (N8N_RUNNERS_EXTERNAL_ALLOW in n8n-task-runners.json) and is mounted at\n# /data/scripts, so a failure here is a real deployment fault and should be\n# loud rather than silently serving an empty feed forever.\nimport spotter_notify as notify\n\n# Everything after the import is defensive. This endpoint is polled once a\n# minute by every open browser, so a runtime fault has to degrade to an empty\n# feed -- a 500 here would paint an error across the header of every operator's\n# dashboard, which is worse than showing no news. handle() already swallows its\n# own errors and reports them in `errors`; this is the backstop for the ones it\n# cannot anticipate.\ntry:\n    result = notify.handle(_items)\nexcept Exception as exc:\n    result = {\n        'notifications': [],\n        'unread': 0,\n        'errors': [str(exc)[:200].replace('\\n', ' ')],\n    }\n\nreturn [{'json': result}]\n"
+      },
+      "id": "a0b1c2d3-0024-0024-0024-000000000002",
+      "name": "Sweep And List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a0b1c2d3-0024-0024-0024-000000000003",
+      "name": "Return Notifications",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Notifications Webhook": {
+      "main": [
+        [
+          {
+            "node": "Sweep And List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sweep And List": {
+      "main": [
+        [
+          {
+            "node": "Return Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

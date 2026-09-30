@@ -1,0 +1,93 @@
+{
+  "name": "07 - Clear Graph",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clear-graph",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0007-0007-0007-000000000001",
+      "name": "Clear Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "clear-graph"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json, base64\nsys.path.insert(0, '/data/scripts')\nimport requests as req\n\nsketch_id = os.environ.get('FLOWSINT_SKETCH_ID', '')\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\nsketch_id = _sb.get('sketch_id') or sketch_id\n\n# Clearing a graph is irreversible, so verify the caller may write this\n# campaign rather than trusting the sketch_id in the body. Sketches that belong\n# to no registry campaign (out-of-band ingests, admin tooling) are still\n# allowed -- see spotter_campaign_acl.can_access_sketch.\nimport spotter_campaign_acl as acl\n_user = acl.caller(_items)\nif not _user:\n    return [{'json': {'error': 'unauthenticated', 'deleted_nodes': 0, 'deleted_relationships': 0}}]\nif not acl.can_access_sketch(acl.read_campaigns(), sketch_id, _user):\n    return [{'json': {'error': 'not authorised for this campaign',\n                      'deleted_nodes': 0, 'deleted_relationships': 0}}]\n\nwant_delete_sketch = bool(_sb.get('delete_sketch'))\nreconcile_orphans = bool(_sb.get('reconcile_orphans'))\napi_url   = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api:5001')\napi_key   = os.environ.get('FLOWSINT_API_KEY', '')\nneo_url   = os.environ.get('NEO4J_HTTP_URL', 'http://flowsint-neo4j-prod:7474').rstrip('/')\nneo_user  = os.environ.get('NEO4J_USER', 'neo4j')\nneo_pass  = os.environ.get('NEO4J_PASSWORD', '')\nheaders   = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}\n\ndeleted_nodes  = 0\ndeleted_rels   = 0\nneo4j_purged   = 0\norphans_purged = 0\nerrors = []\n\n# Neo4j HTTP helper - available whenever a password is configured (the orphan\n# sweep below needs it even when no sketch_id was resolved).\nneo_headers = None\nif neo_pass:\n    neo_auth = base64.b64encode(f'{neo_user}:{neo_pass}'.encode()).decode()\n    neo_headers = {'Authorization': f'Basic {neo_auth}', 'Content-Type': 'application/json'}\ndef _cypher(stmt, params=None):\n    r = req.post(f'{neo_url}/db/neo4j/tx/commit', headers=neo_headers,\n                 json={'statements': [{'statement': stmt, 'parameters': params or {}}]}, timeout=120)\n    r.raise_for_status()\n    d = r.json()\n    if d.get('errors'):\n        raise RuntimeError(str(d['errors'])[:300])\n    return d\n\n# 1) Authoritative Neo4j purge FIRST. This is the durable, scalable clear: a\n#    scoped DETACH DELETE handles million-edge graphs in seconds, whereas the\n#    Flowsint API path (step 2) must fetch AND delete every id by list and does\n#    NOT scale - reading /graph on a large sketch exceeds the HTTP read timeout\n#    (that timeout used to surface as a hard \"Clear failed\" even though the purge\n#    below succeeds). Running the hard purge first also means the API /graph read\n#    that follows returns an EMPTY graph instantly, so the sync step never blocks.\n#    Scoped to THIS sketch (every Flowsint node/rel carries a sketch_id property)\n#    so clearing one campaign never touches another campaign's graph.\nif neo_pass and sketch_id:\n    try:\n        for _ in range(500):\n            d = _cypher('MATCH (n {sketch_id:$sid}) WITH n LIMIT 20000 DETACH DELETE n RETURN count(n) AS d', {'sid': sketch_id})\n            cnt = d['results'][0]['data'][0]['row'][0]\n            neo4j_purged += cnt\n            if cnt == 0:\n                break\n    except Exception as e:\n        errors.append(f'neo4j purge: {e}')\nelif not sketch_id:\n    errors.append('no sketch_id resolved - Neo4j purge skipped (refusing to purge unscoped)')\nelse:\n    errors.append('NEO4J_PASSWORD not set - Neo4j NOT purged; clear is not durable')\n\n# 2) Flowsint API delete - the degraded fallback, and ONLY that.\n#    It is not a \"sync to a second store\": DELETE /nodes and /relationships are soft\n#    deletes (SET n.deleted_at) against the very same Neo4j the step above already\n#    hard-purged, so after a successful purge this enumerate-then-delete pass has\n#    nothing left to find. It used to run unconditionally, which meant every clear\n#    paid for a full GET /graph -- the unpaginated endpoint that takes 110-235s on an\n#    AD-sized sketch -- to discover an empty graph. Now it runs only when the Neo4j\n#    purge could not (no NEO4J_PASSWORD), which is the one case where the API path is\n#    the only way to clear anything.\n#    NEVER fatal: a slow or failed sync must not mask a successful durable purge,\n#    so its errors are tagged '(non-fatal)' and the frontend ignores them when the\n#    Neo4j purge succeeded.\nif sketch_id and not neo_pass:\n    try:\n        resp = req.get(f'{api_url}/api/sketches/{sketch_id}/graph', headers=headers, timeout=90)\n        resp.raise_for_status()\n        graph = resp.json()\n        rel_ids  = [r['id'] for r in graph.get('rls', []) if r.get('id')]\n        node_ids = [n['id'] for n in graph.get('nds', []) if n.get('id')]\n        if rel_ids:\n            try:\n                req.delete(f'{api_url}/api/sketches/{sketch_id}/relationships', headers=headers,\n                           json={'relationshipIds': rel_ids}, timeout=120).raise_for_status()\n                deleted_rels = len(rel_ids)\n            except Exception as e:\n                errors.append(f'delete_relationships (non-fatal): {e}')\n        if node_ids:\n            try:\n                req.delete(f'{api_url}/api/sketches/{sketch_id}/nodes', headers=headers,\n                           json={'nodeIds': node_ids}, timeout=120).raise_for_status()\n                deleted_nodes = len(node_ids)\n            except Exception as e:\n                errors.append(f'delete_nodes (non-fatal): {e}')\n    except Exception as e:\n        errors.append(f'flowsint graph sync (non-fatal): {e}')\n\n# 2b) Orphan reconciliation (opt-in via reconcile_orphans). The scoped purge above\n#     can only reach the ACTIVE sketch. When a sketch is deleted or re-provisioned\n#     outside a scoped clear (Flowsint UI delete, re-provision, a purge that timed\n#     out mid-import), its Neo4j nodes live on under a sketch_id that no future\n#     scoped clear can target -> orphans accumulate forever. This sweep deletes any\n#     Neo4j node whose sketch_id is NOT a currently-live Flowsint sketch. It is safe\n#     for multi-campaign setups: live campaigns are in the set and never touched.\n#     The shared campaign registry node (:SpotterMeta, no sketch_id) is explicitly\n#     excluded (AND NOT n:SpotterMeta) so this sweep never deletes it.\n#     Guard: if the live set can't be read (empty), REFUSE to purge (would wipe all).\nif reconcile_orphans and neo_pass:\n    try:\n        rs = req.get(f'{api_url}/api/sketches', headers=headers, timeout=60)\n        rs.raise_for_status()\n        _sk = rs.json()\n        if isinstance(_sk, dict):\n            _sk = _sk.get('sketches') or _sk.get('data') or []\n        live_ids = [s.get('id') for s in (_sk or []) if isinstance(s, dict) and s.get('id')]\n        if not live_ids:\n            errors.append('orphan reconcile skipped: live sketch set empty (refusing unscoped purge)')\n        else:\n            for _ in range(500):\n                d = _cypher('MATCH (n) WHERE NOT coalesce(n.sketch_id, \"\") IN $live AND NOT n:SpotterMeta WITH n LIMIT 20000 DETACH DELETE n RETURN count(n) AS d', {'live': live_ids})\n                cnt = d['results'][0]['data'][0]['row'][0]\n                orphans_purged += cnt\n                if cnt == 0:\n                    break\n    except Exception as e:\n        errors.append(f'orphan reconcile: {e}')\nelif reconcile_orphans and not neo_pass:\n    errors.append('orphan reconcile skipped: NEO4J_PASSWORD not set')\n\nsketch_deleted = False\nif want_delete_sketch and sketch_id:\n    try:\n        req.delete(f'{api_url}/api/sketches/{sketch_id}', headers=headers, timeout=60).raise_for_status()\n        sketch_deleted = True\n    except Exception as e:\n        errors.append(f'delete_sketch: {e}')\n\nreturn [{'json': {\n    'sketch_id': sketch_id,\n    'deleted_nodes': deleted_nodes,\n    'deleted_relationships': deleted_rels,\n    'neo4j_nodes_purged': neo4j_purged,\n    'orphans_purged': orphans_purged,\n    'sketch_deleted': sketch_deleted,\n    'errors': errors,\n}}]"
+      },
+      "id": "e7f8a9b0-0007-0007-0007-000000000002",
+      "name": "Wipe Sketch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0007-0007-0007-000000000003",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Clear Webhook": {
+      "main": [
+        [
+          {
+            "node": "Wipe Sketch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wipe Sketch": {
+      "main": [
+        [
+          {
+            "node": "Return Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e7f8a9b0-0007-0007-0007-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/clear-graph {sketch_id, delete_sketch?, reconcile_orphans?} - Clears ONE campaign's sketch. Order: (1) authoritative sketch-scoped Neo4j DETACH DELETE (MATCH (n {sketch_id:$sid})) handles million-edge graphs in seconds and is the durable clear; (2) best-effort Flowsint API delete to sync the API index (a no-op after the purge, and NON-FATAL - its errors never fail the clear; this fixes the old 'Clear failed - /graph read timed out' on large sketches). Scoped so clearing one campaign never affects another; refuses to purge if no sketch_id resolves. delete_sketch:true also removes the empty sketch shell. Returns {sketch_id, deleted_nodes, deleted_relationships, neo4j_nodes_purged, orphans_purged, sketch_deleted, errors}."
+  },
+  "id": "spotter-workflow-07",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

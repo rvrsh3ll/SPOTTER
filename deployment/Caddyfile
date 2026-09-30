@@ -1,0 +1,65 @@
+# SPOTTER — Caddy TLS front door (deployment/docker-compose.caddy.yml)
+#
+# One port, 5443, terminating TLS with Caddy's built-in internal CA (this
+# stack has no public DNS to get a real cert for). Dashboard / n8n editor /
+# Flowsint app are distinguished by HOSTNAME, not by path: frontend/nginx.conf
+# deliberately proxies n8n and Flowsint at their server ROOT so neither needs
+# a subpath rewrite, and path-based routing here would reintroduce exactly
+# that problem. Each block below just re-terminates TLS in front of the
+# matching spotter-ui (nginx) server block, which keeps doing
+# auth_request/CORS/routing unchanged.
+#
+# Add the hostnames below to /etc/hosts (pointing at this host's IP) before
+# use. First visit to each will warn until Caddy's internal root CA is
+# trusted -- export it with:
+#   docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt
+
+{
+	admin off
+	# A client connecting to a literal IP sends NO SNI at all (RFC 6066
+	# forbids IP literals in SNI; no client sends one) -- so without this,
+	# Caddy has no cert to present for a no-SNI ClientHello and the TLS
+	# handshake fails outright before any HTTP routing even happens. This
+	# tells Caddy to treat a missing (or unrecognised) SNI as a request for
+	# 127.0.0.1, which IS one of the hostnames below and therefore has a
+	# properly issued internal-CA cert.
+	default_sni 127.0.0.1
+}
+
+{$SPOTTER_DASHBOARD_HOST:spotter.localhost}:{$SPOTTER_CADDY_PORT:5443} {
+	tls internal
+	reverse_proxy spotter-ui:8080
+}
+
+{$SPOTTER_N8N_HOST:n8n.spotter.localhost}:{$SPOTTER_CADDY_PORT:5443} {
+	tls internal
+	reverse_proxy spotter-ui:8081
+}
+
+{$SPOTTER_GRAPH_HOST:graph.spotter.localhost}:{$SPOTTER_CADDY_PORT:5443} {
+	tls internal
+	reverse_proxy spotter-ui:8082
+}
+
+# Open WebUI. Its own 127.0.0.1:3000 stays published for host-side callers
+# (scripts/setup_openwebui.py, scripts/smoke_deploy.py), but that port is not
+# reachable from a browser that gets here through the single forwarded 5443 --
+# which is what the dashboard's Chat link used to aim at. See the :8083 block
+# in frontend/nginx.conf for why the session gate is not in front of it.
+{$SPOTTER_CHAT_HOST:chat.spotter.localhost}:{$SPOTTER_CADDY_PORT:5443} {
+	tls internal
+	reverse_proxy spotter-ui:8083
+}
+
+# Brute Ratel's webhook dialog takes only a bare scheme://host:port -- no
+# hostname flexibility. TLS cert selection for a no-SNI connection like this
+# is handled by the global `default_sni 127.0.0.1` option above; HTTP-layer
+# routing then matches this block normally because the client's actual Host
+# header ("127.0.0.1:PORT") is the literal IP, same as the site address below.
+#
+# Operators must never browse the dashboard at the bare IP: it is reserved
+# for BRc4 check-ins (see the SPOTTER_DASHBOARD_HOST block above instead).
+127.0.0.1:{$SPOTTER_CADDY_PORT:5443} {
+	tls internal
+	reverse_proxy spotter-ui:8099
+}

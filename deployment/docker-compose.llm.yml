@@ -1,0 +1,342 @@
+# SPOTTER — LLM + WebUI overlay (Open WebUI, vLLM, and compatibility gateway)
+#
+# Usage (stack all three compose files together):
+#   scripts/spotter_compose.sh up -d
+#
+# That wrapper is the only supported entry point: it supplies -p spotter, the env
+# file, the LLM/embed profiles and absolute -f paths, with vendor/flowsint's compose
+# file FIRST, and deliberately omits --project-directory.
+#
+# The vLLM service downloads the configured Hugging Face model on first start.
+# Budget a long first boot and watch progress with:
+#   docker logs -f spotter-vllm
+#
+# Then open http://localhost:3000, create an admin account, and import
+# the system prompt + tools from llm/ into Open WebUI's admin panel.
+
+services:
+  # Ollama was removed from this stack on 2026-09-04. vLLM below is the only model
+  # server: it serves VLLM_MODEL to Open WebUI over the OpenAI API, to the operator
+  # dashboard's Prompt tab through Open WebUI, and to the n8n analysis workflows
+  # through llm-gateway. There is no second set of weights any more.
+  #
+  # Why it went, beyond having two servers for one job: Ollama loaded these models
+  # with n_ctx_seq 8192 (no OLLAMA_CONTEXT_LENGTH was ever set) and TRUNCATES a
+  # request past its window instead of refusing it, so the Prompt tab's ~5.6k-token
+  # brief plus one tool result silently lost the earliest messages and the model
+  # answered from a transcript it never received. vLLM refuses instead, which is
+  # loud, and it advertises max_model_len so the client can size a turn up front.
+  #
+  # If you ever restore it: `up --remove-orphans` DELETES a running container whose
+  # service definition is absent, which is how spotter-ollama nearly went in the
+  # 2026-09-03 migration. Re-add the definition before running anything, and note
+  # that Open WebUI keeps ollama.enable / ollama.base_urls in webui.db, where they
+  # override the compose env — the API route is POST /ollama/config/update.
+
+  llm-gateway:
+    build:
+      # Absolute, for the same reason as spotter-auth in docker-compose.flowsint.yml:
+      # a relative context resolves against the compose working directory, which is
+      # the dirname of the FIRST -f file (/root/flowsint) under the multi-file stack
+      # invocation. As "." this never built at all -- "failed to read dockerfile:
+      # open Dockerfile.llm-gateway: no such file or directory".
+      context: ${SPOTTER_HOME}/deployment
+      dockerfile: Dockerfile.llm-gateway
+    container_name: spotter-llm-gateway
+    restart: unless-stopped
+    environment:
+      VLLM_URL: ${VLLM_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+    ports:
+      - "127.0.0.1:8001:8080"
+    depends_on:
+      vllm:
+        condition: service_healthy
+        # Not required, so the project stays valid when SPOTTER_LLM_TIER is
+        # `remote` or `none` and the vllm service is not part of the stack at all.
+        # Without this, compose refuses the whole project with "depends on
+        # undefined service" and a GPU-less host cannot start anything.
+        required: false
+    networks:
+      - flowsint_net
+
+  vllm:
+    # Only started for the local LLM tiers. scripts/spotter_compose.sh reads
+    # SPOTTER_LLM_TIER from .env and passes `--profile llm-local` for
+    # local-large and local-small; for `remote` and `none` this service is simply
+    # not part of the stack, which is what lets SPOTTER run on a host with no GPU.
+    # Launching compose by hand without that flag will skip vLLM -- another reason
+    # to go through the launcher.
+    profiles: ["llm-local"]
+    # The image tag is configurable because vLLM/CUDA compatibility is host-specific.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.17.0}
+    container_name: spotter-vllm
+    restart: unless-stopped
+    environment:
+      # Pin to one GPU. See VLLM_TENSOR_PARALLEL_SIZE in .env: TP>1 deadlocks in
+      # NCCL init on these Ada cards, and the model fits on a single 49 GB card.
+      # GPU1 used to be left to Ollama; since Ollama was removed (2026-09-04) it is
+      # free, and vllm-embed below is what claims it.
+      NVIDIA_VISIBLE_DEVICES: ${VLLM_GPUS:-0}
+    # Docker's default /dev/shm is 64 MB. With --tensor-parallel-size > 1 the
+    # worker processes hand off through shared memory during NCCL init, and 64 MB
+    # is not enough: the workers spin at 100% GPU with the model never loaded and
+    # the healthcheck fails forever (observed 2026-09-03, 5.5h of deadlock). vLLM
+    # requires --ipc=host or an explicit shm-size for multi-GPU serving.
+    shm_size: ${VLLM_SHM_SIZE:-8gb}
+    command:
+      - ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${VLLM_API_KEY}
+      - --tensor-parallel-size
+      - "${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+      - --gpu-memory-utilization
+      - "${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
+      - --max-model-len
+      - "${VLLM_MAX_MODEL_LEN:-49152}"
+      # 256 was never servable and actively harmful. vLLM's own startup log reads
+      # "Maximum concurrency for 49,152 tokens per request: 3.85x" -- the KV budget
+      # hosts about four full-length requests, not 256. Worse, this model is a
+      # Qwen3.5 *hybrid* (48 GatedDeltaNet linear-attention layers + 16 full
+      # attention), and its conv-state cache has one slot per sequence: at 256 the
+      # FULL decode CUDA-graph capture pads to batch 512 and dies on
+      # `assert num_cache_lines >= batch` in causal_conv1d_update, which is why
+      # --enforce-eager below looked load-bearing for so long. 16 captures cleanly.
+      - --max-num-seqs
+      - "${VLLM_MAX_NUM_SEQS:-16}"
+      # Multi-token prediction. The checkpoint ships a complete FP8 MTP layer (22
+      # `mtp.*` weight keys) and vLLM resolves this to the Qwen3_5MTP architecture,
+      # sharing the target model's embeddings and lm_head. Measured 2026-09-08 on
+      # this host: 2.10x single-stream generation, 81% draft acceptance, clean over
+      # a 60-request mixed soak.
+      #
+      # KEEP THIS AT 1. num_speculative_tokens: 2 re-runs the same MTP layer (vLLM
+      # warns about it) and hard-crashes the engine with cudaErrorIllegalAddress ->
+      # EngineDeadError, taking the whole server down mid-request. To turn MTP off
+      # entirely, delete these two lines -- there is no "off" value for the count.
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":${VLLM_SPEC_TOKENS:-1}}'
+      - --no-enable-flashinfer-autotune
+      # --enforce-eager and --disable-custom-all-reduce were removed 2026-09-08.
+      # Both were added as "startup compatibility options for this two-GPU Ada
+      # host" for the TP=2 configuration that was abandoned: at
+      # --tensor-parallel-size 1 there is no all-reduce to disable, and eager mode
+      # only costs CUDA graphs and torch.compile across all 64 layers. Measured
+      # cost of keeping it: decode 15.8 -> 20.7 tok/s (+31%), 63.5 -> 48.4 ms per
+      # token. If graphs ever need to go away again, add `- --enforce-eager` back
+      # here; it does NOT need --max-num-seqs restored to 256.
+      - --reasoning-parser
+      - qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - vllm_model_cache:/root/.cache/huggingface
+    # The standard vLLM image includes Python even when curl is absent.
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import json,urllib.request;
+          r=urllib.request.urlopen(
+          urllib.request.Request('http://127.0.0.1:8000/v1/models',
+          headers={'Authorization':'Bearer ${VLLM_API_KEY}'}),
+          timeout=5);
+          assert json.load(r).get('data')
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      - flowsint_net
+
+  # ── Embedding server ─────────────────────────────────────────────────────
+  # NOT the same process as `vllm` above: one vLLM process serves one runner, and
+  # that one is a generate-runner — POST /v1/embeddings on :8000 is a 404. The RAG
+  # index (mitre/cve/poc/asset/guides, read by tech_context_engine) therefore had
+  # no embedding backend at all after Ollama was removed and silently fell back to
+  # the pure-Python TF-IDF vectoriser.
+  #
+  # NOT STARTED BY DEFAULT — see the `embed` profile. Bring it up deliberately:
+  #   docker compose -p spotter -f <...> --profile embed up -d vllm-embed
+  # then flip VLLM_EMBEDDING_MODE=remote and RECREATE task-runners + open-webui
+  # together. They share the rag_index/ mount, so a runner on `remote` beside an
+  # Open WebUI on `tfidf` will rewrite each other's collections on every query.
+  #
+  # Model choice is load-bearing: mitre_index p95 is ~670 tokens with a 4.7 KB max
+  # and poc_index holds one 64 KB document, so a 512-token embedder would silently
+  # truncate half the ATT&CK corpus. gte-modernbert-base gives 8192 tokens at 768
+  # dims and needs no --trust-remote-code.
+  vllm-embed:
+    profiles: ["embed"]
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.17.0}
+    container_name: spotter-vllm-embed
+    restart: unless-stopped
+    environment:
+      # GPU1 — idle since Ollama was removed. vllm (chat) stays alone on GPU0.
+      NVIDIA_VISIBLE_DEVICES: ${VLLM_EMBED_GPUS:-1}
+    command:
+      # VLLM_EMBED_MODEL, not EMBEDDING_MODEL: this is the model the server
+      # LOADS, while EMBEDDING_MODEL is the name the client SENDS. They were one
+      # variable with two different defaults, so the documented turn-on ("set
+      # EMBEDDING_MODEL") fixed the client and simultaneously repointed the
+      # server -- and the .env hint for it was an Ollama tag vLLM cannot load.
+      - ${VLLM_EMBED_MODEL:-Alibaba-NLP/gte-modernbert-base}
+      - --runner
+      - pooling
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${VLLM_API_KEY}
+      - --gpu-memory-utilization
+      - "${VLLM_EMBED_GPU_MEMORY_UTILIZATION:-0.10}"
+      - --max-model-len
+      - "8192"
+      - --enforce-eager
+    # Published on the host on purpose. Smoke tests and maintenance run from the
+    # host, and a host-side RAGIndexer that cannot reach the SAME backend the
+    # runner uses will rebuild every collection back to TF-IDF.
+    ports:
+      - "127.0.0.1:8100:8000"
+    volumes:
+      - vllm_model_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import json,urllib.request;
+          r=urllib.request.urlopen(
+          urllib.request.Request('http://127.0.0.1:8000/v1/models',
+          headers={'Authorization':'Bearer ${VLLM_API_KEY}'}),
+          timeout=5);
+          assert json.load(r).get('data')
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+    networks:
+      - flowsint_net
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: spotter-open-webui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:8080"
+    volumes:
+      # Unset => the named volume, as before. Set => a bind inside the checkout.
+      # webui.db lives here: accounts, chats, and the model/endpoint overrides
+      # that shadow the environment (see README on OWUI precedence).
+      - ${SPOTTER_OPEN_WEBUI_DATA:-open_webui_data}:/app/backend/data
+      # Tool code runs inside this container and imports tech_context_engine (plus
+      # cve_client / mitre_client / rag_indexer) from /data/scripts, exactly as the
+      # n8n Code nodes do. Without this mount tech_context_tool's CVE/MITRE methods
+      # return "engine unavailable" and technology_tool / dossier_tool silently skip
+      # their CVE + MITRE + composite-risk enrichment. Keep in sync with the same
+      # mount in docker-compose.n8n.yml.
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+      # CVE/MITRE/PoC lookups cache to disk. The clients default to
+      # <scripts>/../.spotter-cache, which would land in the container's ephemeral
+      # layer and re-download the MITRE ATT&CK STIX bundle on every recreate.
+      #
+      # This was a named volume until 2026-08-18. It is now a host bind mount for
+      # two reasons: the task-runners container needs the SAME cache (WF14's
+      # enricher writes what the Tool code here reads, and a second copy would
+      # silently diverge), and scripts/sync_poc_mirror.py refreshes the
+      # PoC-in-GitHub tree from the host, which a named volume makes awkward.
+      # Keep in sync with the identical mount in docker-compose.n8n.yml.
+      #
+      # Absolute-path rule as for SPOTTER_SCRIPTS_DIR. The default is derived from
+      # SPOTTER_HOME; it used to be "../.spotter-cache", which resolved against the
+      # compose working directory (the Flowsint checkout under the multi-file
+      # invocation). Any override of SPOTTER_CACHE_HOST_DIR must be absolute.
+      - ${SPOTTER_CACHE_HOST_DIR:-${SPOTTER_HOME}/.spotter-cache}:/data/spotter-cache
+    environment:
+      # --- No Ollama backend ---
+      # Ollama is gone; this is the only model backend. Never point Open WebUI at
+      # llm-gateway to fill the gap: the gateway is an Ollama-shaped shim for the
+      # n8n workflow callers (.env OLLAMA_URL) and implements only POST /api/chat
+      # and /api/generate. It has no GET /api/tags, so Open WebUI cannot enumerate
+      # models through it; it also hardcodes stream:false, forces
+      # response_format=json_object, and drops the tools array — which would break
+      # the Prompt tab's native tool calling.
+      #
+      # webui.db overrides this env, so flipping it here is not enough on a live
+      # instance: POST /ollama/config/update with ENABLE_OLLAMA_API false.
+      ENABLE_OLLAMA_API: "false"
+      # --- vLLM, over the OpenAI-compatible API ---
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: ${VLLM_URL:-http://vllm:8000/v1}
+      OPENAI_API_KEYS: ${VLLM_API_KEY}
+      # --- Tech context engine (CVE + MITRE ATT&CK + PoC enrichment in Tool code) ---
+      SPOTTER_CACHE_DIR: /data/spotter-cache
+      # Optional: raises the NVD rate limit from one request per 6s to one per 0.6s.
+      NVD_API_KEY: ${NVD_API_KEY:-}
+      # Unset EMBEDDING_URL = rag_indexer falls back to deterministic pure-Python TF-IDF.
+      EMBEDDING_URL: ${EMBEDDING_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Alibaba-NLP/gte-modernbert-base}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      VLLM_EMBEDDING_MODE: ${VLLM_EMBEDDING_MODE:-tfidf}
+      # PoC-in-GitHub mirror lookups. Read-only here; the mirror is synced from
+      # the host by scripts/sync_poc_mirror.py. Defaults to
+      # $SPOTTER_CACHE_DIR/poc-in-github when POC_MIRROR_DIR is empty.
+      POC_MIRROR_DIR: ${POC_MIRROR_DIR:-}
+      POC_MIN_STARS: ${POC_MIN_STARS:-0}
+      POC_MAX_PER_CVE: ${POC_MAX_PER_CVE:-10}
+      # --- WebUI secrets ---
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      WEBUI_AUTH: "true"
+      # --- Flowsint integration (available as env vars inside Tool code) ---
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
+      FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
+      # --- Neo4j HTTP API (for Cypher tool) ---
+      NEO4J_HTTP_URL: ${NEO4J_HTTP_URL:-http://flowsint-neo4j-prod:7474}
+      NEO4J_USER: ${NEO4J_USERNAME:-${NEO4J_USER:-neo4j}}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # Keep chat-tool attack-path scoring aligned with WF04.
+      EXPLOIT_PATH_MAX_BONUS: ${EXPLOIT_PATH_MAX_BONUS:-8}
+      CLOUD_EXPOSURE_MAX_BONUS: ${CLOUD_EXPOSURE_MAX_BONUS:-8}
+      CLOUD_OWNER_MAX_BONUS: ${CLOUD_OWNER_MAX_BONUS:-0}
+      # --- n8n upload webhook ---
+      N8N_UPLOAD_WEBHOOK: ${N8N_WEBHOOK_BASE:-http://n8n:5678}/webhook/upload
+    # No depends_on. This used to wait on llm-gateway, which in turn waits for
+    # vllm to report healthy — so a vLLM that failed to load kept the chat UI on
+    # :3000 from ever being created at all, and the dashboard's Prompt tab showed
+    # "cannot connect". Open WebUI serves its own UI regardless of which backend(s)
+    # it can reach; the model backend is discovered at request time, so it must
+    # start regardless.
+    networks:
+      - flowsint_net
+
+volumes:
+  # vllm_model_cache is deliberately NOT parameterised the way the state mounts
+  # are. It is ~32 GB of re-downloadable Hugging Face weights, and pulling it
+  # into the folder would turn a ~4 GB portable directory into a 36 GB one for
+  # data that `huggingface` will happily fetch again. deployment/migrate-backup.sh
+  # can archive it on demand with --include-models.
+  vllm_model_cache:
+  open_webui_data:
+  # spotter_cache was removed 2026-08-18 — the CVE/MITRE/PoC cache is now the
+  # SPOTTER_CACHE_HOST_DIR bind mount shared with task-runners (see above).
+  # The old volume may still exist on hosts upgraded in place; its contents were
+  # only ever a re-downloadable cache, so it can be dropped once the new mount
+  # is confirmed populated:  docker volume rm spotter_spotter_cache
+
+networks:
+  flowsint_net:
+    external: true
+    name: ${FLOWSINT_NETWORK:-flowsint_network_prod}

@@ -1,0 +1,21 @@
+# SPOTTER Python dependencies
+# Install with: pip install -r requirements.txt
+
+# RAG / ML fallback
+scikit-learn
+
+# HTTP client (used by CVE/MITRE clients and tools)
+requests
+
+# Data validation (used by Flowsint custom types)
+pydantic
+
+# SMB client for cross-platform share enumeration (scripts/shareacl.py)
+pysmb
+
+# LDAP client for Active Directory computer discovery (--computers mode)
+ldap3
+
+# YAML parsing for the compose/allowed-env reachability guard in
+# scripts/check_workflow_regressions.py
+PyYAML

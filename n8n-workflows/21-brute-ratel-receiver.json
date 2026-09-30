@@ -1,0 +1,197 @@
+{
+  "name": "21 - Brute Ratel Badger Receiver",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "brute-ratel",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000001",
+      "name": "Brute Ratel Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "brute-ratel"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport brc4_normalizer as br\n\n# BRc4 POSTs one JSON object per event to the listener webhook URL. n8n parks the\n# parsed body under json.body; fall back to the item itself for a pinned/manual run.\nresults = []\nfor item in _items:\n    j = item.get('json', {}) or {}\n    body = j.get('body') if isinstance(j.get('body'), dict) else j\n    query = j.get('query') or {}\n\n    # Shared secret. BRc4's webhook dialog offers ONE URL field and no header\n    # controls, so the only place a token can ride is the query string, and a\n    # listener can never present the session cookie that gates the other ports.\n    # Its ingress is nginx :8099 -- the one server block without auth_request --\n    # which maps any path to this webhook:\n    #   https://127.0.0.1:8099/?t=<secret>   (via ssh -L from the Ratel server)\n    # That makes this token the only authentication on the endpoint, so an unset\n    # BRC4_WEBHOOK_TOKEN skips the check and leaves it open to anything that can\n    # reach the host's loopback.\n    want = os.environ.get('BRC4_WEBHOOK_TOKEN', '').strip()\n    if want and str(query.get('t', '')) != want:\n        results.append({'json': {'event': 'rejected', '_skip_ingest': True,\n                                 'error': 'bad or missing webhook token'}})\n        continue\n\n    try:\n        norm = br.normalise_webhook(body)\n    except Exception as e:\n        # Never raise: a malformed POST must not take the listener's webhook down.\n        results.append({'json': {'event': 'unknown', '_skip_ingest': True,\n                                 'error': 'normalise failed: ' + str(e)}})\n        continue\n\n    if norm.get('event') == 'unknown':\n        norm['_skip_ingest'] = True\n    results.append({'json': norm})\n\nreturn results\n"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000002",
+      "name": "Normalise Badger Webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# A Brute Ratel listener posts straight to this webhook and cannot be taught to\n# send a campaign's sketch_id, so this used to fall back to FLOWSINT_SKETCH_ID —\n# the throwaway default sketch no campaign reads. Resolve the most recent\n# campaign from the shared registry instead; the env value stays the last resort.\nsketch_id = fc.resolve_campaign_sketch()\n\n# Fetched here, not by an upstream HTTP Request node: that node would run once per\n# item and its response would REPLACE the webhook payload (the bug WF01 carried).\n# Only the three labels this dedup inspects are read: the full-graph endpoint is\n# unpaginated (110-235s on an AD-sized sketch) and truncates at 100k nodes, which\n# on a burst of badger check-ins meant re-creating sessions it failed to see.\ntry:\n    graph_raw = {'nodes': fc.get_nodes_by_type(\n        ['C2Session', 'CobaltBeacon', 'individual'], sketch_id=sketch_id)}\nexcept Exception as e:\n    out = []\n    for item in _items:\n        b = item.get('json', {})\n        b['_skip_ingest'] = True\n        b['error'] = 'graph fetch failed: ' + str(e)\n        out.append({'json': b})\n    return out\n\nexisting_nodes = graph_raw.get('nodes') or graph_raw.get('nds') or []\n\n# individual -> C2Session ownership, keyed by session node id. Read as edges\n# because it is an edge: nothing on the session node records its individual.\nbeacon_owner = {}\ntry:\n    for e in (fc.get_edges_by_type(['HAS_BEACON'], sketch_id=sketch_id) or []):\n        if e.get('target') and e.get('source'):\n            beacon_owner[e['target']] = e['source']\nexcept Exception:\n    # Non-fatal: a missing owner map only costs the USES_TECH edges on this run,\n    # and the next command-output event rebuilds it.\n    pass\n\nexisting_sessions = {}\nexisting_procs = {}\nexisting_individuals = {}\n\nfor n in existing_nodes:\n    ntype = (n.get('nodeType') or (n.get('data') or {}).get('type') or '').lower()\n    props = n.get('nodeProperties') or n.get('data') or {}\n\n    # c2session is current; cobaltbeacon is the pre-migration type.\n    if ntype in ('c2session', 'cobaltbeacon'):\n        skey = props.get('session_key', '')\n        if not skey:\n            sid = props.get('session_id') or props.get('beacon_id') or ''\n            fw = props.get('c2_framework') or 'cobalt_strike'\n            skey = f'{fw}:{sid}' if sid else ''\n        if skey:\n            existing_sessions[skey] = n.get('id')\n            pl = props.get('process_list') or []\n            if isinstance(pl, str):\n                try:\n                    import json as _j\n                    pl = _j.loads(pl)\n                except Exception:\n                    pl = []\n            existing_procs[skey] = pl if isinstance(pl, list) else []\n    elif ntype == 'individual':\n        sam = (props.get('sam_account_name') or props.get('username') or '').lower()\n        if sam:\n            existing_individuals[sam] = n.get('id')\n\nresult = []\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest'):\n        result.append({'json': b})\n        continue\n\n    skey = b.get('session_key') or ''\n    if not skey:\n        sid = b.get('session_id') or ''\n        skey = f\"brute_ratel:{sid}\" if sid else ''\n        b['session_key'] = skey\n\n    b['_existing_session_id'] = existing_sessions.get(skey, '')\n    b['_existing_process_list'] = existing_procs.get(skey, [])\n    _sam = (b.get('sam_account_name') or '').lower()\n    # Fall back to the HAS_BEACON edge. A command-output payload carries a badger\n    # id and nothing else -- no sam_account_name -- so without this route back to\n    # the individual, Create Relationships' Technology/USES_TECH branch is\n    # unreachable on the ONLY event that ever carries a tech_stack. The session\n    # node itself cannot answer this: username is stored on the individual, not\n    # on the C2Session.\n    b['_existing_individual_id'] = (existing_individuals.get(_sam, '')\n                                    or beacon_owner.get(b['_existing_session_id'], ''))\n    result.append({'json': b})\n\nreturn result\n"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000003",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\nfrom c2_common import infer_tech_stack\n\n# A Brute Ratel listener posts straight to this webhook and cannot be taught to\n# send a campaign's sketch_id, so this used to fall back to FLOWSINT_SKETCH_ID —\n# the throwaway default sketch no campaign reads. Resolve the most recent\n# campaign from the shared registry instead; the env value stays the last resort.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\n\ndef _np(props):\n    \"\"\"Prefix an edit_node patch into the nodeProperties namespace.\n\n    add_node nests whatever it is given under nodeProperties.*, but edit_node\n    passes `updates` keys through verbatim, so a bare key lands at the node's\n    TOP level -- a second namespace that get_nodes_by_type, the dossier query and\n    the Technology catalog all read straight past. The write reports success and\n    the value is genuinely in Neo4j, just not where anything looks, which is why\n    an enriched process_list still read as [] and a re-checked-in badger kept its\n    first-contact last_checkin forever. Every other workflow that calls edit_node\n    prefixes the same way (WF09/WF12/WF13).\n    \"\"\"\n    return {'nodeProperties.' + k: v for k, v in props.items()}\n\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest'):\n        results.append({'json': {**b, 'upsert_status': 'skipped'}})\n        continue\n\n    event = b.get('event')\n    session_node_id = b.get('_existing_session_id', '')\n    ind_id = b.get('_existing_individual_id', '')\n    item_errors = []\n\n    # ── Command output: patch the existing session, create nothing ────────────\n    # This event carries only {badger, main_cmd, output}. Without a prior initial\n    # connection there is no host metadata to build a session from, so a missing\n    # node is reported rather than guessed at - the usual cause is that only\n    # \"Badger's Command Output\" is ticked on the listener's webhook.\n    if event == 'command':\n        patch = {}\n        new_procs = b.get('process_list') or []\n        if new_procs:\n            merged = sorted(set(list(b.get('_existing_process_list') or []) + list(new_procs)))\n            patch['process_list'] = merged\n            patch['tech_stack'] = infer_tech_stack(merged)\n        if b.get('is_admin') is True:\n            patch['is_admin'] = True\n\n        if not patch:\n            results.append({'json': {**b, '_ind_id': ind_id, '_session_node_id': session_node_id,\n                                     'upsert_status': 'ok_nothing_to_enrich'}})\n            continue\n        if not session_node_id:\n            results.append({'json': {**b, 'upsert_status': 'no_session_node',\n                                     'upsert_errors': [\"no C2Session node for \" + str(b.get('session_key')) +\n                                                       \" - enable \\\"Badger's Initial Connection\\\" on the listener webhook\"]}})\n            continue\n\n        try:\n            fc.edit_node(session_node_id, _np(patch), sketch_id=sketch_id)\n            status = 'ok_enriched'\n        except Exception as e:\n            status = 'partial'\n            item_errors.append('session_patch_failed: ' + str(e))\n\n        results.append({'json': {**b, '_ind_id': ind_id, '_session_node_id': session_node_id,\n                                 'upsert_status': status, 'upsert_errors': item_errors,\n                                 'tech_stack': patch.get('tech_stack', b.get('tech_stack', []))}})\n        continue\n\n    # ── Initial connection: full Individual + C2Session upsert ────────────────\n    sam = (b.get('sam_account_name') or b.get('username') or 'unknown').split('\\\\')[-1]\n\n    try:\n        ind_props = {\n            'username': b.get('username'),\n            'sam_account_name': sam,\n            'hostname': b.get('hostname'),\n            'source': b.get('c2_framework', 'brute_ratel'),\n            'last_seen': b.get('last_checkin'),\n            'active_beacon': not b.get('is_dead', False),\n        }\n        if not ind_id:\n            # Lowercase: 'individual' is a Flowsint built-in and Neo4j labels are\n            # case-sensitive, with no normalisation in create_node. 'Individual'\n            # created a second, unregistered label that this workflow's own dedup\n            # (which reads 'individual') could never see, so a session never linked\n            # to the SharpHound identity and active_beacon landed on a node the\n            # dossier and Targets tab do not query.\n            node = fc.add_node(\n                label=b.get('username') or sam,\n                node_type='individual',\n                properties=ind_props,\n                sketch_id=sketch_id,\n            )\n            ind_id = node.get('id', '')\n        else:\n            # Same empty-value guard as the session patch below. This individual\n            # is frequently a SharpHound-ingested identity, so a missing b_uid or\n            # an unparseable b_seen must not blank the username / last_seen that\n            # the AD ingest already established.\n            fc.edit_node(\n                ind_id,\n                _np({k: v for k, v in ind_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n    except Exception as e:\n        item_errors.append('individual_upsert_failed: ' + str(e))\n\n    try:\n        session_props = {\n            'c2_framework': b.get('c2_framework', 'brute_ratel'),\n            'session_id': b.get('session_id'),\n            'session_key': b.get('session_key'),\n            'c2_server': b.get('c2_server'),\n            'hostname': b.get('hostname'),\n            'internal_ip': b.get('internal_ip'),\n            'external_ip': b.get('external_ip'),\n            'listener_ip': b.get('listener_ip'),\n            'listener': b.get('listener'),\n            'os_version': b.get('os_version'),\n            'arch': b.get('arch'),\n            'pid': b.get('pid'),\n            'thread_id': b.get('thread_id'),\n            'process_name': b.get('process_name'),\n            'is_admin': b.get('is_admin'),\n            'last_checkin': b.get('last_checkin'),\n            'priority_score': b.get('priority_score'),\n            'process_list': b.get('process_list', []),\n            'tech_stack': b.get('tech_stack', []),\n            'is_dead': b.get('is_dead', False),\n            'is_pivot': b.get('is_pivot'),\n            'pivot_parent': b.get('pivot_parent'),\n            'pivot_channel': b.get('pivot_channel'),\n        }\n        if session_node_id:\n            # Drop empty values before patching an EXISTING session. An initial\n            # connection webhook carries no process list (brc4_normalizer leaves\n            # process_list/tech_stack empty -- BRc4 only reveals processes via a\n            # ps/pslist command output event), and a badger re-sends this same\n            # event on every reconnect. Patching the empty lists in would wipe\n            # whatever the command branch enriched, repeatedly. Only None and []\n            # are dropped: False and 0 are real values (is_dead, priority_score),\n            # and on the create path below the empty lists are kept so the\n            # property exists with the right type from the start.\n            fc.edit_node(\n                session_node_id,\n                _np({k: v for k, v in session_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n        else:\n            node = fc.add_node(\n                label='Badger:' + str(b.get('session_id')) + '@' + str(b.get('hostname')),\n                node_type='C2Session',\n                properties=session_props,\n                sketch_id=sketch_id,\n            )\n            session_node_id = node.get('id', '')\n    except Exception as e:\n        item_errors.append('session_upsert_failed: ' + str(e))\n\n    results.append({'json': {\n        **b,\n        '_ind_id': ind_id,\n        '_session_node_id': session_node_id,\n        'upsert_status': 'ok' if not item_errors else 'partial',\n        'upsert_errors': item_errors,\n    }})\n\nreturn results\n"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000004",
+      "name": "Upsert Individual + Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# A Brute Ratel listener posts straight to this webhook and cannot be taught to\n# send a campaign's sketch_id, so this used to fall back to FLOWSINT_SKETCH_ID —\n# the throwaway default sketch no campaign reads. Resolve the most recent\n# campaign from the shared registry instead; the env value stays the last resort.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\nfor item in _items:\n    b = item.get('json', {})\n    if b.get('_skip_ingest') or b.get('upsert_status') in ('skipped', 'no_session_node'):\n        results.append({'json': {**b, 'rel_status': 'skipped'}})\n        continue\n\n    ind_id = b.get('_ind_id', '')\n    session_node_id = b.get('_session_node_id', '')\n    rel_errors = []\n    edges_created = 0\n\n    # HAS_BEACON, not HAS_C2_SESSION: the graph already uses HAS_SESSION for AD\n    # logon sessions and two edge names one word apart is a trap for the chat LLM.\n    if ind_id and session_node_id:\n        try:\n            fc.create_edge(ind_id, session_node_id, 'HAS_BEACON', sketch_id)\n            edges_created += 1\n        except Exception as e:\n            rel_errors.append('HAS_BEACON: ' + str(e))\n\n    if ind_id:\n        for tech in (b.get('tech_stack') or []):\n            if not tech:\n                continue\n            try:\n                tnode = fc.add_node(\n                    label=tech,\n                    node_type='Technology',\n                    # 'name' is REQUIRED on the built-in Technology type. Flowsint's graph\n                # serializer retries once with invalid fields stripped, but a *missing*\n                # required field cannot be recovered that way, so a single name-less\n                # Technology node makes GET /graph return 500 for the entire sketch.\n                properties={'name': tech, 'source': b.get('c2_framework', 'brute_ratel')},\n                    sketch_id=sketch_id,\n                )\n                tid = tnode.get('id', '')\n                if tid:\n                    fc.create_edge(ind_id, tid, 'USES_TECH', sketch_id)\n                    edges_created += 1\n            except Exception as e:\n                rel_errors.append('USES_TECH[' + str(tech) + ']: ' + str(e))\n\n    # Pivot topology: link a pivoted badger to the session relaying it. Both must\n    # already exist as nodes, so a child that checks in before its parent simply\n    # records the miss - the next check-in from the child creates the edge.\n    if session_node_id and b.get('is_pivot') and b.get('pivot_parent'):\n        parent_key = 'brute_ratel:' + str(b.get('pivot_parent'))\n        try:\n            matches = fc.search_nodes(parent_key, node_type='C2Session', sketch_id=sketch_id) or []\n            parent_id = ''\n            for m in matches:\n                props = m.get('nodeProperties') or m.get('data') or {}\n                if props.get('session_key') == parent_key:\n                    parent_id = m.get('id', '')\n                    break\n            if parent_id:\n                fc.create_edge(parent_id, session_node_id, 'PIVOTS_TO', sketch_id)\n                edges_created += 1\n            else:\n                rel_errors.append('PIVOTS_TO: parent ' + parent_key + ' not in graph yet')\n        except Exception as e:\n            rel_errors.append('PIVOTS_TO: ' + str(e))\n\n    rel_status = 'ok' if not rel_errors else ('partial' if edges_created > 0 else 'error')\n    results.append({'json': {\n        **b,\n        'rel_status': rel_status,\n        'rel_errors': rel_errors[:10],\n        'edges_created': edges_created,\n    }})\n\nreturn results\n"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000005",
+      "name": "Create Relationships",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# BRc4 only needs a 2xx; the body is for operator debugging via n8n executions.\nsummary = []\nfor item in _items:\n    b = item.get('json', {})\n    summary.append({\n        'event': b.get('event'),\n        'session_key': b.get('session_key'),\n        'hostname': b.get('hostname'),\n        'main_cmd': b.get('main_cmd'),\n        'upsert_status': b.get('upsert_status'),\n        'rel_status': b.get('rel_status'),\n        'errors': (b.get('upsert_errors') or []) + (b.get('rel_errors') or []) + ([b['error']] if b.get('error') else []),\n    })\nreturn [{'json': {'ok': True, 'received': len(summary), 'events': summary}}]\n"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000006",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "c3d4e5f6-0021-0021-0021-000000000007",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Brute Ratel Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalise Badger Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Badger Webhook": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "Upsert Individual + Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Individual + Session": {
+      "main": [
+        [
+          {
+            "node": "Create Relationships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Relationships": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c3d4e5f6-0021-0021-0021-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/brute-ratel - Receives Brute Ratel C4 listener webhooks and ingests badgers as C2Session nodes. BRc4 has no REST API (its WebSocket API reference ships outside the manual), so this is a PUSH receiver, not a poller. Enable per listener in Commander: right-click listener -> Webhook -> Enable, tick 'Badger's Initial Connection' (host metadata -> full node) and/or 'Badger's Command Output' (base64 output -> enriches process_list/tech_stack/is_admin from ps/pslist/userinfo). Webhooks are PER LISTENER: a badger on a listener without it enabled is invisible. Writes into the most recent campaign's sketch via resolve_campaign_sketch() - BRc4 cannot send a sketch_id, its dialog has one URL field. Ingress is nginx :8099 (TLS, no auth_request, any path -> this webhook), reached by `ssh -N -L 8099:127.0.0.1:8099` from the Ratel server; Commander URL https://127.0.0.1:8099/?t=<BRC4_WEBHOOK_TOKEN>. Not :5678 (no host port) and not :8080 (a cookie-less POST there is 401'd). Optional shared secret via BRC4_WEBHOOK_TOKEN, checked against ?t= on the URL. b_cookie is deliberately never stored. Paired with WF01 (Cobalt Strike); both emit the same canonical schema from scripts/c2_common.py."
+  },
+  "id": "spotter-workflow-21",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Ingest"
+    }
+  ]
+}

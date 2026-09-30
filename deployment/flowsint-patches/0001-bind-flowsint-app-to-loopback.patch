@@ -1,0 +1,41 @@
+From: SPOTTER <deployment/flowsint-patches>
+Subject: [PATCH] Bind the Flowsint app UI to loopback instead of 0.0.0.0
+
+Upstream publishes the Flowsint SPA as a bare "5173:8080", which Docker binds on
+0.0.0.0. That made it the one genuinely LAN-reachable service in the stack, and
+it is UNAUTHENTICATED in the sense that matters here: SPOTTER's access control is
+an nginx auth_request gate in front of it, which a direct connection to 5173
+walks straight past. Anyone on the same network reached the investigation UI, and
+with it the graph, with no login.
+
+SPOTTER serves this UI through its authenticating gate on http://localhost:8082.
+The direct port stays bound to 127.0.0.1 as a break-glass path.
+
+This cannot be fixed with a compose override: compose APPENDS to the `ports`
+list rather than replacing it, so an overlay would leave the 0.0.0.0 binding in
+place alongside the new one. The upstream file has to be patched.
+
+Apply with:  git -C "$FLOWSINT_HOME" apply <this file>
+scripts/bootstrap.sh does it, and scripts/preflight_env_check.py fails if 5173
+is bound to anything but loopback -- that check is the backstop if this is ever
+skipped or lost to an upstream update.
+
+diff --git a/docker-compose.prod.yml b/docker-compose.prod.yml
+index 9027a99..884bd6c 100644
+--- a/docker-compose.prod.yml
++++ b/docker-compose.prod.yml
+@@ -147,8 +147,12 @@ services:
+     container_name: flowsint-app-prod
+     restart: always
+     ports:
+-      # The only network-facing port. Serves the UI and proxies /api/ to the API.
+-      - "5173:8080"
++      # Loopback only. Upstream publishes a bare "5173:8080" -- i.e. 0.0.0.0,
++      # which would make this the one LAN-reachable service in the stack.
++      # SPOTTER serves this UI through its authenticating nginx gate at
++      # http://localhost:8082; the direct port stays bound to localhost only
++      # as a break-glass path.
++      - "127.0.0.1:5173:8080"
+     volumes:
+       # Override the baked-in nginx.conf to use system resolver (Podman-compatible).
+       - ./flowsint-app/nginx.conf:/etc/nginx/nginx.conf:ro

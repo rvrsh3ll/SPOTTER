@@ -1,0 +1,318 @@
+# SPOTTER — Flowsint service overrides
+#
+# Mounts the SPOTTER custom enrichers into the Flowsint API and Celery
+# containers so they survive container recreates without manual copying.
+# Also adds the Maigret API sidecar (username search) and the LinkedIn
+# Lookup API sidecar (profile discovery by name/company).
+#
+# Include this file in the stack launch command:
+#   scripts/spotter_compose.sh up -d
+#
+# That wrapper is the only supported entry point: it supplies -p spotter, the env
+# file, the LLM/embed profiles and absolute -f paths, with vendor/flowsint's compose
+# file FIRST, and deliberately omits --project-directory.
+
+services:
+
+  # ── SPOTTER authentication sidecar ────────────────────────────────────────
+  # Backs the nginx auth_request gate in frontend/nginx.conf: validates the
+  # session cookie and hands nginx the operator name, which nginx then injects
+  # as X-Spotter-User on every proxied request.  Accounts are created by the
+  # one-time setup wizard, the registration portal (pending until approved), or
+  # scripts/spotter_user.py against the same SQLite file.
+  # NOTE: container_name is pinned because nginx proxies to it by name.
+  spotter-auth:
+    build:
+      # SPOTTER_HOME is the absolute path of this checkout, written to .env by
+      # deployment/setup-secrets.sh. It must be absolute, for the same reason as
+      # the enricher mounts on `api` below: a relative context resolves against
+      # the compose working directory, which is the dirname of the FIRST -f file
+      # (the Flowsint checkout) under the multi-file stack invocation -- so
+      # `../auth-api` becomes a sibling of THAT tree and any `--build` dies with
+      # "unable to prepare context: path not found". Absolute is correct under
+      # either launch procedure. Prefer scripts/spotter_compose.sh, which sets
+      # SPOTTER_HOME itself and cannot get this wrong.
+      context: ${SPOTTER_HOME:?set SPOTTER_HOME in .env — see deployment/setup-secrets.sh}/auth-api
+    container_name: spotter-auth
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    environment:
+      SPOTTER_AUTH_DB: /data/auth.db
+      SPOTTER_SESSION_IDLE_HOURS: ${SPOTTER_SESSION_IDLE_HOURS:-12}
+      SPOTTER_SESSION_MAX_DAYS: ${SPOTTER_SESSION_MAX_DAYS:-7}
+      SPOTTER_LOGIN_MAX_FAILS: ${SPOTTER_LOGIN_MAX_FAILS:-10}
+      SPOTTER_LOGIN_LOCK_MINUTES: ${SPOTTER_LOGIN_LOCK_MINUTES:-15}
+      # Leave false while SPOTTER is served over plain http:// on loopback —
+      # a Secure cookie would never be sent back and login would silently loop.
+      SPOTTER_COOKIE_SECURE: ${SPOTTER_COOKIE_SECURE:-false}
+      # Shared parent of the Caddy vhosts (deployment/Caddyfile) so one login
+      # at the dashboard also authenticates the n8n/graph vhosts -- those are
+      # now different HOSTNAMES, not sibling ports, and a host-only cookie
+      # would not follow across them. Empty = host-only cookie (only correct
+      # if something other than the default Caddy front door is in use).
+      SPOTTER_COOKIE_DOMAIN: ${SPOTTER_COOKIE_DOMAIN:-spotter.localhost}
+      # Host broker socket. The age key is NOT mounted into this container.
+      SPOTTER_SECRET_BROKER_SOCK: /run/spotter/broker.sock
+    volumes:
+      # Bind mount (not a named volume) so scripts/spotter_user.py can manage
+      # accounts from the host without docker exec.
+      - ${SPOTTER_HOME}/deployment/auth-data:/data
+      - /run/spotter:/run/spotter
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7052/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Titus credential-scanner sidecar ──────────────────────────────────────
+  # Wraps the Titus binary (github.com/praetorian-inc/titus) behind a thin
+  # FastAPI endpoint.  n8n workflow 11 calls POST /scan with a multipart file
+  # and sketch_id; receives normalised findings with salted hashes (no plaintext).
+  titus-api:
+    build:
+      # Absolute -- see the note on spotter-auth above.
+      context: ${SPOTTER_HOME}/titus-sidecar
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Maigret username-search sidecar ────────────────────────────────────────
+  maigret-api:
+    build:
+      # Absolute -- see the note on spotter-auth above.
+      context: ${SPOTTER_HOME}/maigret-api
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7050/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── LinkedIn OSINT lookup sidecar ─────────────────────────────────────────
+  # Finds LinkedIn profiles for targets by name, email, and company via
+  # DuckDuckGo search (no API key) or SerpAPI (if SERP_API_KEY is set).
+  # Used by the linkedin_enricher.py plugin enricher.
+  linkedin-api:
+    build:
+      # Absolute -- see the note on spotter-auth above.
+      context: ${SPOTTER_HOME}/linkedin-api
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    environment:
+      - SERP_API_KEY=${SERP_API_KEY:-}
+      - LI_TIMEOUT=15
+      - LI_CONFIDENCE_THRESHOLD=${LINKEDIN_CONFIDENCE_THRESHOLD:-0.40}
+      - LI_FETCH_PROFILE=1
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Egress control-plane sidecar ──────────────────────────────────────────
+  # Backs the Infrastructure tab: a single managed SSH SOCKS tunnel, a single
+  # managed Tor client with per-country entry/exit selection, and the
+  # egress-identity check that tells the operator which IP a sweep will come
+  # from. Neither SOCKS port is published to the host — both are reachable only
+  # from this network, e.g. socks5h://ssh-tunnel-api:9050 for Tor.
+  ssh-tunnel-api:
+    build:
+      # Absolute -- see the note on spotter-auth above.
+      context: ${SPOTTER_HOME}/ssh-tunnel-api
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    environment:
+      - TUNNEL_BIND_HOST=0.0.0.0
+      - TUNNEL_PROXY_HOST=ssh-tunnel-api
+      - TUNNEL_STARTUP_TIMEOUT=6
+      # accept-new | no | yes. 'no' also proceeds when the far end's host
+      # key CHANGED -- the normal case for a redirector that gets rebuilt,
+      # and otherwise a hard 'Host key verification failed' on start.
+      - TUNNEL_HOST_KEY_POLICY=${TUNNEL_HOST_KEY_POLICY:-accept-new}
+      - TUNNEL_API_TOKEN=${TUNNEL_API_TOKEN:-}
+      - TOR_SOCKS_PORT=${TOR_SOCKS_PORT:-9050}
+      - TOR_MAX_COUNTRIES=${TOR_MAX_COUNTRIES:-24}
+      - TOR_STARTUP_TIMEOUT=${TOR_STARTUP_TIMEOUT:-20}
+      # Tried in order; the first that returns a parseable public IP wins. The
+      # first three return the address AND its location in one response, so the
+      # normal path is a single call; ip.me is last because it now serves only
+      # a plain-text address, which is what left the strip without a country.
+      - EGRESS_IP_URLS=${EGRESS_IP_URLS:-https://ifconfig.co/json,https://ipwho.is/,https://api.ipapi.is/,https://ip.me/}
+      # Second hop, only used when the source that answered gave an IP but no
+      # geo. Travels the same proxy as the first hop; set empty to refuse it.
+      - EGRESS_GEO_URL=${EGRESS_GEO_URL:-https://ipwho.is/{ip}}
+      - EGRESS_TIMEOUT=${EGRESS_TIMEOUT:-12}
+      # Both roots are readable for tunnel start; only the upload root is written.
+      # Declared ONCE: this list used to appear twice in this block, and only
+      # YAML's last-wins kept uploaded keys resolvable at /tunnel/start.
+      - TUNNEL_KEY_ROOTS=${TUNNEL_KEY_ROOTS:-/ssh-keys-uploaded,/ssh-keys}
+      # Used when the key path field is left blank. Empty by default: naming a
+      # conventional filename a deployment need not have made a blank field
+      # fail against a path nobody chose. The sidecar falls back to the only
+      # key present, or names the ones that are.
+      - TUNNEL_DEFAULT_KEY_PATH=${TUNNEL_DEFAULT_KEY_PATH:-}
+      - TUNNEL_UPLOAD_KEY_ROOT=${TUNNEL_UPLOAD_KEY_ROOT:-/ssh-keys-uploaded}
+      - TUNNEL_MAX_KEY_BYTES=${TUNNEL_MAX_KEY_BYTES:-65536}
+    volumes:
+      # Keys for the managed SSH SOCKS tunnel, read-only. Defaults to the
+      # invoking user's ~/.ssh -- compose interpolates $HOME here, so this follows
+      # whoever runs the stack rather than naming a fixed account.
+      #
+      # It used to default to the literal "/home/user/.ssh", a path that exists on
+      # no host. Docker does not error on a missing bind source: it CREATES it, as
+      # an empty root-owned directory, and mounts that. So the tunnel silently had
+      # no key at all while everything reported healthy.
+      #
+      # Note this exposes the whole directory to the sidecar, authorized_keys
+      # included. Point SSH_KEY_DIR at a directory holding only the engagement key
+      # if you would rather not.
+      - ${SSH_KEY_DIR:-${HOME}/.ssh}:/ssh-keys:ro
+      # The writable root, and the ONLY one the upload endpoint will write to.
+      # Kept separate from SSH_KEY_DIR on purpose: that one defaults to the
+      # operator's real ~/.ssh, and mounting THAT rw would hand the web UI write
+      # access to their authorized_keys. Repo-local, so the stack stays a single
+      # copyable directory; gitignored as /tunnel-keys/.
+      - ${SPOTTER_TUNNEL_KEYS_DIR:-${SPOTTER_HOME}/tunnel-keys}:/ssh-keys-uploaded:rw
+      # Tor's DataDirectory. Persisted so the guard set survives a restart —
+      # a fresh guard on every container start is itself an opsec signal.
+      - ${SPOTTER_TOR_DATA:-spotter_tor_data}:/var/lib/spotter-tor
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7060/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Flowsint API — enrichers volume-mount + Maigret + LinkedIn env ─────────
+  api:
+    environment:
+      - MAIGRET_API_URL=http://maigret-api:7050
+      - MAIGRET_TIMEOUT=30
+      - MAIGRET_TOP_SITES=150
+      - LINKEDIN_API_URL=http://linkedin-api:7051
+      - LINKEDIN_CONFIDENCE_THRESHOLD=${LINKEDIN_CONFIDENCE_THRESHOLD:-0.40}
+      - LINKEDIN_LOOKUP_TIMEOUT=60
+    volumes:
+      # Absolute on purpose. `../flowsint-custom` resolves against the compose
+      # working directory, which is the dirname of the FIRST -f file
+      # (/root/flowsint) unless --project-directory is passed -- so this used to
+      # bind /root/flowsint-custom/enrichers, an empty directory Docker created on
+      # demand, and no SPOTTER enricher ever loaded. Same trap, and same fix, as
+      # SPOTTER_SCRIPTS_DIR in .env; an absolute path is correct under either
+      # launch procedure.
+      - ${SPOTTER_ENRICHERS_DIR:-${SPOTTER_HOME}/flowsint-custom/enrichers}:/app/flowsint-enrichers/src/flowsint_enrichers/spotter:ro
+      # Shared SPOTTER Python constants/helpers used by custom enrichers.
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+    depends_on:
+      maigret-api:
+        condition: service_healthy
+      linkedin-api:
+        condition: service_healthy
+
+  # ── Celery worker — same enrichers + Maigret + LinkedIn env ───────────────
+  celery:
+    environment:
+      - MAIGRET_API_URL=http://maigret-api:7050
+      - MAIGRET_TIMEOUT=30
+      - MAIGRET_TOP_SITES=150
+      - LINKEDIN_API_URL=http://linkedin-api:7051
+      - LINKEDIN_CONFIDENCE_THRESHOLD=${LINKEDIN_CONFIDENCE_THRESHOLD:-0.40}
+      - LINKEDIN_LOOKUP_TIMEOUT=60
+    volumes:
+      # Absolute on purpose. `../flowsint-custom` resolves against the compose
+      # working directory, which is the dirname of the FIRST -f file
+      # (/root/flowsint) unless --project-directory is passed -- so this used to
+      # bind /root/flowsint-custom/enrichers, an empty directory Docker created on
+      # demand, and no SPOTTER enricher ever loaded. Same trap, and same fix, as
+      # SPOTTER_SCRIPTS_DIR in .env; an absolute path is correct under either
+      # launch procedure.
+      - ${SPOTTER_ENRICHERS_DIR:-${SPOTTER_HOME}/flowsint-custom/enrichers}:/app/flowsint-enrichers/src/flowsint_enrichers/spotter:ro
+      # Shared SPOTTER Python constants/helpers used by custom enrichers.
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+    depends_on:
+      maigret-api:
+        condition: service_healthy
+      linkedin-api:
+        condition: service_healthy
+
+# ── data-tier storage ────────────────────────────────────────────────────────
+# neo4j, postgres and redis are defined in the VENDORED upstream file
+# (vendor/flowsint/docker-compose.prod.yml), which is a pinned checkout this repo
+# does not edit. These blocks re-declare only their storage.
+#
+# This works because Compose merges a service's `volumes` list by TARGET path:
+# an entry here at /data REPLACES upstream's entry at /data rather than being
+# appended next to it. That is NOT true of `ports:`, which concatenates — the
+# reason deployment/flowsint-patches/0001-* has to exist while this does not.
+# Verified against Compose v5.0.2: with the variables unset, the rendered project
+# is byte-identical to upstream's, and the unused top-level declaration is pruned.
+#
+# Leave a variable UNSET and the mount is the named volume it has always been.
+# Set it to an absolute path and the same mount becomes a bind inside the
+# checkout. deployment/setup-secrets.sh makes that choice once per host and
+# creates the directories with the uid each image needs.
+#
+# WARNING, and it is a quiet one: a value like `./data/neo4j` is NOT refused by
+# Docker. Compose resolves it against the project directory — vendor/flowsint,
+# not this repo — creates it, and Neo4j initialises an empty database inside the
+# vendored checkout. scripts/spotter_compose.sh refuses to launch on a relative
+# value, and on an absolute one whose directory does not already exist, because
+# neither failure produces an error at runtime: just an empty campaign list.
+  postgres:
+    volumes:
+      - ${SPOTTER_PG_DATA:-pg_data_prod}:/var/lib/postgresql/data
+
+  redis:
+    volumes:
+      # Target-only on purpose. Upstream gives redis no `volumes:` key at all, so
+      # the image's own `VOLUME /data` creates an ANONYMOUS volume. Unset, this
+      # renders as exactly that anonymous mount and `up -d` reuses the previous
+      # container's, so an existing host is not repointed. Set, the variable
+      # carries "<host path>:/data" and it becomes a bind.
+      - ${SPOTTER_REDIS_DATA:-/data}
+
+  neo4j:
+    volumes:
+      - ${SPOTTER_NEO4J_DATA:-neo4j_data_prod}:/data
+      - ${SPOTTER_NEO4J_LOGS:-neo4j_logs_prod}:/logs
+      - ${SPOTTER_NEO4J_IMPORT:-neo4j_import_prod}:/var/lib/neo4j/import
+      - ${SPOTTER_NEO4J_PLUGINS:-neo4j_plugins_prod}:/plugins
+
+volumes:
+  # Tor's DataDirectory (guard set, consensus cache). Keeping it across restarts
+  # is the point: entry guards are supposed to be sticky.
+  spotter_tor_data:
+  # Upstream's volume names, re-declared here so the `:-` defaults above resolve
+  # even if a future flowsint.lock bump renames or drops one. A duplicate
+  # declaration merges harmlessly; an undeclared name referenced as a default is
+  # a hard "refers to undefined volume" error at launch. Compose prunes whichever
+  # of these the folder layout makes unused.
+  pg_data_prod:
+  neo4j_data_prod:
+  neo4j_logs_prod:
+  neo4j_import_prod:
+  neo4j_plugins_prod:
+
+networks:
+  flowsint_net:
+    external: true
+    name: ${FLOWSINT_NETWORK:-flowsint_network_prod}

@@ -1,0 +1,202 @@
+# ── Secrets & environment ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+# Dated .env snapshots taken before a config change. They carry the same live
+# API keys as .env itself (Flare, Shodan, FOFA, SERP, CS, plus AUTH_SECRET and
+# WEBUI_SECRET_KEY), so they are exactly as sensitive as the file they back up.
+.env.bak*
+.env.*.bak
+# spotter-auth's SQLite store: operator accounts, bcrypt password hashes, and
+# campaign ACL grants. Runtime state bind-mounted into the container, never
+# source. The -wal/-shm siblings leak the same rows, so ignore the directory.
+deployment/auth-data/
+
+# ── Engagement data (never commit real target data) ───────────────────────────
+bhound/
+bhound2/
+*.zip
+# SharpHound drop directory. Keep it (.gitkeep) so the README's documented
+# default SHARPHOUND_DROP_DIR=./sharphound-drops resolves on a fresh clone --
+# note the live value on this host points elsewhere; see README.
+sharphound-drops/*
+!sharphound-drops/.gitkeep
+# EyeWitness web screenshots written by WF06 ingest (client data) live in this
+# directory, but the product README ships a small set of checked-in PNGs. Keep
+# the bind-mount target and explicitly allow the public screenshot set to track.
+screenshots/*
+!screenshots/*.png
+!screenshots/.gitkeep
+# Staging area for oversize uploads that bypass the webhook (ingest_*_large.py).
+# Raw client artefacts: SharpHound archives and .nessus scans. The *.zip rule
+# above catches the archives but NOT a bare .nessus, which is the 500 MB case.
+ingest-staging/
+# Volume snapshots from deployment/migrate-backup.sh. spotter_neo4j_data_prod
+# is the whole engagement graph and spotter_pg_data_prod the n8n credential
+# store, so these are the single most sensitive artefacts the repo can contain.
+spotter-migration/
+# Extracted target PII exports
+extracted_*.csv
+extracted_*.json
+extracted_*
+# Local caches (CVE db, RAG index)
+.spotter-cache/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── VSCode (may contain local MCP tokens or workspace secrets) ────────────────
+.vscode/
+
+# ── Claude Code local settings ────────────────────────────────────────────────
+.claude/
+
+# ── Docker / runtime artefacts ────────────────────────────────────────────────
+*.log
+*.pid
+
+# Conference material is maintained separately from the public product repo.
+/SPOTTER-conference-deck.pdf
+
+# Brute Ratel TLS material is host-specific and is not consumed by this stack.
+/deployment/brc4-tls/
+
+# ── n8n root-level config copy (canonical copy lives in deployment/) ──────────
+/n8n-task-runners.json
+
+# ── Adjacent project checkouts ────────────────────────────────────────────────
+# CloudSchism is a separate tool, not a SPOTTER dependency: scripts/cloudschism_
+# parser.py reads its *output artefacts* off disk and never imports the package.
+# A copy unpacked here once before; this keeps it from being committed if it
+# happens again. Clone it somewhere outside the repo instead.
+CloudSchism-main/
+
+# ── Engagement artefacts dropped OUTSIDE their directory ─────────────────────
+# The rules above scope client data by directory (ingest-staging/, screenshots/,
+# sharphound-drops/). These catch the same artefacts anywhere in the tree,
+# because the way one actually gets committed is being unpacked "just to look at
+# it" somewhere else. Raw scanner output -- the .nessus case the ingest-staging
+# comment above flags as uncovered by *.zip:
+*.nessus
+*.nessus.gz
+# Archive formats SharpHound, EyeWitness and evidence bundles arrive in. *.zip
+# above is the common case; these are the rest.
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+# BloodHound/SharpHound JSON: AD data in the clear -- every user, group, session
+# and ACL. Scoped to the collector's stable suffixes rather than a blanket
+# *.json ON PURPOSE, because n8n-workflows/*.json and
+# deployment/n8n-task-runners.json are source and must stay tracked.
+*_computers.json
+*_users.json
+*_groups.json
+*_domains.json
+*_gpos.json
+*_ous.json
+*_containers.json
+*_certtemplates.json
+*_certauthorities.json
+*_sessions.json
+# Packet and web captures taken during an engagement.
+*.pcap
+*.pcapng
+*.har
+
+# ── Credential stores and key material ───────────────────────────────────────
+# deployment/auth-data/ is ignored as a directory above; these catch a SQLite
+# store anywhere else -- Open WebUI's webui.db (the bcrypt admin row), n8n's
+# database.sqlite (the credential store), a copied cve_cache.db. The -wal/-shm
+# siblings carry the same rows, and deleted rows survive in freed pages until a
+# VACUUM, so the sidecars matter as much as the file itself.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+# Tunnel key material. The operator uploads engagement keys through the
+# Infrastructure tab and they land in tunnel-keys/, which is bind-mounted into
+# ssh-tunnel-api. Ignored by LOCATION, because the name-based rules below cannot
+# catch a key called something like "extravm" -- no extension, no convention.
+# scripts/check_workflow_regressions.py has the content check that does.
+/tunnel-keys/
+
+# Persistent state under the folder layout: the Neo4j graph, Postgres, the n8n
+# database (every workflow AND credential), Open WebUI's webui.db, the Redis
+# broker and Tor's guard set. Ignored by LOCATION, like /tunnel-keys/ above --
+# these are binary database files with no extension convention to match on, and
+# they are the single most sensitive thing the checkout can hold once a host is
+# on that layout. deployment/setup-secrets.sh creates the tree; on a host still
+# using named volumes it does not exist at all.
+/data/
+
+# Vendored upstream checkouts. scripts/bootstrap.sh clones Flowsint to
+# vendor/flowsint at the commit pinned in deployment/flowsint.lock and applies
+# deployment/flowsint-patches/. It is a separate repository with its own
+# history; tracking it here would nest one git repo inside another.
+/vendor/
+
+# Private keys. Deliberately NOT *.crt or *.pub -- those are public halves.
+# These rules are name-based and therefore INCOMPLETE on their own; see the
+# content check named above.
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.kdbx
+
+# ── Editor / tooling local state ─────────────────────────────────────────────
+# .vscode/ and .claude/ are above. JetBrains keeps deployment credentials and
+# SSH targets in its workspace files.
+.idea/
+*.iml
+.direnv/
+nohup.out
+core.*
+
+# ── Compiled BOF objects ─────────────────────────────────────────────────────
+# bof/shareacl/shareacl.x{64,86}.o were tracked once. They are build output, the
+# Makefile reproduces them from shareacl.c with mingw-w64, and a committed COFF
+# object in a public offensive-tooling repo is what AV and repo scanners flag.
+# NOTE the consequence: shareacl.cna resolves the object at RUNTIME via
+# script_resource(), so a fresh clone must `make` in bof/shareacl/ before the
+# Aggressor script will load.
+*.o
+*.obj
+
+# ── Secret tiers (SOPS + age) ────────────────────────────────────────────────
+# Recipient lists and ciphertext are install-local. A public clone must generate
+# its own age identity and .sops.yaml; never force-add a tier to the repository.
+secrets/
+.sops.yaml
+
+# The age identity lives outside the repo ($HOME/.config/sops/age/keys.txt), but
+# never let a copy in.
+*.agekey
+keys.txt

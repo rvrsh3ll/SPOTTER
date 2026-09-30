@@ -1,0 +1,95 @@
+{
+  "name": "18 - Save Campaigns",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "save-campaigns",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0018-0018-0018-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "save-campaigns"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport spotter_campaign_acl as acl\n\n# The single write path for the campaign registry, and therefore the real\n# enforcement point for ownership and the per-user campaign cap. All rules --\n# merge-by-id, \"never drop ids missing from the payload\", owner stamping, quota\n# -- live in scripts/spotter_campaign_acl.merge_save().\ntry:\n    user = acl.caller(_items)\n    if not user:\n        return [{'json': {'campaigns': [], 'error': 'unauthenticated'}}]\n\n    body = acl.body_of(_items)\n    merged, info = acl.merge_save(\n        acl.read_campaigns(), body.get('campaigns'), body.get('delete_id'), user)\n    acl.write_campaigns(merged)\n\n    # Return only what this operator may see -- the client overwrites its local\n    # cache with this array, so returning the full registry would leak it.\n    out = {'campaigns': acl.visible(merged, user), 'user': user}\n    out.update(info)\n    return [{'json': out}]\nexcept Exception as e:\n    return [{'json': {'campaigns': [], 'error': str(e)[:400]}}]\n"
+      },
+      "id": "e7f8a9b0-0018-0018-0018-000000000002",
+      "name": "Registry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0018-0018-0018-000000000003",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registry": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "e7f8a9b0-0018-0018-0018-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/save-campaigns {campaigns:[...]} to upsert-by-id, or {delete_id} to remove one. Persists the SHARED campaign registry to the global Neo4j node (:SpotterMeta {key:'campaigns'}). Upsert never drops ids missing from the payload (deletion is explicit via delete_id) so a stale client cannot wipe another operator's campaigns. Returns the merged {campaigns:[...]}. Paired with list-campaigns (WF17)."
+  },
+  "id": "spotter-workflow-18",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

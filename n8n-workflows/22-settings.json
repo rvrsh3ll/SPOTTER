@@ -1,0 +1,92 @@
+{
+  "name": "22 - Settings",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "settings",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0022-0022-0022-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "settings"
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import sys\nsys.path.insert(0, '/data/scripts')\nimport spotter_settings as st\n\n# Read and write path for the runtime-tunable workflow settings behind the\n# Configuration panel. One webhook serves both so there is a single route, a\n# single active flag and a single deploy to keep in sync -- `action` selects.\n#\n# Reads are open to any authenticated operator: seeing that the bucket probe is\n# capped at 150 is not sensitive, and the panel has to render for everyone.\n# WRITES are admin-only. These values are global -- one operator widening the\n# active probe changes every other operator's scans -- so the write is gated on\n# X-Spotter-Admin, which nginx stamps from the auth subrequest and which\n# proxy_set_header always overwrites. A forged header cannot survive the gate.\n# Fails closed: anything that is not an explicit admin marker is not an admin.\ntry:\n    user = st.caller(_items)\n    if not user:\n        return [{'json': {'ok': False, 'error': 'unauthenticated'}}]\n\n    body = st.body_of(_items)\n    action = str(body.get('action') or 'get').strip().lower()\n    admin = st.is_admin(_items)\n\n    saved = False\n    if action == 'save':\n        if not admin:\n            return [{'json': {'ok': False, 'error': 'admin required',\n                              'user': user, 'is_admin': False}}]\n        values = body.get('values')\n        if not isinstance(values, dict):\n            return [{'json': {'ok': False, 'error': 'values must be an object',\n                              'user': user, 'is_admin': True}}]\n        st.write_settings(values, user)\n        saved = True\n\n    # Always answer with the EFFECTIVE state, never with what was submitted:\n    # write_settings clamps to each setting's bounds and drops blanks back to\n    # the env/default tier, so echoing the request would show the operator a\n    # value the workflows will not actually use.\n    return [{'json': {'ok': True, 'user': user, 'is_admin': admin,\n                      'saved': saved, 'settings': st.effective()}}]\nexcept Exception as e:\n    return [{'json': {'ok': False, 'error': str(e)[:400]}}]\n"
+      },
+      "id": "e7f8a9b0-0022-0022-0022-000000000002",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0022-0022-0022-000000000003",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e7f8a9b0-0022-0022-0022-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/settings {action:'get'} - returns every runtime-tunable workflow setting with its effective value and source (override|env|default). POST {action:'save', values:{NAME:value}} - persists overrides to the single global Neo4j node (:SpotterMeta {key:'settings'}); ADMIN ONLY, gated on the X-Spotter-Admin header stamped by the nginx auth gate. A value of null or '' removes the override and falls back to env/default. All values are clamped to the bounds in scripts/spotter_settings.SETTINGS_SPEC. Backs the Configuration panel in the SPOTTER UI; consumed by WF04, WF11 and WF13."
+  },
+  "id": "spotter-workflow-22",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

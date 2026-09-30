@@ -1,0 +1,95 @@
+{
+  "name": "17 - List Campaigns",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "list-campaigns",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0017-0017-0017-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "list-campaigns"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport spotter_campaign_acl as acl\n\n# Campaign visibility is enforced HERE, not in the browser. The registry is one\n# global node (:SpotterMeta {key:'campaigns'}) and this webhook is the only read\n# path the UI has, so filtering here is what makes a campaign private.\n# Ownership rules live in scripts/spotter_campaign_acl.py (shared with WF16/18).\ntry:\n    user = acl.caller(_items)\n    if not user:\n        # No X-Spotter-User means the request did not arrive through the\n        # authenticating nginx proxy. Fail closed rather than leaking the list.\n        return [{'json': {'campaigns': [], 'error': 'unauthenticated'}}]\n\n    camps = acl.read_campaigns()\n    return [{'json': {\n        'campaigns': acl.visible(camps, user),\n        'user': user,\n        'quota': acl.quota_state(camps, user),\n    }}]\nexcept Exception as e:\n    return [{'json': {'campaigns': [], 'error': str(e)[:400]}}]\n"
+      },
+      "id": "e7f8a9b0-0017-0017-0017-000000000002",
+      "name": "Registry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0017-0017-0017-000000000003",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Registry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registry": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "e7f8a9b0-0017-0017-0017-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/list-campaigns {} - Returns the SHARED campaign registry so every operator hitting the same SPOTTER backend sees the same campaigns. Reads the single global Neo4j node (:SpotterMeta {key:'campaigns'}). Returns {campaigns:[...]} (empty list if unset). Paired with save-campaigns (WF18)."
+  },
+  "id": "spotter-workflow-17",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

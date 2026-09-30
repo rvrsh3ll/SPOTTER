@@ -1,0 +1,203 @@
+{
+  "name": "28 - Adaptix C2 Ingestor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "d4e5f6a7-0028-0028-0028-000000000002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import os, json, ssl\nimport urllib.request\nimport urllib.error\n\nax_url  = os.environ.get('ADAPTIX_API_URL', '').strip()\nax_user = os.environ.get('ADAPTIX_USERNAME', '').strip()\nax_pass = os.environ.get('ADAPTIX_PASSWORD', '')\n\n# The shipped .env carries REPLACE_WITH_* placeholders. Treat those as \"not\n# configured\" so a stack that never wired up Adaptix does not attempt a doomed\n# connection on every 5-minute tick.\ndef _placeholder(v):\n    return v.upper().startswith('REPLACE_WITH')\n\nif not ax_url or _placeholder(ax_url):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'ADAPTIX_API_URL is not set (or still the .env placeholder)',\n                      'agents': []}}]\nif not ax_user or _placeholder(ax_user):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'ADAPTIX_USERNAME is not set (or still the .env placeholder)',\n                      'agents': []}}]\nif _placeholder(ax_pass):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'ADAPTIX_PASSWORD is still the .env placeholder',\n                      'agents': []}}]\n\nbase = ax_url.rstrip('/')\n\n# The teamserver's TLS is operator-generated and typically self-signed, exactly as\n# with the Cobalt Strike team server in workflow 01.\nctx = ssl.create_default_context()\nctx.check_hostname = False\nctx.verify_mode = ssl.CERT_NONE\n\n\ndef _post_json(url, payload, headers=None):\n    body = json.dumps(payload).encode('utf-8')\n    hdrs = {'Content-Type': 'application/json'}\n    hdrs.update(headers or {})\n    req = urllib.request.Request(url, data=body, headers=hdrs, method='POST')\n    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:\n        return json.loads(r.read())\n\n\ndef _get_json(url, headers=None):\n    req = urllib.request.Request(url, headers=headers or {}, method='GET')\n    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:\n        return json.loads(r.read())\n\n\n# \u2500\u2500 Step 1: authenticate \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Adaptix issues no static API token; a short-lived access_token is minted per\n# login. Each n8n run is a fresh process with nowhere to cache one, so at a\n# 5-minute cadence a login per poll is cheaper than /refresh bookkeeping.\ntry:\n    auth = _post_json(base + '/login', {'username': ax_user, 'password': ax_pass})\n    token = (auth or {}).get('access_token', '')\n    if not token:\n        return [{'json': {'fetch_ok': False,\n                          'error': 'Adaptix login returned no access_token',\n                          'agents': []}}]\nexcept urllib.error.HTTPError as e:\n    # A REJECTED LOGIN ANSWERS 404, not 401 -- the teamserver serves its 404 page\n    # for unauthenticated requests, so bad credentials and a bad URL are\n    # indistinguishable by status code. Say so, or the operator spends the\n    # engagement hunting a URL typo that isn't there.\n    if e.code == 404:\n        return [{'json': {'fetch_ok': False, 'agents': [],\n                          'error': ('Adaptix login HTTP 404 - the teamserver answers a '\n                                    'REJECTED LOGIN with its 404 page, so this is most '\n                                    'likely bad credentials. If they are known good, check '\n                                    'ADAPTIX_API_URL includes the endpoint prefix from the '\n                                    \"teamserver's profile.json (e.g. /endpoint).\")}}]\n    return [{'json': {'fetch_ok': False, 'error': 'Adaptix login HTTP ' + str(e.code),\n                      'agents': []}}]\nexcept Exception as e:\n    return [{'json': {'fetch_ok': False, 'error': 'Adaptix login failed: ' + repr(e),\n                      'agents': []}}]\n\n# \u2500\u2500 Step 2: pull the roster \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ntry:\n    payload = _get_json(base + '/agent/list', {'Authorization': 'Bearer ' + token})\n\n    if isinstance(payload, list):\n        agents = payload\n    elif isinstance(payload, dict):\n        agents = None\n        for key in ('agents', 'data', 'items'):\n            if isinstance(payload.get(key), list):\n                agents = payload[key]\n                break\n        if agents is None:\n            agents = []\n    else:\n        agents = []\n\n    return [{'json': {'fetch_ok': True, 'error': '', 'agents': agents}}]\nexcept urllib.error.HTTPError as e:\n    body = ''\n    try:\n        body = e.read().decode('utf-8', errors='replace')[:300]\n    except Exception:\n        body = ''\n    if e.code == 404:\n        return [{'json': {'fetch_ok': False, 'agents': [],\n                          'error': ('Adaptix /agent/list HTTP 404 - the access token was '\n                                    'rejected (the teamserver 404s unauthenticated requests '\n                                    'rather than 401ing)')}}]\n    return [{'json': {'fetch_ok': False, 'agents': [],\n                      'error': 'Adaptix API HTTP ' + str(e.code) + ': ' + body}}]\nexcept Exception as e:\n    return [{'json': {'fetch_ok': False, 'error': 'Adaptix API request failed: ' + repr(e),\n                      'agents': []}}]"
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000003",
+      "name": "Fetch Adaptix Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nfrom adaptix_normalizer import normalise_agent\n\nax_url = os.environ.get('ADAPTIX_API_URL', '')\nraw = _items[0].get('json', {}) if _items else {}\n\nif isinstance(raw, dict) and raw.get('fetch_ok') is False:\n    # Emit NO items so the run ends here. Everything downstream reads the graph\n    # and writes to it; returning a sentinel item instead of nothing would make\n    # every failed poll pay that cost, and on a 5-minute schedule the runs then\n    # overlap and pile up until the execution timeout. WF01 shipped that bug.\n    print('adaptix ingest skipped: ' + str(raw.get('error', 'fetch_failed')))\n    return []\n\nif isinstance(raw, dict):\n    agents = raw.get('agents', [raw])\nelse:\n    agents = raw if isinstance(raw, list) else [raw]\n\n# A single agent handed over as a bare dict must become a one-element list.\n# Iterating a dict yields its KEYS, so the isinstance(a, dict) filter below would\n# reject every one of them and the node would return zero agents while reporting\n# success -- the fail-green shape this codebase keeps getting bitten by.\nif isinstance(agents, dict):\n    agents = [agents]\n\nif not agents:\n    return []\n\nnormalised = [normalise_agent(a, ax_url) for a in agents if isinstance(a, dict)]\n\n# An agent with no a_id cannot be deduped -- session_key would collapse to\n# 'adaptix:' and every such record would MERGE onto one node, because add_node\n# treats the label as the node's identity.\nnormalised = [a for a in normalised if a.get('session_id')]\n\nreturn [{'json': a} for a in normalised]"
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000004",
+      "name": "Normalise Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body, so there is no sketch_id to read the\n# way a UI webhook supplies one. Falling straight back to FLOWSINT_SKETCH_ID\n# points every ingest at the throwaway default sketch, which no campaign reads -\n# and writing to an empty sketch succeeds, so it fails silently. Resolve the most\n# recent campaign from the shared registry instead, with env as the last resort.\nsketch_id = fc.resolve_campaign_sketch()\n\n# Only the three labels this dedup inspects are read. The full-graph endpoint is\n# unpaginated (110-235s on an AD-sized sketch) and truncates at 100k nodes, which\n# would silently drop existing sessions from the map and re-create them.\ntry:\n    existing_nodes = fc.get_nodes_by_type(\n        ['C2Session', 'CobaltBeacon', 'individual'], sketch_id=sketch_id)\nexcept Exception as e:\n    print('adaptix ingest skipped: graph fetch failed: ' + str(e))\n    return []\n\nexisting_sessions = {}\nexisting_individuals = {}\n\nfor n in existing_nodes:\n    ntype = (n.get('nodeType') or (n.get('data') or {}).get('type') or '').lower()\n    props = n.get('nodeProperties') or n.get('data') or {}\n\n    # c2session is the current type; cobaltbeacon is the pre-migration one. Key on\n    # session_key so an Adaptix agent, a CS beacon and a BR badger sharing an id\n    # stay distinct, falling back to the legacy beacon_id for un-migrated nodes.\n    if ntype in ('c2session', 'cobaltbeacon'):\n        skey = props.get('session_key', '')\n        if not skey:\n            sid = props.get('session_id') or props.get('beacon_id') or ''\n            fw = props.get('c2_framework') or 'cobalt_strike'\n            skey = f'{fw}:{sid}' if sid else ''\n        if skey:\n            existing_sessions[skey] = n.get('id')\n    elif ntype == 'individual':\n        sam = (props.get('sam_account_name') or props.get('username') or '').lower()\n        if sam:\n            existing_individuals[sam] = n.get('id')\n\nresult = []\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        result.append({'json': a})\n        continue\n\n    a['_existing_session_id'] = existing_sessions.get(a.get('session_key', ''), '')\n    a['_existing_individual_id'] = existing_individuals.get((a.get('sam_account_name') or '').lower(), '')\n    result.append({'json': a})\n\nreturn result"
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000005",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body - see the Dedup Check node for why the\n# env fallback alone fails silently.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\n\ndef _np(props):\n    \"\"\"Prefix an edit_node patch into the nodeProperties namespace.\n\n    add_node nests whatever it is given under nodeProperties.*, but edit_node\n    passes `updates` keys through verbatim, so a bare key lands at the node's TOP\n    level -- a second namespace that get_nodes_by_type, the dossier query and the\n    AGENTS roster all read straight past. The write reports success and the value\n    is genuinely in Neo4j, just not where anything looks, which is why a beacon\n    kept its first-contact last_checkin no matter how many times the 5-minute poll\n    saw it. Every workflow that calls edit_node prefixes the same way\n    (WF01/WF09/WF12/WF13/WF21).\n    \"\"\"\n    return {'nodeProperties.' + k: v for k, v in props.items()}\n\n\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        results.append({'json': {**a, 'upsert_status': 'skipped'}})\n        continue\n\n    sam = (a.get('sam_account_name') or a.get('username', 'unknown')).split('\\\\')[-1]\n    ind_id = a.get('_existing_individual_id', '')\n    session_node_id = a.get('_existing_session_id', '')\n    item_errors = []\n\n    try:\n        ind_props = {\n            'username': a.get('username'),\n            'sam_account_name': sam,\n            'hostname': a.get('hostname'),\n            'source': a.get('c2_framework', 'adaptix'),\n            'last_seen': a.get('last_checkin'),\n            'active_beacon': True,\n        }\n        if not ind_id:\n            # Lowercase: 'individual' is a Flowsint built-in and Neo4j labels are\n            # case-sensitive, with no normalisation in create_node. 'Individual'\n            # creates a second, unregistered label that this workflow's own dedup\n            # (which reads 'individual') could never see.\n            node = fc.add_node(\n                label=a.get('username') or sam,\n                node_type='individual',\n                properties=ind_props,\n                sketch_id=sketch_id,\n            )\n            ind_id = node.get('id', '')\n        else:\n            # Drop empty values before patching an EXISTING individual: this is\n            # frequently a SharpHound-ingested identity, so an agent record with no\n            # user or an unparseable last-checkin must not blank the username /\n            # last_seen the AD ingest already established.\n            fc.edit_node(\n                ind_id,\n                _np({k: v for k, v in ind_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n    except Exception as e:\n        item_errors.append('individual_upsert_failed: ' + repr(e))\n\n    try:\n        # Every key normalise_agent() + finalize_session() produce and\n        # C2SESSION_SCHEMA declares. Deliberately absent: last_checkin_dt (a raw\n        # datetime, not JSON serialisable and not in the schema -- last_checkin is\n        # the ISO string), and listener_ip, which is Brute Ratel-only and would\n        # only ever write None from an Adaptix agent.\n        session_props = {\n            'c2_framework': a.get('c2_framework', 'adaptix'),\n            'session_id': a.get('session_id'),\n            'session_key': a.get('session_key'),\n            'c2_server': a.get('c2_server'),\n            'hostname': a.get('hostname'),\n            'internal_ip': a.get('internal_ip'),\n            'external_ip': a.get('external_ip'),\n            'os_version': a.get('os_version'),\n            'arch': a.get('arch'),\n            'username': a.get('username'),\n            'sam_account_name': sam,\n            'process_name': a.get('process_name'),\n            'pid': a.get('pid'),\n            'thread_id': a.get('thread_id'),\n            'is_admin': a.get('is_admin'),\n            'last_checkin': a.get('last_checkin'),\n            'sleep_seconds': a.get('sleep_seconds'),\n            'jitter_pct': a.get('jitter_pct'),\n            'listener': a.get('listener'),\n            'note': a.get('note'),\n            'priority_score': a.get('priority_score'),\n            'process_list': a.get('process_list', []),\n            'tech_stack': a.get('tech_stack', []),\n            'is_dead': a.get('is_dead', False),\n            'is_pivot': a.get('is_pivot'),\n            'pivot_parent': a.get('pivot_parent'),\n            'pivot_channel': a.get('pivot_channel'),\n            'source': a.get('source', 'adaptix'),\n        }\n        if session_node_id:\n            # Same empty-value guard. /agent/list carries NO process list -- that\n            # only arrives from a `ps` task -- so patching the empty\n            # process_list/tech_stack in would wipe any enrichment on every\n            # 5-minute poll. Only None and [] are dropped: False and 0 are real\n            # values (is_dead, is_admin, priority_score), and the create path below\n            # keeps the empty lists so the property exists with the right type from\n            # the start.\n            fc.edit_node(\n                session_node_id,\n                _np({k: v for k, v in session_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n        else:\n            session_node = fc.add_node(\n                label='Agent:' + str(a.get('session_id')) + '@' + str(a.get('hostname')),\n                node_type='C2Session',\n                properties=session_props,\n                sketch_id=sketch_id,\n            )\n            session_node_id = session_node.get('id', '')\n    except Exception as e:\n        item_errors.append('session_upsert_failed: ' + repr(e))\n\n    status = 'ok' if not item_errors else 'partial'\n    results.append({'json': {\n        **a,\n        '_ind_id': ind_id,\n        '_session_node_id': session_node_id,\n        'upsert_status': status,\n        'upsert_errors': item_errors,\n    }})\n\nreturn results"
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000006",
+      "name": "Upsert Individual + Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body - see the Dedup Check node.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        results.append({'json': {**a, 'rel_status': 'skipped_fetch_error'}})\n        continue\n\n    ind_id = a.get('_ind_id', '')\n    session_node_id = a.get('_session_node_id', '')\n    tech_stack = a.get('tech_stack', [])\n    rel_errors = []\n    edges_created = 0\n\n    if not ind_id:\n        results.append({'json': {**a, 'rel_status': 'skipped_no_ind',\n                                 'rel_errors': ['missing individual id']}})\n        continue\n\n    if session_node_id:\n        try:\n            # HAS_BEACON, not HAS_SESSION: the AD graph already uses HAS_SESSION\n            # for logon sessions. The name is framework-neutral by convention.\n            fc.create_edge(ind_id, session_node_id, 'HAS_BEACON', sketch_id)\n            edges_created += 1\n        except Exception as e:\n            rel_errors.append('HAS_BEACON: ' + repr(e))\n\n    for tech in tech_stack:\n        if not tech:\n            continue\n        try:\n            tnode = fc.add_node(\n                label=tech,\n                node_type='Technology',\n                # 'name' is REQUIRED on the built-in Technology type. Flowsint's\n                # graph serializer retries once with invalid fields stripped, but a\n                # *missing* required field cannot be recovered that way, so a single\n                # name-less Technology node makes GET /graph return 500 for the\n                # entire sketch.\n                properties={'name': tech, 'source': a.get('c2_framework', 'adaptix')},\n                sketch_id=sketch_id,\n            )\n            tid = tnode.get('id', '')\n            if tid:\n                fc.create_edge(ind_id, tid, 'USES_TECH', sketch_id)\n                edges_created += 1\n        except Exception as e:\n            rel_errors.append('USES_TECH[' + str(tech) + ']: ' + repr(e))\n\n    # No PIVOTS_TO edge is written. Adaptix's /agent/list reports the pivot\n    # CHANNEL (inferred from the listener name in adaptix_normalizer) but no\n    # documented parent-agent id, so pivot_parent is always empty here and there\n    # is nothing to link to. Guessing a parent would fabricate a relayed-through\n    # relationship between two agents that may share nothing but a listener type.\n    # If a live teamserver turns out to expose a parent id, add the same\n    # search_nodes-then-exact-session_key lookup WF01 and WF21 use.\n    if session_node_id and a.get('is_pivot') and a.get('pivot_parent'):\n        parent_key = 'adaptix:' + str(a.get('pivot_parent'))\n        try:\n            matches = fc.search_nodes(parent_key, node_type='C2Session', sketch_id=sketch_id) or []\n            parent_id = ''\n            for m in matches:\n                props = m.get('nodeProperties') or m.get('data') or {}\n                if props.get('session_key') == parent_key:\n                    parent_id = m.get('id', '')\n                    break\n            if parent_id:\n                fc.create_edge(parent_id, session_node_id, 'PIVOTS_TO', sketch_id)\n                edges_created += 1\n            else:\n                rel_errors.append('PIVOTS_TO: parent ' + parent_key + ' not in graph yet')\n        except Exception as e:\n            rel_errors.append('PIVOTS_TO: ' + repr(e))\n\n    rel_status = 'ok' if not rel_errors else ('partial' if edges_created > 0 else 'error')\n    results.append({'json': {\n        **a,\n        'rel_status': rel_status,\n        'rel_errors': rel_errors[:10],\n        'edges_created': edges_created,\n    }})\n\nreturn results"
+      },
+      "id": "d4e5f6a7-0028-0028-0028-000000000007",
+      "name": "Create Relationships",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch Adaptix Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Adaptix Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Adaptix Agents": {
+      "main": [
+        [
+          {
+            "node": "Normalise Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Agents": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "Upsert Individual + Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Individual + Session": {
+      "main": [
+        [
+          {
+            "node": "Create Relationships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "d4e5f6a7-0028-0028-0028-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "Polls the Adaptix C2 teamserver Web API every 5 minutes and ingests its agent roster as C2Session nodes, alongside Cobalt Strike (WF01) and Brute Ratel (WF21). Feeds the AGENTS tab via WF23.\n\nA POLL, NOT A PUSH -- the opposite of WF21. Adaptix does have an outbound webhook (EventCallback in profile.json), but it fires on NEW AGENT REGISTRATION ONLY and sends a rendered message template, never a check-in. Push alone would stamp last_checkin once and never again, and WF23 decides live/stale/dead from that field against a 30-minute threshold -- so every agent would read 'stale' half an hour after landing. /agent/list returns a_last_tick on every call.\n\nAuth is two-step and per-run: POST /login {username,password} -> access_token, then GET /agent/list with Authorization: Bearer. There is no static API token.\n\nTWO TRAPS. (1) A REJECTED LOGIN ANSWERS 404, not 401 -- the teamserver serves its 404 page for unauthenticated requests, so bad credentials look exactly like a bad URL. The Fetch node distinguishes them in its error text. (2) ADAPTIX_API_URL MUST INCLUDE THE ENDPOINT PREFIX from the teamserver's profile.json (commonly '/endpoint'), e.g. https://10.0.0.5:4321/endpoint -- not just scheme://host:port.\n\nReaching the teamserver is outbound, so either it is directly routable from the SPOTTER host or the operator holds an ssh -N -L forward and ADAPTIX_API_URL points at the local end. Nothing in this workflow changes between the two.\n\nEnv: ADAPTIX_API_URL, ADAPTIX_USERNAME, ADAPTIX_PASSWORD -- all three must be in the runner's allowed-env and in both compose environment blocks, or os.environ.get() silently returns the default and the poll no-ops as 'not configured'."
+  },
+  "id": "spotter-workflow-28",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Ingest"
+    },
+    {
+      "name": "Adaptix"
+    }
+  ]
+}

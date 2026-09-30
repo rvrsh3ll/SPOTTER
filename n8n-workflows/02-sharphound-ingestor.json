@@ -1,0 +1,214 @@
+{
+  "name": "02 - SharpHound Ingestor",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "sharphound",
+        "responseMode": "onReceived",
+        "options": {},
+        "httpMethod": "POST"
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000001",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "sharphound-ingest"
+    },
+    {
+      "parameters": {},
+      "id": "b2c3d4e5-0002-0002-0002-000000000002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000010",
+      "name": "Every 2 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Accepts either:\n#   a) Webhook with base64-encoded ZIP in body: {\"zip_b64\": \"...\", \"filename\": \"...\"}\n#   b) Manual trigger — reads from the SharpHound drop directory\nimport sys, os, base64, glob, json as _json\nimport requests as _req\nsys.path.insert(0, '/data/scripts')\nfrom sharphound_parser import parse_zip_bytes, parse_zip_file\n\nitem = _items[0] if _items else {'json': {}}\nbody = item.get('json', {}) if isinstance(item, dict) else {}\n_sb = body.get('body', body) if isinstance(body.get('body'), dict) else body\n\nif body.get('zip_b64'):\n    # Webhook path: base64 ZIP from Open WebUI or curl upload\n    data = base64.b64decode(body['zip_b64'])\n    result = parse_zip_bytes(data)\nelif body.get('zip_path'):\n    # Explicit path provided\n    result = parse_zip_file(body['zip_path'])\nelse:\n    # Auto-detect newest ZIP in drop directory\n    drop_dir = os.environ.get('SHARPHOUND_DROP_DIR', '/data/sharphound-drops')\n    zips = sorted(glob.glob(os.path.join(drop_dir, '*.zip')), key=os.path.getmtime)\n    if not zips:\n        return [{'json': {'error': 'No ZIP found in drop directory', 'entities': 0}}]\n    candidate = zips[-1]\n\n    # ── ingest dedup guard ──────────────────────────────────────────────────\n    # This node also runs on a 2-minute schedule against a PERSISTENT mount, so\n    # without a guard the newest ZIP is re-parsed and re-ingested on every tick\n    # forever. Observed cost of that loop: a 58 MB SharpHound archive re-imported\n    # plus a ~74 MB Titus credential scan every 2 minutes.\n    #\n    # The file is fingerprinted by name+size+mtime -- a cheap stat, no read -- so\n    # dropping a fresh collection (new name, or same name with new size/mtime)\n    # is still picked up, while an unchanged file is taken exactly once.\n    #\n    # The ledger lives in Neo4j beside the campaign registry rather than on disk:\n    # the drop mount is root-owned while code nodes run as uid 1000 (WF06 writes\n    # to /tmp for exactly this reason), and the runner's /tmp is neither shared\n    # with n8n nor durable across restarts.\n    st = os.stat(candidate)\n    fingerprint = f'{os.path.basename(candidate)}:{st.st_size}:{int(st.st_mtime)}'\n\n    neo_url = os.environ.get('NEO4J_HTTP_URL', 'http://flowsint-neo4j-prod:7474').rstrip('/')\n    neo_auth = base64.b64encode(\n        f\"{os.environ.get('NEO4J_USER', 'neo4j')}:{os.environ.get('NEO4J_PASSWORD', '')}\".encode()).decode()\n\n    def _cypher(stmt, params=None):\n        r = _req.post(f'{neo_url}/db/neo4j/tx/commit',\n                      headers={'Authorization': f'Basic {neo_auth}', 'Content-Type': 'application/json'},\n                      json={'statements': [{'statement': stmt, 'parameters': params or {}}]}, timeout=30)\n        r.raise_for_status()\n        d = r.json()\n        if d.get('errors'):\n            raise RuntimeError(str(d['errors'])[:300])\n        return d['results'][0]['data']\n\n    # Deliberately fails LOUD rather than open: if the ledger cannot be read we\n    # do not know whether this archive was already taken, and guessing \"no\" is\n    # precisely the runaway this guard exists to prevent. The raise marks the\n    # execution as an error, which IS persisted (saveDataErrorExecution: all).\n    rows = _cypher(\"MATCH (m:SpotterMeta {key:'sharphound_ingested'}) RETURN m.data LIMIT 1\")\n    seen = []\n    if rows and rows[0]['row'][0]:\n        try:\n            seen = _json.loads(rows[0]['row'][0]) or []\n        except Exception:\n            seen = []\n\n    if fingerprint in seen:\n        # Already ingested. Emit NO items so the run stops here instead of\n        # re-importing the graph and re-triggering the credential scan.\n        print(f'sharphound drop already ingested, skipping: {fingerprint}')\n        return []\n\n    result = parse_zip_file(candidate)\n\n    # Recorded after a successful parse, so a corrupt/partial archive is retried\n    # next tick, but an archive that legitimately yields zero entities is still\n    # only taken once. To force a re-ingest: `touch` the file (new mtime => new\n    # fingerprint) or clear the ledger node in Neo4j.\n    seen.append(fingerprint)\n    _cypher(\"MERGE (m:SpotterMeta {key:'sharphound_ingested'}) SET m.data = $d\",\n            {'d': _json.dumps(seen[-200:])})\n\n# Campaign scoping. A schedule trigger carries no body, so there is no sketch_id\n# to read from the request. resolve_campaign_sketch() reads the shared campaign\n# registry (:SpotterMeta {key:'campaigns'}) and returns the most recently created\n# campaign's sketch -- the same rule the frontend uses to auto-adopt a campaign on\n# boot -- instead of falling back to FLOWSINT_SKETCH_ID, which names a sketch that\n# no longer exists. Resolved here, after the early returns, so an empty drop folder\n# costs no registry lookup on every 2-minute tick.\nfrom flowsint_client import resolve_campaign_sketch\nsketch_id = resolve_campaign_sketch(_sb.get('sketch_id') or '')\n\nnodes, edges = result.to_flowsint_batch()\nreturn [{'json': {\n    'schema_version': result.schema_version,\n    'entity_count': len(nodes),\n    'relationship_count': len(edges),\n    'high_value_aces': result.high_value_aces,\n    'errors': result.errors,\n    'nodes': nodes,\n    'edges': edges,\n    'sketch_id': sketch_id,\n}}]\n"
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000003",
+      "name": "Parse SharpHound ZIP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "has-entities",
+              "leftValue": "={{ $json.entity_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000004",
+      "name": "Has Entities?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Batch import all parsed entities and relationships into Flowsint\nimport sys, os, json\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\n# Prefer the sketch the upstream node already resolved; otherwise fall back to the\n# campaign registry rather than FLOWSINT_SKETCH_ID, which points at a deleted sketch.\nsketch_id = fc.resolve_campaign_sketch(_sb.get('sketch_id') or '')\n\n# Fail LOUD, not green. Writing to a sketch that does not exist 404s on every call\n# while the run still reports production_success -- the exact silent failure this\n# workflow has been hiding. Raising marks the execution as an error, which IS\n# persisted (saveDataErrorExecution: all), so it is visible after the fact.\nif not sketch_id:\n    raise RuntimeError('WF02: no campaign sketch could be resolved -- provision a campaign before ingesting')\nif sketch_id not in {s.get('id') for s in fc.list_sketches()}:\n    raise RuntimeError('WF02: resolved sketch ' + sketch_id + ' does not exist in Flowsint; every write would 404 silently')\nitem = _items[0].get('json', {}) if _items else {}\nnodes = item.get('nodes', [])\nedges = item.get('edges', [])\n\n# Import in chunks of 200 to avoid timeouts\nCHUNK = 200\ntotal_created = 0\ntotal_skipped = 0\nerrors = []\n\nfor i in range(0, max(len(nodes), 1), CHUNK):\n    node_chunk = nodes[i:i+CHUNK]\n    # Only include edge chunk when processing the last node chunk,\n    # so all node IDs exist before edges reference them.\n    edge_chunk = edges if i + CHUNK >= len(nodes) else []\n    try:\n        result = fc.batch_import(node_chunk, edge_chunk, sketch_id=sketch_id)\n        total_created += result.get('nodes_created', 0)\n        total_skipped += result.get('nodes_skipped', 0)\n        errors.extend(result.get('errors', []))\n    except Exception as e:\n        errors.append(str(e))\n\nreturn [{'json': {\n    'nodes_created': total_created,\n    'nodes_skipped': total_skipped,\n    'high_value_aces': item.get('high_value_aces', []),\n    'parse_errors': item.get('errors', []),\n    'import_errors': errors,\n    'schema_version': item.get('schema_version'),\n    'sketch_id': sketch_id,\n}}]\n"
+      },
+      "id": "b2c3d4e5-0002-0002-0002-000000000005",
+      "name": "Batch Import to Flowsint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "# Scan the SharpHound ZIP with Titus after it has been imported.\n# Reads the latest ZIP from the drop directory, calls the titus sidecar directly.\n# Runs in parallel with the ACE alert branch — does not block it.\nimport os, base64, json\nimport urllib.request\nimport sys\nsys.path.insert(0, '/data/scripts')\nfrom flowsint_client import resolve_campaign_sketch\n\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\n# Upstream supplies the validated sketch; the registry is the fallback, not the env var.\nsketch_id = resolve_campaign_sketch(_sb.get('sketch_id') or '')\n# Running in task-runners: localhost points to runner container, not n8n.\n# Default to Docker service DNS, with env override support.\nn8n_base  = (os.environ.get('N8N_WEBHOOK_BASE_URL') or os.environ.get('WEBHOOK_URL') or 'http://n8n:5678').rstrip('/')\ndrop_dir  = '/data/sharphound-drops'\n\n# Find the most recently modified ZIP in the drop directory\ntry:\n    zips = sorted(\n        [os.path.join(drop_dir, f) for f in os.listdir(drop_dir) if f.lower().endswith('.zip')],\n        key=os.path.getmtime,\n    )\nexcept Exception as e:\n    return [{'json': {'status': 'skipped', 'reason': f'drop dir: {e}'}}]\n\nif not zips:\n    return [{'json': {'status': 'skipped', 'reason': 'no zips found'}}]\n\nzip_path = zips[-1]\nfilename = os.path.basename(zip_path)\n\nsz = os.path.getsize(zip_path)\nfd = os.open(zip_path, os.O_RDONLY)\nraw_bytes = os.read(fd, sz)\nos.close(fd)\n\nraw_b64 = base64.b64encode(raw_bytes).decode()\n\nbody = json.dumps({'raw_b64': raw_b64, 'filename': filename, 'sketch_id': sketch_id}).encode()\nreq = urllib.request.Request(\n    f'{n8n_base}/webhook/credential-scan',\n    data=body,\n    headers={'Content-Type': 'application/json'},\n    method='POST',\n)\ntry:\n    with urllib.request.urlopen(req, timeout=180) as r:\n        result = json.loads(r.read())\n    return [{'json': {'status': 'ok', 'cred_scan': result}}]\nexcept Exception as e:\n    return [{'json': {'status': 'error', 'error': str(e)}}]\n"
+      },
+      "id": "f0200000-0002-0002-0002-000000000009",
+      "name": "Scan Credentials (Titus)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse SharpHound ZIP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse SharpHound ZIP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 2 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Parse SharpHound ZIP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse SharpHound ZIP": {
+      "main": [
+        [
+          {
+            "node": "Has Entities?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Entities?": {
+      "main": [
+        [
+          {
+            "node": "Batch Import to Flowsint",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Batch Import to Flowsint": {
+      "main": [
+        [
+          {
+            "node": "Scan Credentials (Titus)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "b2c3d4e5-0002-0002-0002-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "spotter-workflow-02",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "SharpHound"
+    }
+  ]
+}

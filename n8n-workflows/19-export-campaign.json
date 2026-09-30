@@ -1,0 +1,95 @@
+{
+  "name": "19 - Export Campaign",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "export-campaign",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-19-19-19-000000000001",
+      "name": "Export Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "export-campaign"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json, base64\nsys.path.insert(0, '/data/scripts')\nimport requests as req\n\n# ── Request ──────────────────────────────────────────────────────────────────\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\n\n# SECURITY: NO FLOWSINT_SKETCH_ID FALLBACK (deliberate divergence from the other\n# workflows). That env var points at a real, live campaign's sketch, and the\n# frontend sends sketch_id:null for a campaign whose provisioning failed - a value\n# _scopeWebhookOpts does NOT backfill because it only fills `undefined`. With the\n# usual `body.get('sketch_id') or os.environ[...]` idiom that request would\n# silently export a DIFFERENT campaign's entire graph. Refuse instead.\n_sid = _sb.get('sketch_id')\nsketch_id = _sid.strip() if isinstance(_sid, str) else ''\n# campaign_id is auto-injected by the frontend from the ACTIVE campaign, which is\n# not necessarily the one being exported. Deliberately ignored.\nkind   = _sb.get('kind') or 'meta'\ncursor = _sb.get('cursor')\nlimit  = _sb.get('limit')\n\nif not sketch_id:\n    return [{'json': {'error': 'sketch_id required (no env fallback - refusing to export an unspecified campaign)'}}]\n\napi_url  = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api:5001').rstrip('/')\napi_key  = os.environ.get('FLOWSINT_API_KEY', '')\nneo_url  = os.environ.get('NEO4J_HTTP_URL', 'http://flowsint-neo4j-prod:7474').rstrip('/')\nneo_user = os.environ.get('NEO4J_USER', 'neo4j')\nneo_pass = os.environ.get('NEO4J_PASSWORD', '')\n\nif not neo_pass:\n    return [{'json': {'error': 'NEO4J_PASSWORD not set - cannot read the graph'}}]\n\n_auth = base64.b64encode(f'{neo_user}:{neo_pass}'.encode()).decode()\n_neo_headers = {'Authorization': f'Basic {_auth}', 'Content-Type': 'application/json'}\n\n\ndef _cypher(stmt, params=None):\n    \"\"\"Neo4j HTTP transactional endpoint - same helper shape as WF07/17/18.\"\"\"\n    r = req.post(f'{neo_url}/db/neo4j/tx/commit', headers=_neo_headers,\n                 json={'statements': [{'statement': stmt, 'parameters': params or {}}]},\n                 timeout=300)\n    r.raise_for_status()\n    d = r.json()\n    if d.get('errors'):\n        raise RuntimeError(str(d['errors'])[:300])\n    return d['results'][0]['data']\n\n\ndef _clean(props, warnings, where):\n    \"\"\"Keep only property values that survive a JSON round-trip: primitives and\n    lists of primitives. Neo4j POINT / temporal values come back over the HTTP\n    endpoint as nested maps or ISO strings; feeding a map back to\n    apoc.create.node() raises 'Property values can only be of primitive types',\n    which would kill an entire 10k-row import batch. Drop and report instead.\n    deleted_at is stripped so a soft-deleted marker never rides into a fresh\n    sketch, and nulls are dropped because Neo4j has no null properties.\"\"\"\n    out = {}\n    for k, v in (props or {}).items():\n        if k == 'deleted_at' or v is None:\n            continue\n        if isinstance(v, (bool, int, float, str)):\n            out[k] = v\n        elif isinstance(v, list):\n            if all(x is not None and isinstance(x, (bool, int, float, str)) for x in v):\n                out[k] = v\n            else:\n                warnings.append(f'{where}: dropped non-primitive list property {k}')\n        else:\n            warnings.append(f'{where}: dropped non-primitive property {k} (' + ('dict' if isinstance(v, dict) else 'non-primitive') + ')')\n    return out\n\n\nwarnings = []\n\n# ── kind:'meta' - counts + the type inventory the bundle must carry ──────────\nif kind == 'meta':\n    _r = _cypher('MATCH (n {sketch_id:$s}) WHERE n.deleted_at IS NULL RETURN count(n) AS c',\n                 {'s': sketch_id})\n    node_count = _r[0]['row'][0] if _r else 0\n    # Anchored on both endpoints rather than r.sketch_id: this is exactly the set\n    # Flowsint's own GET /graph returns (it filters on the endpoints, not on the\n    # relationship's sketch_id), so the bundle matches what the app displays.\n    _r = _cypher('MATCH (a {sketch_id:$s})-[r]->(b {sketch_id:$s}) WHERE r.deleted_at IS NULL '\n                 'RETURN count(r) AS c', {'s': sketch_id})\n    edge_count = _r[0]['row'][0] if _r else 0\n    _r = _cypher('MATCH (n {sketch_id:$s}) WHERE n.deleted_at IS NULL AND n.nodeType IS NOT NULL '\n                 'RETURN DISTINCT n.nodeType AS t', {'s': sketch_id})\n    node_types = sorted({x['row'][0] for x in _r if x['row'][0]})\n\n    # SPOTTER's node types (GPO, Subdomain, SocialProfile, WebAsset, DomainBreach,\n    # CobaltBeacon, ...) are NOT Flowsint built-ins - they are per-owner rows in the\n    # Postgres custom_types table. Flowsint's graph serializer raises on an\n    # unresolvable nodeType with no per-node try/except, so ONE missing type makes\n    # GET /graph return HTTP 500 for the whole sketch. Carry the definitions so the\n    # importing install can recreate them (WF20 kind:'types').\n    custom_types = []\n    try:\n        r = req.get(f'{api_url}/api/custom-types',\n                    headers={'Authorization': f'Bearer {api_key}'},\n                    params={'status': 'published'}, timeout=60)\n        r.raise_for_status()\n        _want = {t.lower() for t in node_types}\n        for ct in (r.json() or []):\n            if not isinstance(ct, dict):\n                continue\n            nm = ct.get('name') or ''\n            if nm.lower() not in _want:\n                continue\n            custom_types.append({\n                'name': nm,\n                'schema': ct.get('schema') or ct.get('json_schema') or {},\n                'description': ct.get('description') or '',\n                'category': ct.get('category') or 'custom_types_category',\n                'color': ct.get('color') or '#8E9E8C',\n                'icon': ct.get('icon') or 'Minus',\n            })\n    except Exception as e:\n        warnings.append(f'custom-type export failed: {e}')\n\n    return [{'json': {\n        'kind': 'meta',\n        'sketch_id': sketch_id,\n        'counts': {'nodes': node_count, 'edges': edge_count},\n        'node_types': node_types,\n        'custom_types': custom_types,\n        'instance': api_url,\n        'warnings': warnings,\n    }}]\n\n# ── kind:'nodes' / 'edges' - keyset-paged reads ──────────────────────────────\n# Paged on id() rather than SKIP/LIMIT: SKIP offsets shift if anything writes to\n# the sketch between pages (WF01 and WF09 are 5-minute schedulers), silently\n# dropping or duplicating rows. id() is monotonic; elementId is NOT usable as a\n# cursor because it compares lexicographically (\"100000\" sorts before \"99999\").\n# id() is deprecated in Neo4j 5 but functional, and only ever leaves this workflow\n# as an opaque cursor - the portable identity in the bundle is elementId.\ntry:\n    cur = int(cursor) if cursor is not None else -1\nexcept Exception:\n    cur = -1\n\nif kind == 'nodes':\n    lim = int(limit) if isinstance(limit, (int, float)) and 0 < limit <= 5000 else 2000\n    rows = _cypher(\n        'MATCH (n {sketch_id:$s}) WHERE n.deleted_at IS NULL AND id(n) > $cur '\n        'RETURN id(n) AS seq, elementId(n) AS ref, labels(n) AS labels, properties(n) AS props '\n        'ORDER BY id(n) LIMIT $lim',\n        {'s': sketch_id, 'cur': cur, 'lim': lim})\n    out = []\n    last = cur\n    for x in rows:\n        seq, ref, labels, props = x['row']\n        last = seq\n        out.append({'ref': ref, 'l': labels, 'p': _clean(props, warnings, ref)})\n    return [{'json': {'kind': 'nodes', 'rows': out, 'cursor': last,\n                      'done': len(out) < lim, 'warnings': warnings[:50]}}]\n\nif kind == 'edges':\n    lim = int(limit) if isinstance(limit, (int, float)) and 0 < limit <= 20000 else 10000\n    rows = _cypher(\n        'MATCH (a {sketch_id:$s})-[r]->(b {sketch_id:$s}) WHERE r.deleted_at IS NULL AND id(r) > $cur '\n        'RETURN id(r) AS seq, type(r) AS ty, elementId(a) AS f, elementId(b) AS t, '\n        'properties(r) AS props ORDER BY id(r) LIMIT $lim',\n        {'s': sketch_id, 'cur': cur, 'lim': lim})\n    out = []\n    last = cur\n    for x in rows:\n        seq, ty, f, t, props = x['row']\n        last = seq\n        out.append({'f': f, 'to': t, 'ty': ty, 'p': _clean(props, warnings, f'rel {ty}')})\n    return [{'json': {'kind': 'edges', 'rows': out, 'cursor': last,\n                      'done': len(out) < lim, 'warnings': warnings[:50]}}]\n\nreturn [{'json': {'error': f'unknown kind: {kind} (expected meta|nodes|edges)'}}]\n"
+      },
+      "id": "e7f8a9b0-19-19-19-000000000002",
+      "name": "Read Sketch Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-19-19-19-000000000003",
+      "name": "Return Page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Export Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Sketch Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Sketch Page": {
+      "main": [
+        [
+          {
+            "node": "Return Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "e7f8a9b0-19-19-19-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/export-campaign {sketch_id, kind, cursor?, limit?} - Reads ONE campaign's sketch out for an encrypted bundle. kind:'meta' returns {counts, node_types, custom_types, instance}; kind:'nodes' and kind:'edges' return keyset-paged rows plus the next cursor. Reads Neo4j DIRECTLY rather than GET /api/sketches/{id}/graph, which discards every relationship property and caps at LIMIT 100000. Pages on id() because SKIP offsets shift when a scheduled ingestor writes mid-export and elementId compares lexicographically. Non-primitive property values (POINT/temporal) are dropped and reported in warnings. REFUSES to fall back to FLOWSINT_SKETCH_ID - that env var points at a live campaign. Paired with import-campaign (WF20); encryption happens in the browser, never here."
+  },
+  "id": "spotter-workflow-19",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

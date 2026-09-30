@@ -1,0 +1,93 @@
+{
+  "name": "29 - Analysis Correction",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analysis-correction",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c0ffee29-0029-0029-0029-000000000001",
+      "name": "Correction Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "analysis-correction"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport spotter_campaign_acl as acl\nfrom analysis_history import record_correction, ALLOWED_WORKFLOWS\n\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\n\nsketch_id       = str(_sb.get('sketch_id') or '')\nworkflow        = str(_sb.get('workflow') or '').lower()\nrun_id          = str(_sb.get('run_id') or '')\nitem_path       = str(_sb.get('item_path') or '')\ncorrected_value = _sb.get('corrected_value')\n\n# Corrections become future fine-tuning labels, so the same sketch ACL that\n# gates every other graph-touching webhook applies here too.\n_user = acl.caller(_items)\nif not _user:\n    return [{'json': {'error': 'unauthenticated', 'ok': False}}]\nif not acl.can_access_sketch(acl.read_campaigns(), sketch_id, _user):\n    return [{'json': {'error': 'not authorised for this campaign', 'ok': False}}]\n\nif not sketch_id or not run_id or not item_path:\n    return [{'json': {'error': 'sketch_id, run_id and item_path are required', 'ok': False}}]\nif workflow not in ALLOWED_WORKFLOWS:\n    return [{'json': {'error': f'workflow must be one of {sorted(ALLOWED_WORKFLOWS)}', 'ok': False}}]\n\ntry:\n    saved = record_correction(sketch_id, workflow, run_id, item_path, corrected_value, corrected_by=_user)\nexcept Exception as e:\n    return [{'json': {'error': f'failed to persist correction: {e}', 'ok': False}}]\n\nif not saved:\n    return [{'json': {'error': 'run_id not found (pruned or never persisted)', 'ok': False}}]\n\nreturn [{'json': {'ok': True, 'sketch_id': sketch_id, 'workflow': workflow, 'run_id': run_id}}]"
+      },
+      "id": "c0ffee29-0029-0029-0029-000000000002",
+      "name": "Record Correction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "c0ffee29-0029-0029-0029-000000000003",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Correction Webhook": {
+      "main": [
+        [
+          {
+            "node": "Record Correction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Correction": {
+      "main": [
+        [
+          {
+            "node": "Return Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c0ffee29-0029-0029-0029-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/analysis-correction {sketch_id, workflow ('wf10'|'wf12'), run_id, item_path, corrected_value} - Lets an operator record the CORRECT answer for one item of a persisted WF10/WF12 LLM run (see scripts/analysis_history.py), as opposed to the FP/OoS scope tags WF10 already accepts. This is the labeled-data prerequisite for eventually fine-tuning a fast classifier on SPOTTER's own triage decisions -- it does not change WF10/WF12 behavior itself. Returns {ok, sketch_id, workflow, run_id} or {ok:false, error}."
+  },
+  "id": "spotter-workflow-29",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

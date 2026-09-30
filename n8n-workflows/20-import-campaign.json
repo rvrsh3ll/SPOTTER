@@ -1,0 +1,95 @@
+{
+  "name": "20 - Import Campaign",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "import-campaign",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-20-20-20-000000000001",
+      "name": "Import Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "import-campaign"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json, base64\nsys.path.insert(0, '/data/scripts')\nimport requests as req\n\n# \u2500\u2500 Request \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n_sb = _items[0].get('json', {}) if _items else {}\n_sb = _sb.get('body', _sb) if isinstance(_sb.get('body'), dict) else _sb\n\n# SECURITY: NO FLOWSINT_SKETCH_ID FALLBACK - see the same guard in WF19. Here the\n# stakes are higher: the env var points at a live campaign, so a sketch_id:null\n# request would write an entire imported graph INTO that running engagement.\n_sid = _sb.get('sketch_id')\nsketch_id = _sid.strip() if isinstance(_sid, str) else ''\n# campaign_id is auto-injected from the ACTIVE campaign by the frontend and is not\n# the campaign being imported. Deliberately ignored.\nkind = _sb.get('kind') or ''\nrows = _sb.get('rows') or []\n\n# An import writes a whole graph into the target sketch, so apply the same\n# ownership check the clear-graph path uses.\nimport spotter_campaign_acl as acl\n_user = acl.caller(_items)\nif not _user:\n    return [{'json': {'error': 'unauthenticated', 'written': 0}}]\nif not acl.can_access_sketch(acl.read_campaigns(), sketch_id, _user):\n    return [{'json': {'error': 'not authorised for this campaign', 'written': 0}}]\n\napi_url  = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api:5001').rstrip('/')\napi_key  = os.environ.get('FLOWSINT_API_KEY', '')\nneo_url  = os.environ.get('NEO4J_HTTP_URL', 'http://flowsint-neo4j-prod:7474').rstrip('/')\nneo_user = os.environ.get('NEO4J_USER', 'neo4j')\nneo_pass = os.environ.get('NEO4J_PASSWORD', '')\n_api_headers = {'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}\n\n\ndef _cypher(stmt, params=None):\n    _auth = base64.b64encode(f'{neo_user}:{neo_pass}'.encode()).decode()\n    r = req.post(f'{neo_url}/db/neo4j/tx/commit',\n                 headers={'Authorization': f'Basic {_auth}', 'Content-Type': 'application/json'},\n                 json={'statements': [{'statement': stmt, 'parameters': params or {}}]},\n                 timeout=300)\n    r.raise_for_status()\n    d = r.json()\n    if d.get('errors'):\n        raise RuntimeError(str(d['errors'])[:300])\n    return d['results'][0]['data']\n\n\n# \u2500\u2500 kind:'types' - recreate the custom node types the bundle depends on \u2500\u2500\u2500\u2500\u2500\u2500\n# Not sketch-scoped, so it runs BEFORE the sketch is provisioned: if any type in\n# the bundle can be resolved by neither the built-in registry nor this install's\n# custom_types, the frontend aborts before creating anything. This is the step\n# that makes a bundle portable to another install - without it every imported\n# node carries a nodeType the target's serializer cannot resolve, and\n# GET /api/sketches/{id}/graph returns HTTP 500 for the WHOLE sketch (the\n# deserializer has no per-node try/except).\nif kind == 'types':\n    want = [t for t in (_sb.get('node_types') or []) if isinstance(t, str) and t]\n\n    builtin = set()\n    try:\n        r = req.get(f'{api_url}/api/types', headers=_api_headers, timeout=60)\n        r.raise_for_status()\n        for cat in (r.json() or []):\n            if not isinstance(cat, dict):\n                continue\n            for child in (cat.get('children') or []):\n                if isinstance(child, dict):\n                    for key in ('type', 'key', 'label'):\n                        if child.get(key):\n                            builtin.add(str(child[key]).lower())\n    except Exception as e:\n        return [{'json': {'error': f'could not list built-in types: {e}'}}]\n\n    try:\n        r = req.get(f'{api_url}/api/custom-types', headers=_api_headers, timeout=60)\n        r.raise_for_status()\n        have = {(t.get('name') or '').lower() for t in (r.json() or []) if isinstance(t, dict)}\n    except Exception as e:\n        return [{'json': {'error': f'could not list custom types: {e}'}}]\n\n    created, existing, failed = [], [], []\n    for ct in rows:\n        if not isinstance(ct, dict):\n            continue\n        name = (ct.get('name') or '').strip()\n        if not name:\n            continue\n        if name.lower() in have or name.lower() in builtin:\n            existing.append(name)\n            continue\n        # color/icon are non-Optional on CustomTypeCreate with defaults, so a null\n        # from the source install (common - most rows have none) must be coerced.\n        body = {\n            'name': name,\n            'schema': ct.get('schema') or {},\n            'status': 'published',\n            'category': ct.get('category') or 'custom_types_category',\n            'color': ct.get('color') or '#8E9E8C',\n            'icon': ct.get('icon') or 'Minus',\n        }\n        if ct.get('description'):\n            body['description'] = ct['description']\n        try:\n            rr = req.post(f'{api_url}/api/custom-types', headers=_api_headers, json=body, timeout=60)\n            if rr.status_code >= 400:\n                failed.append(f'{name}: HTTP {rr.status_code} {rr.text[:200]}')\n            else:\n                created.append(name)\n                have.add(name.lower())\n        except Exception as e:\n            failed.append(f'{name}: {e}')\n\n    resolved = have | builtin\n    unresolved = sorted({t for t in want if t.lower() not in resolved})\n    return [{'json': {'kind': 'types', 'created': created, 'existing': existing,\n                      'failed': failed, 'unresolved': unresolved}}]\n\nif not sketch_id:\n    return [{'json': {'error': 'sketch_id required (no env fallback - refusing to write into an unspecified campaign)'}}]\nif not neo_pass:\n    return [{'json': {'error': 'NEO4J_PASSWORD not set - cannot write the graph'}}]\n\n# \u2500\u2500 kind:'nodes' \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# apoc.create.node() takes the label list as a PARAMETER, which is what lets a\n# faithful clone keep each node's original label instead of the f-string-per-label\n# grouping flowsint_client has to do for relationship types.\nif kind == 'nodes':\n    payload = []\n    for r in rows:\n        if not isinstance(r, dict):\n            continue\n        props = dict(r.get('p') or {})\n        props.pop('deleted_at', None)\n        props['sketch_id'] = sketch_id\n        labels = [x for x in (r.get('l') or []) if isinstance(x, str) and x]\n        if not labels:\n            labels = [str(props.get('nodeType') or 'Node')]\n        payload.append({'ref': r.get('ref'), 'labels': labels, 'props': props})\n\n    if not payload:\n        return [{'json': {'kind': 'nodes', 'pairs': [], 'sent': 0, 'created': 0}}]\n\n    # toFloat on x/y: JSON collapses 100.0 to 100, and x/y account for essentially\n    # every FLOAT property in a SPOTTER graph. Without this the layout coordinates\n    # come back as Neo4j INTEGERs. toFloat(null) is null and SET-ing null removes\n    # the property, so nodes that never had coordinates are left untouched.\n    data = _cypher(\n        'UNWIND $rows AS row '\n        'CALL apoc.create.node(row.labels, row.props) YIELD node '\n        'SET node.sketch_id = $sid, node.x = toFloat(node.x), node.y = toFloat(node.y) '\n        'RETURN row.ref AS ref, elementId(node) AS eid',\n        {'rows': payload, 'sid': sketch_id})\n    pairs = [{'ref': x['row'][0], 'eid': x['row'][1]} for x in data]\n    out = {'kind': 'nodes', 'pairs': pairs, 'sent': len(payload), 'created': len(pairs)}\n    if len(pairs) != len(payload):\n        out['error'] = f'node page incomplete: created {len(pairs)} of {len(payload)}'\n    return [{'json': out}]\n\n# \u2500\u2500 kind:'edges' \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# The caller has already rewritten f/to to the NEW elementIds using the ref->eid\n# pairs returned by the node pages. elementId equality is a direct seek, the same\n# fast path flowsint_client._bulk_create_edges_neo4j uses.\nif kind == 'edges':\n    payload = []\n    for r in rows:\n        if not isinstance(r, dict):\n            continue\n        f = r.get('f')\n        t = r.get('to') or r.get('t')\n        if not f or not t:\n            continue\n        props = dict(r.get('p') or {})\n        props.pop('deleted_at', None)\n        # WF07's scoped purge matches relationships on sketch_id, so always stamp it.\n        props['sketch_id'] = sketch_id\n        # Only rewrite the endpoint mirrors when the source relationship carried\n        # them - a minority of relationships hold sketch_id alone and must keep\n        # that shape rather than gain properties they never had.\n        if 'from_element_id' in props:\n            props['from_element_id'] = f\n        if 'to_element_id' in props:\n            props['to_element_id'] = t\n        payload.append({'f': f, 't': t, 'ty': str(r.get('ty') or 'RELATED_TO'), 'p': props})\n\n    if not payload:\n        return [{'json': {'kind': 'edges', 'sent': 0, 'created': 0}}]\n\n    # A row whose endpoint is missing simply produces no output row, so the caller\n    # would never learn the edge was dropped - hence the explicit sent/created\n    # comparison rather than a bare success.\n    data = _cypher(\n        'UNWIND $rows AS row '\n        'MATCH (a) WHERE elementId(a) = row.f '\n        'MATCH (b) WHERE elementId(b) = row.t '\n        'CALL apoc.create.relationship(a, row.ty, row.p, b) YIELD rel '\n        'RETURN count(rel) AS c',\n        {'rows': payload})\n    created = data[0]['row'][0] if data else 0\n    out = {'kind': 'edges', 'sent': len(payload), 'created': created}\n    if created != len(payload):\n        out['error'] = f'edge page incomplete: created {created} of {len(payload)} (endpoint not found)'\n    return [{'json': out}]\n\nreturn [{'json': {'error': f'unknown kind: {kind} (expected types|nodes|edges)'}}]\n"
+      },
+      "id": "e7f8a9b0-20-20-20-000000000002",
+      "name": "Write Sketch Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-20-20-20-000000000003",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Import Webhook": {
+      "main": [
+        [
+          {
+            "node": "Write Sketch Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Sketch Page": {
+      "main": [
+        [
+          {
+            "node": "Return Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "e7f8a9b0-20-20-20-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/import-campaign {sketch_id, kind, rows} - Writes a decrypted campaign bundle into a freshly provisioned sketch (WF16 creates the sketch; this fills it). kind:'types' recreates the bundle's custom node types on this install and returns any that remain unresolvable - without it every imported node carries a nodeType the serializer cannot resolve and GET /graph returns HTTP 500 for the whole sketch. kind:'nodes' creates nodes via apoc.create.node (dynamic labels) and returns ref->elementId pairs the caller uses to rewire edges. kind:'edges' creates relationships via apoc.create.relationship. Node and edge pages report sent vs created and flag any shortfall. REFUSES to fall back to FLOWSINT_SKETCH_ID - a null sketch_id would write an imported graph into the live campaign. Paired with export-campaign (WF19)."
+  },
+  "id": "spotter-workflow-20",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Admin"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+# SPOTTER — Frontend UI overlay
+#
+# Add to the stack alongside the other compose files:
+#   scripts/spotter_compose.sh up -d
+#
+# That wrapper is the only supported entry point: it supplies -p spotter, the env
+# file, the LLM/embed profiles and absolute -f paths, with vendor/flowsint's compose
+# file FIRST, and deliberately omits --project-directory.
+#
+# No host ports published here. Caddy (deployment/docker-compose.caddy.yml) is
+# the sole host-facing entry point, on :5443 -- see deployment/Caddyfile for
+# the per-hostname vhosts that reach this container's 8080/8081/8082/8083/8099.
+
+services:
+  spotter-ui:
+    image: nginx:1.27-alpine
+    container_name: spotter-ui
+    restart: unless-stopped
+    environment:
+      # nginx.conf is mounted as a TEMPLATE (see volumes) because the managed
+      # tunnel control plane needs the shared secret injected server-side —
+      # the operator must not have to paste it into the browser, and it must
+      # not live in the repo's nginx.conf. The dashboard hostname/port are
+      # templated the same way, so the CORS allowlist and login redirects
+      # always match whatever Caddy's dashboard vhost actually is.
+      #
+      # NGINX_ENVSUBST_FILTER is the load-bearing line: without it envsubst
+      # would also expand every nginx runtime variable in the config
+      # ($host, $remote_addr, $upstream_http_x_spotter_user, …) to empty
+      # strings, silently producing a config that starts and gates nothing.
+      # Pinned to exactly these deploy-time values.
+      - NGINX_ENVSUBST_FILTER=TUNNEL_API_TOKEN|SPOTTER_DASHBOARD_HOST|SPOTTER_CADDY_PORT|SPOTTER_N8N_HOST|SPOTTER_GRAPH_HOST|SPOTTER_CHAT_HOST
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - TUNNEL_API_TOKEN=${TUNNEL_API_TOKEN:-}
+      - SPOTTER_DASHBOARD_HOST=${SPOTTER_DASHBOARD_HOST:-spotter.localhost}
+      - SPOTTER_CADDY_PORT=${SPOTTER_CADDY_PORT:-5443}
+      - SPOTTER_N8N_HOST=${SPOTTER_N8N_HOST:-n8n.spotter.localhost}
+      - SPOTTER_GRAPH_HOST=${SPOTTER_GRAPH_HOST:-graph.spotter.localhost}
+      - SPOTTER_CHAT_HOST=${SPOTTER_CHAT_HOST:-chat.spotter.localhost}
+    volumes:
+      # Rendered to /etc/nginx/nginx.conf by the image's own entrypoint at
+      # container start. Because the render happens on start, a config change
+      # needs `up -d --force-recreate spotter-ui` (or at least a restart) —
+      # `nginx -s reload` alone re-reads the PREVIOUSLY generated file.
+      - ${SPOTTER_HOME}/frontend/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
+      - ${SPOTTER_HOME}/frontend:/usr/share/nginx/html:ro
+      # Web screenshots written by WF06's EyeWitness ingest (the runners container in
+      # docker-compose.n8n.yml mounts this SAME host path read-write). Read-only here;
+      # served, auth-gated, by the `location /screenshots/` block in nginx.conf. Same
+      # host path both sides, so a freshly-ingested PNG is immediately servable.
+      - ${SPOTTER_SCREENSHOTS_DIR:-${SPOTTER_HOME}/screenshots}:/usr/share/nginx/screens:ro
+    networks:
+      - flowsint_net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Chunked browser uploads. No host port: nginx on :8080 proxies /ingest/
+  # here and overwrites X-Spotter-User. container_name is pinned because that
+  # proxy is by name. The staging directory is the same host path the task
+  # runners mount read-write; it is not the SharpHound drop folder.
+  spotter-ingest:
+    build:
+      # Absolute — see the note on spotter-auth in docker-compose.flowsint.yml.
+      # A relative context resolves against vendor/flowsint under the multi-file
+      # invocation and Docker then fails the build with "path not found".
+      context: ${SPOTTER_HOME:?set SPOTTER_HOME in .env — see deployment/setup-secrets.sh}/ingest-api
+    container_name: spotter-ingest
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      SPOTTER_INGEST_STAGING_DIR: /data/ingest-staging
+      SPOTTER_STAGED_UPLOAD_MAX_BYTES: ${SPOTTER_STAGED_UPLOAD_MAX_BYTES:-4294967296}
+      SPOTTER_STAGED_UPLOAD_DISK_CAP: ${SPOTTER_STAGED_UPLOAD_DISK_CAP:-21474836480}
+      # Same knob the task runner reads. The browser asks /ingest/limits before
+      # the first chunk, so a changed cap is the one the warning uses.
+      SPOTTER_RUNNER_PARSE_MAX_BYTES: ${SPOTTER_RUNNER_PARSE_MAX_BYTES:-1073741824}
+    volumes:
+      - ${SPOTTER_INGEST_STAGING_DIR:-${SPOTTER_HOME}/ingest-staging}:/data/ingest-staging
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+    networks:
+      - flowsint_net
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7053/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+networks:
+  flowsint_net:
+    external: true
+    name: ${FLOWSINT_NETWORK:-flowsint_network_prod}

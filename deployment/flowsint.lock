@@ -1,0 +1,15 @@
+# Pinned Flowsint upstream for reproducible SPOTTER installs.
+#
+# SPOTTER does not define the data tier: Neo4j, Postgres, Redis, flowsint-api and
+# the Flowsint SPA all live in this separate repository, whose compose file is the
+# FIRST -f of every SPOTTER launch. Pinning it means every deployment -- and every
+# student in a class -- starts from the same base, and that the patches in
+# deployment/flowsint-patches/ apply cleanly.
+#
+# scripts/bootstrap.sh clones this commit and applies those patches. To move to a
+# newer upstream: update FLOWSINT_COMMIT, re-check each patch still applies, and
+# re-run the bootstrap.
+FLOWSINT_REPO=https://github.com/reconurge/flowsint.git
+FLOWSINT_COMMIT=0d092c44f0db5bae76093966f812f8a4073bee36
+# 2026-07-01, "Merge pull request #191 from Ghraven/fix/fraudscore-aware-utc".
+# Apache-2.0; see the LICENSE, DISCLAIMER.md and ETHICS.md in that repository.
