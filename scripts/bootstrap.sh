@@ -92,6 +92,8 @@ is_unset() {
 }
 
 # ── 0. preconditions ─────────────────────────────────────────────────────────
+step "Installing host dependencies"
+"$ROOT_DIR/scripts/install_host_deps.sh"
 step "Checking prerequisites"
 for bin in docker python3 curl openssl jq git sops age-keygen; do
     command -v "$bin" >/dev/null || die "$bin is required but not installed"
