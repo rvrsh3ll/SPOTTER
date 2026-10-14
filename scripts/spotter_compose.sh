@@ -344,6 +344,17 @@ esac
 
 # NOT `exec`: exec replaces this shell, so the EXIT trap would never run and the
 # decrypted env file would outlive the command it was made for.
+# deployment/docker-compose.flowsint.yml marks this network external. Flowsint's
+# own compose creates it, but a merged `up` will not, so a fresh install dies
+# with "declared as external, but could not be found".
+case "$_subcommand" in
+    up|create|run|start|restart)
+        _net="${FLOWSINT_NETWORK:-flowsint_network_prod}"
+        if ! docker network inspect "$_net" >/dev/null 2>&1; then
+            docker network create "$_net" >/dev/null
+        fi
+        ;;
+esac
 _rc=0
 docker compose \
     -p spotter \
