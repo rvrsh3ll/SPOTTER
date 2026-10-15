@@ -219,6 +219,7 @@ if [[ "$(python3 "$ROOT_DIR/scripts/spotter_user.py" list 2>/dev/null | tail -n 
 else
     info "This is the login for the SPOTTER dashboard itself."
     info "Press Enter with no username to create the administrator in the browser wizard."
+    info "Username: 1-32 chars of a-z, 0-9, dot, underscore or hyphen (not an email address)."
     read -r -p "        operator username: " SPOTTER_OP
     if [[ -z "$SPOTTER_OP" ]]; then
         ok "no console account — the first browser visit opens administrator setup"
