@@ -119,6 +119,13 @@ step "Flowsint checkout ($FLOWSINT_HOME)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/deployment/flowsint.lock"
 if [[ ! -d "$FLOWSINT_HOME/.git" ]]; then
+    # An interrupted earlier clone can leave a non-empty directory without
+    # .git; git clone then fails with "already exists and is not an empty
+    # directory". Only remove incomplete checkouts — never a real .git tree.
+    if [[ -e "$FLOWSINT_HOME" ]]; then
+        warn "incomplete Flowsint checkout at $FLOWSINT_HOME (no .git) — removing so clone can proceed"
+        rm -rf -- "$FLOWSINT_HOME"
+    fi
     info "cloning $FLOWSINT_REPO at $FLOWSINT_COMMIT"
     # Default target is $ROOT_DIR/vendor/flowsint, so the parent may not exist
     # yet. vendor/ is gitignored: this is an upstream checkout with its own
