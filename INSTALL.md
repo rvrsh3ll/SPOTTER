@@ -105,9 +105,15 @@ For a GPU-less host, set `SPOTTER_LLM_TIER=remote` or `none` before bootstrap:
 
 ```bash
 sudo deployment/setup-secrets.sh
-sudoedit .env
+sudo nano .env
 sudo scripts/bootstrap.sh
 ```
+
+Do not use `sudoedit` / `sudo -e` when the checkout lives under a user-writable
+directory (for example `~/SPOTTER`). Modern sudo refuses that with
+`editing files in a writable directory is not permitted`. Prefer `sudo nano .env`
+(or another editor via `sudo`), or open a root shell (`sudo -i`), `cd` into the
+checkout, and edit `.env` normally.
 
 For `local-small`, set both `VLLM_MODEL` and `VLLM_MAX_MODEL_LEN`. For `remote`,
 also set `VLLM_URL` and `VLLM_API_KEY`. Keep credential values out of published files.
@@ -216,6 +222,8 @@ Two things that are not obvious:
 | **Open WebUI signup is refused** | An account already exists — only the first one can be created that way. Sign in instead. |
 | **`setup_openwebui.py` fails to sign in** | Either the account has not been created yet (visit https://chat.spotter.localhost:5443 and sign up) or `OWUI_ADMIN_*` in `.env` no longer matches it. |
 | **vLLM will not start / the engine dies** | On `local-small`, `VLLM_MAX_MODEL_LEN` is probably larger than the KV cache can hold. Read the "GPU KV cache size" line in `docker logs spotter-vllm` and set the window below it. |
+| **`sudoedit .env` fails with "editing files in a writable directory is not permitted"** | Expected when the checkout is under a user-writable path such as `~/SPOTTER`. Use `sudo nano .env` (or another editor via `sudo`), or edit from a root shell instead. |
+| **`fatal: destination path '.../vendor/flowsint' already exists and is not an empty directory`** | A previous interrupted clone left a partial Flowsint checkout. Remove it and re-run bootstrap: `sudo rm -rf vendor/flowsint` then `sudo scripts/bootstrap.sh`. Bootstrap also clears an incomplete checkout (present, but no `.git`) automatically. |
 
 ---
 

@@ -359,18 +359,6 @@ def cmd_adopt(conn, args) -> int:
     limit = int(os.environ.get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or
                 _load_dotenv().get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or 3)
     if current != name and owned >= limit:
-
-    p = sub.add_parser("approve", help="approve a pending registration")
-    p.add_argument("username")
-
-    p = sub.add_parser("reject", help="reject a registration and drop its sessions")
-    p.add_argument("username")
-
-    p = sub.add_parser("admin", help="grant or revoke administrator")
-    p.add_argument("username")
-    role = p.add_mutually_exclusive_group(required=True)
-    role.add_argument("--grant", dest="admin", action="store_true")
-    role.add_argument("--revoke", dest="admin", action="store_false")
         print(f"{name} already owns {owned} campaign(s); limit is {limit}.", file=sys.stderr)
         return 1
 
@@ -420,28 +408,34 @@ def main() -> int:
     p.add_argument("username")
     p.add_argument("--force", action="store_true", help="reassign an already-owned campaign")
 
+    p = sub.add_parser("approve", help="approve a pending registration")
+    p.add_argument("username")
+
+    p = sub.add_parser("reject", help="reject a registration and drop its sessions")
+    p.add_argument("username")
+
+    p = sub.add_parser("admin", help="grant or revoke administrator")
+    p.add_argument("username")
+    role = p.add_mutually_exclusive_group(required=True)
+    role.add_argument("--grant", dest="admin", action="store_true")
+    role.add_argument("--revoke", dest="admin", action="store_false")
+
     args = parser.parse_args()
 
     path = _resolve_db_path(args.db)
-        "approve": cmd_approve, "reject": cmd_reject, "admin": cmd_role,
-    }
-    try:
-        return handlers[args.command](conn, args)
-    except db.LastAdminError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1ripts/spotter_user.py add <username>",
-              file=sys.stderr)
-        return 1
-
     conn = db.connect(path)
     handlers = {
         "add": cmd_add, "list": cmd_list, "passwd": cmd_passwd,
         "enable": cmd_enable_disable, "disable": cmd_enable_disable,
         "delete": cmd_delete, "sessions": cmd_sessions,
         "campaigns": cmd_campaigns, "adopt": cmd_adopt,
+        "approve": cmd_approve, "reject": cmd_reject, "admin": cmd_role,
     }
     try:
         return handlers[args.command](conn, args)
+    except db.LastAdminError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
