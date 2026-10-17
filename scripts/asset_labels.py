@@ -10,7 +10,7 @@ sync by hand:
 
     scripts/tech_enricher.py                      TECH_LABELS / READ_PROPS
     n8n-workflows/04-attack-path-analyzer.json    Fetch Full Graph, Score Attack Paths
-    n8n-workflows/12-tech-inventory.json          Build Tech Inventory + Narratives
+    n8n-workflows/12-tech-inventory.json          Build Tech Inventory
     llm/tools/attack_path_tool.py                 the exploit-index Cypher
     llm/tools/tech_context_tool.py                get_attack_surface_for_host
     llm/tools/technology_tool.py                  the inventory subsets

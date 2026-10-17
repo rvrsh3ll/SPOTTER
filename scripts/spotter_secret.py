@@ -10,7 +10,7 @@ Stdlib only -- run it directly, no virtualenv needed:
 
     scripts/spotter_secret.py list
     scripts/spotter_secret.py set SHODAN_API_KEY
-    scripts/spotter_secret.py set CENSYS_API_KEY --tier vendors
+    scripts/spotter_secret.py set CENSYS_API_ID --tier vendors
     scripts/spotter_secret.py get FLARE_API_KEY
     scripts/spotter_secret.py rm SLACK_WEBHOOK_URL
     scripts/spotter_secret.py edit vendors

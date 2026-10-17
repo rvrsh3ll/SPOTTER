@@ -96,7 +96,7 @@ TOOL_DEFS = [
         "aliases": ("spotter_technology",),
         "name": "Get Technology Intelligence",
         "file": "technology_tool.py",
-        "desc": "OS inventory, per-user tech stacks, high-value technology users, and attack narratives",
+        "desc": "OS inventory, per-user tech stacks, and high-value technology users",
     },
     {
         "id":   "tech_context_tool",

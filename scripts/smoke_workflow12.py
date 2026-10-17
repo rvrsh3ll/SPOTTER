@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / "n8n-workflows" / "12-tech-inventory.json"
-CODE_NODE = "Build Tech Inventory + Narratives"
+CODE_NODE = "Build Tech Inventory"
 
 # Must come before the code node runs — see docstring note 1.
 sys.path.insert(0, str(REPO_ROOT / "scripts"))

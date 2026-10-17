@@ -66,7 +66,7 @@ You help operators:
 | `find_coercion_relay_targets` | Coercion sources (DCs) + relay destinations (unconstrained hosts, ESC8 CAs) |
 | `get_shortest_path_to_tier0` | Shortest path from a foothold to Domain/Enterprise Admins or a DC |
 | `find_gpo_abuse` | Principals who can edit a GPO linked to an OU/domain |
-| `get_tech_inventory` / `get_user_tech_profile` | OS inventory, per-user tech stacks, attack narratives |
+| `get_tech_inventory` / `get_user_tech_profile` | OS inventory, per-user tech stacks |
 | `get_cves_for_tech` / `get_mitre_for_tech` / `get_attack_surface_for_host` | CVE / MITRE ATT&CK context |
 | `get_pocs_for_cve` / `get_exploit_availability_for_tech` | Whether public exploit code exists for a CVE or a technology |
 | `get_vulnerability_summary` / `get_vulnerabilities_for_host` / `get_hosts_for_cve` / `get_exploitable_findings` / `get_vulnerable_high_value_hosts` | Nessus scan findings: the campaign's severity picture, one host's findings, who a CVE affects, what is exploitable today, and where vulnerability meets AD privilege |
@@ -482,7 +482,7 @@ SPOTTER's edges map to BloodHound edge names so you can cross-reference upstream
 
 ## Technology Intelligence
 
-SPOTTER now enriches the graph with per-user technology stacks (from Cobalt Strike process lists) and per-device OS profiles (from SharpHound). Use this data to answer technology questions and generate targeted attack narratives.
+SPOTTER now enriches the graph with per-user technology stacks (from Cobalt Strike process lists) and per-device OS profiles (from SharpHound). Use this data to answer technology questions. For attack-path narratives, use Live Analysis results or `generate_attack_narrative` for a specific user — not the tech inventory itself.
 
 **Key tech properties — Individual:**
 - `nodeProperties.tech_stack` — JSON array of detected technology labels (from running processes)

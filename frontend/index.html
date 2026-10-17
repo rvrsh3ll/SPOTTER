@@ -1624,35 +1624,6 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
 .ti-os-cell { color: var(--text); }
 .ti-os-cell .ti-eol { font-size: 8px; display: block; }
 
-/* Attack narrative cards */
-.ti-narr-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 3px; padding: 14px 16px; margin-bottom: 12px;
-  position: relative; overflow: hidden;
-}
-.ti-narr-card::before {
-  content: ''; position: absolute; left: 0; top: 0; bottom: 0;
-  width: 2px; background: var(--accent);
-}
-.ti-narr-hdr { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; }
-.ti-narr-target { font-family: var(--mono); font-size: 11px; color: var(--text); }
-.ti-narr-meta   { font-family: var(--mono); font-size: 9px; color: var(--dim); margin-top: 2px; }
-.ti-narr-hvtech { font-family: var(--mono); font-size: 9px; color: var(--accent); margin-top: 3px; }
-.ti-narr-phase  { margin-bottom: 8px; }
-.ti-phase-lbl {
-  font-family: var(--mono); font-size: 8px; letter-spacing: .15em; text-transform: uppercase;
-  color: var(--accent); margin-bottom: 5px; }
-.ti-phase-body { font-family: var(--sans); font-size: 11px; color: var(--dim); line-height: 1.6; }
-.ti-cred-steps { margin: 0; padding-left: 0; list-style: none; }
-.ti-cred-steps li { padding: 3px 0 3px 14px; position: relative; font-family: var(--mono); font-size: 9px; color: var(--dim); line-height: 1.5; border-bottom: 1px solid rgba(37,43,58,.4); }
-.ti-cred-steps li:last-child { border-bottom: none; }
-.ti-cred-steps li::before { content: '›'; position: absolute; left: 0; color: var(--accent); }
-.ti-attck-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
-.ti-attck-tag {
-  font-family: var(--mono); font-size: 8px; border: 1px solid rgba(61,143,188,.3);
-  border-radius: 2px; padding: 1px 6px; color: rgba(61,143,188,.8);
-}
-
 /* Tech Intel drilldown modal, and the vulnerability pop-out that reuses its
    .ilm-* shell (one finding or one host, in full). */
 #ti-dm, #vs-dm { position: fixed; inset: 0; background: rgba(13,15,22,.88); backdrop-filter: blur(2px);
@@ -2826,13 +2797,6 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
           </table>
         </div>
 
-        <!-- Attack Narratives -->
-        <div class="ti-section" id="ti-narr-section" style="display:none;">
-          <span>Attack Narratives</span>
-          <span style="font-size:9px;color:var(--dim);">Analysis LLM — technology-specific attack chains</span>
-        </div>
-        <div id="ti-narratives"></div>
-
       </div><!-- #ti-content -->
 
       <!-- ── Vulnerability Findings (Nessus, WF25) ─────────────────────
@@ -3216,8 +3180,9 @@ function toggleTheme() {
 }
 
 /* ── Configuration panel ───────────────────────────────────────────────
-   Runtime limits for WF04 (attack path search), WF11 (credential scan) and
-   WF13 (cloud bucket probe). Values live server-side in the Neo4j registry
+   Runtime limits for WF04 (attack path search), WF11 (credential scan),
+   WF13 (cloud bucket probe), and the global per-user campaign ownership
+   cap (WF16/17/18). Values live server-side in the Neo4j registry
    (:SpotterMeta {key:'settings'}) behind WF22, NOT in localStorage: they are
    global to the deployment, so every operator has to see the same numbers, and
    the workflows read them at run time rather than from this browser.
@@ -3310,6 +3275,9 @@ async function saveConfig() {
     renderConfig(!!d.is_admin);
     document.getElementById('cfg-note').textContent =
       'Saved. Applies to the next run of each workflow.';
+    // Campaign quota is enforced server-side on the next list/save; refresh the
+    // Ingest readout so the new limit shows without a full page reload.
+    try { if (typeof syncCampaignsOnBoot === 'function') syncCampaignsOnBoot(); } catch (_) {}
   } catch (e) {
     document.getElementById('cfg-err').textContent = String((e && e.message) || e);
   } finally {
@@ -5686,6 +5654,18 @@ async function fetchTunnelJson(path, opts = {}, { allowNotOk = false } = {}) {
 
   const ct = resp.headers.get('content-type') || '';
   if (!ct.includes('application/json')) {
+    // nginx used to return a bare HTML 403 for non-admin tunnel writes (and,
+    // due to a rewrite-phase bug, for admins too). Name the common cases so
+    // the toast is actionable rather than "non-JSON response (HTTP 403)".
+    if (resp.status === 403) {
+      throw new Error(
+        'Forbidden (HTTP 403) — tunnel control writes need an administrator session. ' +
+        'Confirm you are signed in as an admin, then hard-refresh. If you are already admin, ' +
+        'recreate spotter-ui so nginx picks up the current config.');
+    }
+    if (resp.status === 401) {
+      throw new Error('Session expired or unauthenticated (HTTP 401) — sign in again');
+    }
     throw new Error('Tunnel manager returned non-JSON response (HTTP ' + resp.status + ')');
   }
 
@@ -5700,6 +5680,11 @@ async function fetchTunnelJson(path, opts = {}, { allowNotOk = false } = {}) {
       throw new Error(
         'Unauthorized tunnel control request — the gateway is sending a token the tunnel sidecar rejects. ' +
         'Check TUNNEL_API_TOKEN matches in spotter-ui and ssh-tunnel-api, and recreate both.');
+    }
+    if (resp.status === 403 || code === 'forbidden') {
+      throw new Error(
+        data?.error ||
+        'Forbidden — tunnel control writes require an administrator account');
     }
     throw new Error(data?.error || data?.message || ('Tunnel manager request failed (HTTP ' + resp.status + ')'));
   }
@@ -6506,7 +6491,18 @@ async function fetchJson(url, opts) {
         + 'If this was a chunk, the ingest service closed the connection — retry the upload. '
         + 'Do not raise N8N_PAYLOAD_SIZE_MAX.');
     }
-    throw new Error('Could not connect — is the Docker stack running? (' + e.message + ')');
+    // Long webhooks (domain-recon often 2–4+ min) also land here when the browser
+    // aborts mid-wait (tab sleep, navigation, operator refresh). That is HTTP 499
+    // on the proxy and n8n may still finish — do not claim the stack is down.
+    const msg = String(e && e.message || e || '');
+    const aborted = e && (e.name === 'AbortError' || /aborted|abort/i.test(msg));
+    if (aborted) {
+      throw new Error('Request was cancelled before a response arrived (' + msg + ')');
+    }
+    throw new Error('Network request failed (' + msg + '). '
+      + 'If this was a long job (Domain Recon, Analysis), leave the tab open until it finishes — '
+      + 'a mid-run refresh looks like a dead stack even when n8n completes. '
+      + 'Only restart Docker if other short webhooks also fail.');
   }
   // The nginx auth_request gate answers 401 for every proxied path once the
   // session is gone, so catch it before the content-type checks below.
@@ -11895,7 +11891,7 @@ function spotterDataInventory() {
   });
 
   items.push({
-    source: 'Tech inventory (WF12: OS inventory + EOL risk, software catalog, per-user tech profiles, CVEs, attack narratives)',
+    source: 'Tech inventory (WF12: OS inventory + EOL risk, software catalog, per-user tech profiles, CVEs)',
     tool: 'get_tech_intel',
     status: td ? 'AVAILABLE' : 'EMPTY',
     detail: td
@@ -11906,7 +11902,6 @@ function spotterDataInventory() {
           (td.eol_device_count || 0) + ' EOL devices',
           Object.keys(td.tech_catalog || {}).length + ' technologies',
           (td.vulnerable_tech || []).length + ' vulnerable stacks',
-          (td.attack_narratives || []).length + ' narratives',
         ].join(', ')
       : 'No tech inventory yet — the operator runs it from the Tech Intel tab.',
   });
@@ -12125,7 +12120,6 @@ const TECH_SECTIONS = {
   cloud:      ['cloud_exposure','cloud_exposure_total','cloud_unattributed'],
   catalog:    ['tech_catalog'],
   users:      ['user_tech_profiles'],
-  narratives: ['attack_narratives'],
   devices:    ['os_device_map','device_dossier_map','tech_user_map'],
 };
 
@@ -12641,11 +12635,11 @@ const SPOTTER_TOOLS = [
     type: 'function',
     function: {
       name: 'get_tech_intel',
-      description: 'Technology inventory (workflow 12): OS inventory with EOL risk, software/technology catalog, per-user technology profiles, vulnerable stacks with CVEs, legacy systems, and LLM attack narratives. Covers only hosts in use by default — enabled in AD with a logon or machine-password timestamp inside the activity window (90 days unless changed); decommissioned computer objects are excluded and listed separately in "stale", so check activity_filter_applied / activity_days in "summary" before quoting a device count as the size of the estate. Technologies resolved from ingested process listings are first-class Technology nodes and appear in "vulnerable" with the hosts running them, while "catalog" counts derive from per-user profiles — so a technology can be in one and not the other. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
+      description: 'Technology inventory (workflow 12): OS inventory with EOL risk, software/technology catalog, per-user technology profiles, vulnerable stacks with CVEs, and legacy systems. Attack-path narratives are not part of this inventory — they come from Live Analysis (workflow 10). Covers only hosts in use by default — enabled in AD with a logon or machine-password timestamp inside the activity window (90 days unless changed); decommissioned computer objects are excluded and listed separately in "stale", so check activity_filter_applied / activity_days in "summary" before quoting a device count as the size of the estate. Technologies resolved from ingested process listings are first-class Technology nodes and appear in "vulnerable" with the hosts running them, while "catalog" counts derive from per-user profiles — so a technology can be in one and not the other. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
       parameters: {
         type: 'object',
         properties: {
-          section: { type: 'string', description: 'summary | os | legacy | stale | vulnerable | catalog | pasted | users | narratives | devices | all' },
+          section: { type: 'string', description: 'summary | os | legacy | stale | vulnerable | catalog | pasted | users | devices | all' },
           query:   { type: 'string', description: 'Optional keyword filter (technology, OS or user name)' },
           limit:   { type: 'integer', description: 'Max entries per list (default 25)' },
         },
@@ -15469,6 +15463,9 @@ function _fofaEmptyNote(data) {
   const legacyNoKey = (data.errors || []).some(e => /FOFA_API_KEY not set/i.test(String(e)));
   if (st.state === 'no_key' || legacyNoKey)
     return 'FOFA_API_KEY not set — FOFA requires an API key (no keyless mode); skipped';
+  if (st.state === 'probed')
+    return 'FOFA_API_KEY not set — data from HTTP probing of discovered subdomains; '
+      + 'set FOFA_API_KEY for full FOFA.io results (ports, OS, geo)';
   if (st.state === 'error') {
     const detail = String(st.detail || 'error');
     return 'FOFA returned no data — ' + detail
@@ -17178,9 +17175,9 @@ function exportPerimeterTech(fmt) {
 
 /* ── Tech Intel · full tab export ────────────────────────────────────
    The tab could only ever export its OS Inventory card, so the software
-   catalog, the CVE-mapped stacks, every user tech profile and the attack
-   narratives — the bulk of what a run produces — had no way out of the
-   browser. This writes all of it, untruncated. */
+   catalog, the CVE-mapped stacks and every user tech profile — the bulk
+   of what a run produces — had no way out of the browser. This writes all
+   of it, untruncated. Attack-path narratives live on Live Analysis (WF10). */
 function buildTechIntelReport(data) {
   data = data || {};
   const sections = [];
@@ -17257,25 +17254,6 @@ function buildTechIntelReport(data) {
     sections.push({ key: 'tech-users', title: `Technology → Users · ${tumRows.length}`,
       blocks: [{ type: 'table', columns: ['Technology', 'User', 'Workstation', 'Department', 'Admin'],
         rows: tumRows }] });
-  }
-
-  const narratives = data.attack_narratives || [];
-  if (narratives.length) {
-    sections.push({ key: 'narratives', title: `Attack Narratives · ${narratives.length}`,
-      blocks: [{ type: 'table',
-        columns: ['Target', 'Difficulty', 'High-value tech', 'Initial access', 'Credential extraction',
-                  'Pivot target', 'Pivot method', 'MITRE techniques', 'Relevant CVEs'],
-        rows: narratives.map((n, i) => {
-          const up = n.user_profile || {};
-          const cred = Array.isArray(n.credential_extraction)
-            ? n.credential_extraction.join(' → ') : (n.credential_extraction || '');
-          return [n.target || up.user || `Target ${i + 1}`,
-            String(n.difficulty || 'medium').toUpperCase(),
-            n.hv_tech || (up.hv_tech || []).join(', '),
-            n.initial_access || '', cred, n.pivot_target || '', n.pivot_method || '',
-            (n.mitre_techniques || []).map(m => m.id || m).join(', '),
-            (n.relevant_cves || []).map(c => c.id || c).join(', ')];
-        }) }] });
   }
 
   const legacy = data.legacy_systems || [];
@@ -18091,6 +18069,16 @@ async function runDomainRecon(domainOverride, sources) {
   if (btn)    btn.disabled = true;
   _drResetReveal();   // a fresh (masked) pull supersedes any prior reveal
   ss('drsp');
+  // Domain recon is a multi-minute OSINT pull. Tell the operator up front so a
+  // 2–4 min spinner is not mistaken for a hang, and so they do not refresh —
+  // a mid-run navigation aborts the fetch (proxy 499) while WF13 still finishes.
+  toast('Domain recon started for ' + domain + ' — keep this tab open (often 2–4+ min)…', 'inf');
+  if (emptyEl) {
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = `<strong>Running domain recon for ${esc(domain)}…</strong><br>`
+      + 'Leave this tab open. A refresh or tab sleep cancels the browser wait even when '
+      + 'n8n finishes and writes the graph. Typical runtime is a few minutes.';
+  }
 
   try {
     const data = await fetchJson(apiUrl('domain-recon'), {
@@ -18191,15 +18179,25 @@ async function runDomainRecon(domainOverride, sources) {
     // throws, but anything else on the render path could still surface one, and
     // pointing the operator at n8n for it sends them to debug a healthy stack.
     const storage = isQuotaError(e);
+    const msg = String(e && e.message || e || '');
+    // Mid-run tab sleep / refresh / navigation aborts fetch while WF13 still
+    // completes and often writes the graph. That used to read as "Docker down".
+    const midRunAbort = !storage && /cancelled before a response|Network request failed|Failed to fetch|aborted/i.test(msg);
     toast((storage ? 'Domain recon ran, but the browser could not store it: '
-                   : 'Domain recon failed: ') + e.message, 'err');
+                   : midRunAbort ? 'Domain recon wait ended early: '
+                   : 'Domain recon failed: ') + msg, midRunAbort ? 'inf' : 'err');
     if (emptyEl) {
       emptyEl.style.display = 'block';
       emptyEl.innerHTML = storage
-        ? `<strong>Browser storage is full:</strong> ${esc(e.message)}<br>`
+        ? `<strong>Browser storage is full:</strong> ${esc(msg)}<br>`
           + 'The recon itself succeeded — n8n and workflow 13 are fine. Clear old ingest-log '
           + 'entries or a stale campaign to make room, then re-run.'
-        : `<strong>Connection failed:</strong> ${esc(e.message)}<br>Ensure n8n is running and workflow 13 is imported and active.`;
+        : midRunAbort
+        ? `<strong>Browser lost the wait — n8n may still have finished.</strong><br>${esc(msg)}<br>`
+          + 'Domain Recon often takes <em>2–4+ minutes</em>. Keep this tab focused until the '
+          + 'success toast. Graph nodes may already exist (Targets / Tech Intel / Web). '
+          + 'Re-run only if those panels stay empty after a few minutes.'
+        : `<strong>Domain recon failed:</strong> ${esc(msg)}`;
     }
   } finally {
     es('drsp');
@@ -20862,8 +20860,8 @@ function downloadIngestEntry(id) {
 /* ══════════════════════════════════════════════════════════════════
    TECH INTEL TAB
    Calls n8n workflow 12 (/webhook/tech-inventory) to fetch OS
-   inventory, software catalog, user-device-tech profiles, and
-   LLM-generated attack narratives.
+   inventory, software catalog, and user-device-tech profiles.
+   Attack-path narratives are produced by Live Analysis (WF10), not here.
 ══════════════════════════════════════════════════════════════════ */
 
 const HIGH_VALUE_TECH_SET = new Set(window.SPOTTER_HIGH_VALUE_TECH || []);
@@ -20885,8 +20883,7 @@ function tiCampKey()  { return getActiveCamp()?.id || '_default'; }
 
 /* ── Analyst context — the accumulated Context lines the operator typed above
       Process file, one per ingest, per campaign. Read by Run Tech Inventory
-      (WF12, which folds it into the attack-narrative prompt) and by the chat
-      tool get_campaign_context.
+      (WF12) and by the chat tool get_campaign_context.
 
       A deliberate, scoped exception to the "never persist ingested content" rule
       documented at the ingest log below: that rule exists because uploads can be
@@ -20960,7 +20957,9 @@ function _compactTechIntelForCache(data) {
   return {
     ...d,
     user_tech_profiles: Array.isArray(d.user_tech_profiles) ? d.user_tech_profiles.slice(0, 80) : [],
-    attack_narratives: Array.isArray(d.attack_narratives) ? d.attack_narratives.slice(0, 20) : [],
+    // Attack narratives were removed from Tech Intel (Live Analysis / WF10 only).
+    // Force empty so stale localStorage caches cannot resurface the old section.
+    attack_narratives: [],
     legacy_systems: Array.isArray(d.legacy_systems) ? d.legacy_systems.slice(0, 120) : [],
     stale_devices: Array.isArray(d.stale_devices) ? d.stale_devices.slice(0, 200) : [],
     vulnerable_tech: Array.isArray(d.vulnerable_tech) ? d.vulnerable_tech.slice(0, 60) : [],
@@ -21921,7 +21920,6 @@ function renderTechIntel(data) {
   const osInv    = data.os_inventory    || [];
   const catalog  = data.tech_catalog    || {};
   const profiles = data.user_tech_profiles || [];
-  const narratives = data.attack_narratives || [];
   const legacy   = data.legacy_systems  || [];
   const eolCount = data.eol_device_count || 0;
   const hvCount  = data.hv_user_count   || 0;
@@ -22400,98 +22398,6 @@ function renderTechIntel(data) {
       <td><div class="ti-tech-tags">${hvTags}${stdTags}${moreTags}</div>${mitreTags ? `<div style="margin-top:4px;">${mitreTags}</div>` : ''}${riskBadge ? `<div style="margin-top:4px;">${riskBadge}</div>` : ''}</td>
     </tr>`;
   }).join('') || `<tr><td colspan="5" style="color:var(--dim);padding:12px 10px;">No user tech profiles found.</td></tr>`;
-
-  // ── Attack Narratives ──────────────────────────────────────────────────
-  const narrSection = document.getElementById('ti-narr-section');
-  const narrDiv     = document.getElementById('ti-narratives');
-  if (!narratives.length) {
-    narrSection.style.display = 'none';
-    narrDiv.innerHTML = '';
-    return;
-  }
-  narrSection.style.display = '';
-
-  narrDiv.innerHTML = narratives.map((n, i) => {
-    const up = n.user_profile || {};
-    const pd2 = up.primary_device || {};
-    const hvTech = esc(n.hv_tech || (up.hv_tech||[]).join(', ') || '—');
-
-    const credSteps = Array.isArray(n.credential_extraction)
-      ? n.credential_extraction.map(s => `<li>${esc(s)}</li>`).join('')
-      : `<li>${esc(n.credential_extraction || '—')}</li>`;
-
-    const attckTags = (n.attck_techniques || []).map(t =>
-      `<span class="ti-attck-tag">${esc(t)}</span>`
-    ).join('');
-
-    const nMitre = (n.mitre_techniques || []);
-    const mitreTags = nMitre.slice(0, 6).map(m =>
-      `<span class="ti-mitre-tag" title="${esc(m.name || m.id || m)}">${esc(m.id || m)}</span>`
-    ).join('') + _ovfChip('ti', {
-      title: `MITRE ATT&CK techniques · ${n.target || up.user || 'narrative'}`, noun: 'techniques', layout: 'tags',
-      columns: ['Technique ID', 'Name'],
-      items: nMitre.map(m => ({
-        text: [m.id || m, m.name].filter(Boolean).join(' '),
-        html: `<span style="color:var(--text);">${esc(m.id || m)}</span>${m.name ? `<span style="color:var(--dim);"> &middot; ${esc(m.name)}</span>` : ''}`,
-        csv: [String(m.id || m || ''), m.name || ''],
-      })),
-    }, { shown: 6, cls: 'ovf-inline' });
-
-    const nCves = (n.relevant_cves || []);
-    const cveTags = nCves.slice(0, 5).map(c =>
-      `<span class="ti-cve-badge" title="${esc(c.description || '')}">${esc(c.id || c)}</span>`
-    ).join('') + _ovfChip('ti', {
-      title: `Relevant CVEs · ${n.target || up.user || 'narrative'}`, noun: 'CVEs',
-      columns: ['CVE', 'Description'],
-      items: nCves.map(c => ({
-        text: [c.id || c, c.description].filter(Boolean).join(' '),
-        html: `<span style="color:var(--text);">${esc(c.id || c)}</span>${c.description ? `<span style="color:var(--dim);"> &middot; ${esc(c.description)}</span>` : ''}`,
-        csv: [String(c.id || c || ''), c.description || ''],
-      })),
-    }, { shown: 5, cls: 'ovf-inline' });
-
-    const diffcls = `scen-diff-${(n.difficulty||'medium').toLowerCase()}`;
-    const diffTag = `<span class="scen-tag ${diffcls}">${esc((n.difficulty||'MEDIUM').toUpperCase())}</span>`;
-
-    const breachLine = up.breach_count > 0
-      ? `<div class="ti-narr-meta" style="color:var(--accent);">&#9888; Flare: ${up.breach_count} breach record${up.breach_count!==1?'s':''}${up.has_stealer?' — STEALER LOG detected':''} — credential reuse likely</div>`
-      : '';
-
-    return `<div class="ti-narr-card">
-      <div class="ti-narr-hdr">
-        <div style="flex:1;">
-          <div class="ti-narr-target">${esc(n.target || up.user || `Target ${i+1}`)}</div>
-          ${up.full_name ? `<div class="ti-narr-meta">${esc(up.full_name)} — ${esc(up.department||up.job_title||'')}</div>` : ''}
-          ${pd2.hostname ? `<div class="ti-narr-meta">Workstation: <span style="font-family:var(--mono);color:var(--text)">${esc(pd2.hostname)}</span> &nbsp;OS: ${esc(pd2.os||'?')} <span class="os-risk-pill risk-${pd2.os_risk||'unknown'}">${OS_RISK_LABEL[pd2.os_risk]||''}</span></div>` : ''}
-          ${hvTech !== '—' ? `<div class="ti-narr-hvtech">&#9888; HV TECH: ${hvTech}</div>` : ''}
-          ${breachLine}
-        </div>
-        <div>${diffTag}${_correctChip('wf12', _tiData?.analysis_run_id, `narratives[${i}].difficulty`, n.difficulty)}</div>
-      </div>
-
-      ${n.initial_access ? `<div class="ti-narr-phase">
-        <div class="ti-phase-lbl">Phase 1 — Initial Access</div>
-        <div class="ti-phase-body">${esc(n.initial_access)}</div>
-      </div>` : ''}
-
-      ${credSteps ? `<div class="ti-narr-phase">
-        <div class="ti-phase-lbl">Phase 2 — Credential Extraction</div>
-        <ul class="ti-cred-steps">${credSteps}</ul>
-      </div>` : ''}
-
-      ${n.pivot_target ? `<div class="ti-narr-phase">
-        <div class="ti-phase-lbl">Phase 3 — Pivot</div>
-        <div class="ti-phase-body">
-          <strong style="color:var(--text)">Target:</strong> ${esc(n.pivot_target)}<br>
-          <strong style="color:var(--text)">Method:</strong> ${esc(n.pivot_method||'—')}
-        </div>
-      </div>` : ''}
-
-      ${mitreTags ? `<div class="ti-narr-meta" style="margin-top:6px;">MITRE ATT&amp;CK: ${mitreTags}</div>` : ''}
-      ${cveTags ? `<div class="ti-narr-meta" style="margin-top:4px;">Relevant CVEs: ${cveTags}</div>` : ''}
-      ${attckTags ? `<div class="ti-attck-tags">${attckTags}</div>` : ''}
-    </div>`;
-  }).join('');
 }
 
 /* ── Tech Intel drilldown ─────────────────────────────────────────── */

@@ -109,18 +109,12 @@ services:
       # --enforce-eager below looked load-bearing for so long. 16 captures cleanly.
       - --max-num-seqs
       - "${VLLM_MAX_NUM_SEQS:-16}"
-      # Multi-token prediction. The checkpoint ships a complete FP8 MTP layer (22
-      # `mtp.*` weight keys) and vLLM resolves this to the Qwen3_5MTP architecture,
-      # sharing the target model's embeddings and lm_head. Measured 2026-09-08 on
-      # this host: 2.10x single-stream generation, 81% draft acceptance, clean over
-      # a 60-request mixed soak.
-      #
-      # KEEP THIS AT 1. num_speculative_tokens: 2 re-runs the same MTP layer (vLLM
-      # warns about it) and hard-crashes the engine with cudaErrorIllegalAddress ->
-      # EngineDeadError, taking the whole server down mid-request. To turn MTP off
-      # entirely, delete these two lines -- there is no "off" value for the count.
-      - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":${VLLM_SPEC_TOKENS:-1}}'
+      # MTP speculative decoding (--speculative-config method=mtp) is Qwen3.5-only.
+      # This install's local-small model is Qwen2.5-*-AWQ, which crash-loops with:
+      #   NotImplementedError: Unsupported speculative method: 'mtp'
+      # and Live Analysis / Prompt then fail through llm-gateway as Bad Gateway
+      # (2026-10-16). Do not re-add MTP here unless VLLM_MODEL is a Qwen3.5 MTP
+      # checkpoint; if you do, keep num_speculative_tokens at 1 (2 hard-crashes).
       - --no-enable-flashinfer-autotune
       # --enforce-eager and --disable-custom-all-reduce were removed 2026-09-08.
       # Both were added as "startup compatibility options for this two-GPU Ada
@@ -130,11 +124,17 @@ services:
       # cost of keeping it: decode 15.8 -> 20.7 tok/s (+31%), 63.5 -> 48.4 ms per
       # token. If graphs ever need to go away again, add `- --enforce-eager` back
       # here; it does NOT need --max-num-seqs restored to 256.
-      - --reasoning-parser
-      - qwen3
+      #
+      # Do NOT pass --reasoning-parser qwen3 or --tool-call-parser qwen3_coder
+      # when VLLM_MODEL is Qwen2.5-*: the Qwen3ReasoningParser requires
+      # think start/end tokens that Qwen2.5 tokenizers do not have, and the
+      # engine dies after a successful weight load with:
+      #   RuntimeError: Qwen3ReasoningParser ... could not locate think start/end tokens
+      # (2026-10-16, local-small). Re-add those flags only for a Qwen3/Qwen3.5
+      # checkpoint. Tool calling for Qwen2.5 uses hermes-style markup instead.
       - --enable-auto-tool-choice
       - --tool-call-parser
-      - qwen3_coder
+      - hermes
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

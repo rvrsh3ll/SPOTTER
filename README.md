@@ -66,6 +66,9 @@ feature and is inert when absent — see INSTALL.md §1:
 - Adaptix C2 teamserver reachable from this host, plus an operator account (for workflow 28)
 - Flare.io API key (for workflow 09)
 - FOFA.io API key (for workflow 13)
+- Shodan API key (optional, for workflow 13 — keyless InternetDB mode works without it)
+- Censys API credentials (optional, free tier — enriches Shodan results in workflow 13)
+- BinaryEdge API key (optional, free tier — enriches FOFA results in workflow 13)
 - SerpAPI key, or a Tavily key, or both (for workflow 13's `org` source — either
   one enables the LinkedIn provider independently)
 
@@ -1622,7 +1625,9 @@ which prompts without echoing and writes it to the right encrypted tier:
 - `FLOWSINT_SKETCH_ID` — generated after step 3 (fallback/default sketch only; campaigns provision their own via WF16)
 - `FLARE_API_KEY` — from https://app.flare.io → Profile → API Keys
 - `FOFA_API_KEY` — from https://en.fofa.info → Personal Center → API. FOFA rejects the **whole query** (HTTP 200, `{"error":true,"errmsg":"[820001] …"}`, zero rows) when any single requested field is above the account's tier, so WF13 walks a ladder of progressively smaller field sets and reports which one answered in `fofa_status`. `product`, `as_organization` and `lastupdatetime` are premium fields and are never requested; the server banner stands in for `product`
-- `SHODAN_API_KEY` — optional, from https://account.shodan.io
+- `SHODAN_API_KEY` — optional, from https://account.shodan.io. Without it, WF13 uses the keyless InternetDB (services, CPEs, CVEs — no geo or vuln verification)
+- `CENSYS_API_ID` / `CENSYS_API_SECRET` — optional, free tier (250 queries/month) from https://search.censys.io → Account → API. Enriches the Shodan card in Domain Recon with additional host/service discovery
+- `BINARYEDGE_API_KEY` — optional, free tier from https://app.binaryedge.io → Account → API. Enriches the FOFA card in Domain Recon with additional port/service scanning
 - `SOCIAL_ENRICHMENT_OWNER` — `direct` (default, sidecars called by WF03) or `plugin` (Flowsint enricher flows own the writes)
 - `SOCIAL_MAIGRET_FLOW_ID` / `SOCIAL_LINKEDIN_FLOW_ID` — Flowsint enricher flow IDs (only when `SOCIAL_ENRICHMENT_OWNER=plugin`)
 - `SPOTTER_FLOW_ID` — Flowsint main enrichment flow ID launched after ingest (WF06); unique per Flowsint install
@@ -1754,7 +1759,7 @@ your browser should forward 5443 to
 `spotter.localhost`/`n8n.spotter.localhost`/`graph.spotter.localhost`/`chat.spotter.localhost`,
 never to the bare IP. See §"Brute Ratel listener webhook".
 
-If you set `TUNNEL_API_TOKEN`, the tunnel control-plane enforces token auth on Start/Stop/Status and rejects unauthenticated requests with HTTP 401.
+If you set `TUNNEL_API_TOKEN`, the tunnel control-plane enforces token auth on Start/Stop/Status and rejects unauthenticated requests with HTTP 401. Writes (start, stop, key upload) are administrator-only; reads (status) stay open to any signed-in operator. The admin gate is enforced in `ssh-tunnel-api` via the `X-Spotter-Admin` header that nginx stamps after `auth_request` — do not re-add an nginx `if()` check, which runs in the rewrite phase before `auth_request` and always sees the variable as empty.
 
 ### 4b. Create an operator account
 
@@ -1797,11 +1802,14 @@ enforce campaign ownership. Because `proxy_set_header` always overwrites, the he
 be spoofed from a browser; it is only trustworthy while n8n has no host port of its own.
 
 **Per-user campaigns.** Each operator may own up to `SPOTTER_MAX_CAMPAIGNS_PER_USER`
-campaigns (default 3). Campaigns are private to their owner, who can share them with named
-operators from the Ingest tab's `Share…` button. Shared-in campaigns are read-only and do
-**not** count against the reader's quota. Campaigns created before authentication was
-enabled have no owner: they stay visible and editable by everyone until claimed with
-`scripts/spotter_user.py adopt <campaign_id> <username>`.
+campaigns (default 3). An administrator can raise or lower that global cap from
+**Configuration → Campaigns → Max owned campaigns per user** (WF22 / `spotter_settings`);
+the change applies on the next list or create with no container recreate. The same key in
+`.env` remains the deployment pin when no panel override is set. Campaigns are private to
+their owner, who can share them with named operators from the Ingest tab's `Share…` button.
+Shared-in campaigns are read-only and do **not** count against the reader's quota. Campaigns
+created before authentication was enabled have no owner: they stay visible and editable by
+everyone until claimed with `scripts/spotter_user.py adopt <campaign_id> <username>`.
 
 Sharing covers the campaign record and its Flowsint sketch (the graph). It does **not** move
 per-operator local state — analyses, dossier annotations and tech intel live in each
@@ -1847,8 +1855,8 @@ below is an inventory of the workflow files, not a manual import procedure:
 | `09-flare-ingestor.json` | Ingests Flare.io breach / credential data. Daily sweep at **02:30 UTC**, bounded by `FLARE_MAX_PER_RUN` (250) — one Flare search is issued per individual, so an uncapped sweep scales with AD size. Targeted runs from a dossier ignore the cap |
 | `10-security-llm-analysis.json` | Runs LLM attack-path analysis on graph entities |
 | `11-credential-scanner.json` | Titus credential scanner sidecar trigger |
-| `12-tech-inventory.json` | Builds technology inventory + attack narratives |
-| `13-domain-recon.json` | Runs domain-level recon aggregation + FOFA/Shodan |
+| `12-tech-inventory.json` | Builds technology inventory (OS, software, user tech profiles) |
+| `13-domain-recon.json` | Runs domain-level recon aggregation + FOFA/Shodan/Censys/BinaryEdge |
 | `14-tech-context-indexer.json` | Weekly CVE/MITRE context index |
 | `15-photo-verification.json` | Image verification webhook |
 | `16-create-sketch.json` | Per-campaign sketch provisioning |
@@ -2334,8 +2342,8 @@ SPOTTER/
 │   ├── 09-flare-ingestor.json             # Flare.io breach + credential ingest
 │   ├── 10-security-llm-analysis.json      # LLM attack-path analysis
 │   ├── 11-credential-scanner.json         # Titus sidecar credential scan trigger
-│   ├── 12-tech-inventory.json             # Technology inventory + attack narratives
-│   ├── 13-domain-recon.json               # Domain recon + FOFA/Shodan + open cloud buckets
+│   ├── 12-tech-inventory.json             # Technology inventory (OS, software, profiles)
+│   ├── 13-domain-recon.json               # Domain recon + FOFA/Shodan/Censys/BinaryEdge + open cloud buckets
 │   ├── 14-tech-context-indexer.json       # Weekly CVE/MITRE context index
 │   ├── 15-photo-verification.json         # Image verification webhook
 │   ├── 16-create-sketch.json              # Per-campaign sketch provisioning
@@ -2385,7 +2393,7 @@ SPOTTER/
 │       ├── ad_kerberos_tool.py            # Kerberoastable / AS-REP / delegation
 │       ├── ad_adcs_tool.py                # ADCS templates and coercion
 │       ├── graph_query_tool.py            # Natural language → Cypher → Neo4j
-│       ├── technology_tool.py             # OS inventory, user tech stacks, narratives
+│       ├── technology_tool.py             # OS inventory, user tech stacks, high-value tech users
 │       ├── tech_context_tool.py           # CVE + MITRE contextualization
 │       └── vulnerability_tool.py          # Nessus findings ranked, with exploit availability
 │
@@ -2432,7 +2440,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
-| **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan, FOFA, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
+| **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers** and Adaptix **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |
 | **Web** | Every `Website` node EyeWitness captured, with its screenshot — filterable *All / Screenshots / High-value / Default creds*. Backed by WF26 |
 | **Tech Intel** | OS inventory, technology stacks, CVE context, and risk tiers |
@@ -2583,8 +2591,8 @@ reads as "the target has no external surface". `DOMAIN RECON ▾` picks which so
 | Choice | What it runs |
 |---|---|
 | *Enrich All* | Everything below in one pass, plus DNS / WHOIS / CT-certificate / subdomain enumeration and the ip.thc.org passive-DNS, rDNS and CNAME lookups |
-| *Enrich Shodan.io* | Shodan InternetDB (keyless) or the full API with `SHODAN_API_KEY` — services, **CPEs** and scanner-reported CVEs. This is the strongest CVE match basis WF14 can get; everything else falls back to NVD phrase matching |
-| *Enrich FOFA.io* | FOFA asset search (`FOFA_API_KEY`) — external hosts, ports, server banners, protocols and geo, plus subdomains. The card always renders: when it is empty it says whether FOFA errored, ran clean, or was never run |
+| *Enrich Shodan.io* | Shodan InternetDB (keyless) or the full API with `SHODAN_API_KEY` — services, **CPEs** and scanner-reported CVEs. `CENSYS_API_ID` / `CENSYS_API_SECRET` (optional, free tier) enrich the same card with additional host/service discovery from Censys API v2. This is the strongest CVE match basis WF14 can get; everything else falls back to NVD phrase matching |
+| *Enrich FOFA.io* | FOFA asset search (`FOFA_API_KEY`) — external hosts, ports, server banners, protocols and geo, plus subdomains. `BINARYEDGE_API_KEY` (optional, free tier) enriches the same card with additional port/service data from BinaryEdge API v2. Without a FOFA key, WF13 HTTP-probes discovered subdomains as a fallback. The card always renders: when it is empty it says whether FOFA errored, ran clean, or was never run |
 | *Enrich Flare.io* | The domain-wide breach/credential sweep — renders in **Credential & Breach Exposure** below, not here |
 | *Enrich Social* | LinkedIn **company** lookup guessed from the domain: page URL, industry, employee count. Not per-person social — that is WF03 from a dossier, or Super-Enrich from Targets |
 | *Enrich Cloud Buckets* | Public S3 / Azure Blob / GCS discovery — see §"Open Cloud Storage Discovery" |
@@ -2956,8 +2964,8 @@ browser, so those tools execute client-side against the same stores the other ta
 | Tool | Reads | Served by |
 |---|---|---|
 | `search_entities`, `get_dossier`, `get_attack_paths`, `run_cypher`, `get_graph_schema` | Neo4j graph — AD objects, beacons, and the OSINT nodes imported by WF13 (`DomainBreach`, `Subdomain`, `WebAsset`, `SocialProfile`, …) | WF08 gateway |
-| `get_osint_recon` | Domain recon: DNS, WHOIS, subdomains, CT certs, Shodan, FOFA, Flare breaches, LinkedIn, external assets | WF13 cache |
-| `get_tech_intel` | OS inventory + EOL risk, technology catalog, per-user tech profiles, CVEs, attack narratives | WF12 cache |
+| `get_osint_recon` | Domain recon: DNS, WHOIS, subdomains, CT certs, Shodan (+ Censys), FOFA (+ BinaryEdge), Flare breaches, LinkedIn, external assets | WF13 cache |
+| `get_tech_intel` | OS inventory + EOL risk, technology catalog, per-user tech profiles, CVEs | WF12 cache |
 | `get_vulnerabilities` | Nessus scan findings: severity picture, findings ranked by priority, public exploit availability, per-host risk | WF25 cache |
 | `get_analysis` | Scored human/device targets, attack scenarios, breach + credential intel, attack surface | WF10 records |
 | `list_targets` | Individual and computer dossiers plus operator annotations (compromised / of-interest / hidden) | WF05 cache |

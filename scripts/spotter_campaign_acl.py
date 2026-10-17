@@ -41,16 +41,29 @@ DEFAULT_MAX_CAMPAIGNS = 3
 
 
 def max_campaigns() -> int:
-    """Per-user cap on owned campaigns.
+    """Per-user cap on owned campaigns (global).
 
-    Set SPOTTER_MAX_CAMPAIGNS_PER_USER in .env, the task-runners `environment:`
-    block AND the python runner's `allowed-env` list, or this silently keeps the
-    default (a var missing from allowed-env never reaches the code node).
+    Resolution (first hit wins), matching scripts/spotter_settings:
+
+      1. (:SpotterMeta {key:'settings'}).SPOTTER_MAX_CAMPAIGNS_PER_USER
+         — set by an administrator in Configuration (WF22); no recreate
+      2. SPOTTER_MAX_CAMPAIGNS_PER_USER in the environment
+         — deployment pin; needs the runners `environment:` block AND
+         allowed-env or it never reaches the code node
+      3. DEFAULT_MAX_CAMPAIGNS (3)
+
+    Values <= 0 are rejected by the settings clamp (lo=1); a junk env value
+    falls through to the default rather than unlocking unlimited creates.
     """
     try:
-        value = int(os.environ.get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or DEFAULT_MAX_CAMPAIGNS)
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_CAMPAIGNS
+        import spotter_settings as _st
+        value = int(_st.resolve_int("SPOTTER_MAX_CAMPAIGNS_PER_USER"))
+    except Exception:
+        try:
+            value = int(os.environ.get("SPOTTER_MAX_CAMPAIGNS_PER_USER")
+                        or DEFAULT_MAX_CAMPAIGNS)
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_CAMPAIGNS
     return value if value > 0 else DEFAULT_MAX_CAMPAIGNS
 
 

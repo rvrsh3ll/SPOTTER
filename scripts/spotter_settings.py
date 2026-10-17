@@ -568,11 +568,25 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
                 "It does not refresh anything — run scripts/sync_poc_mirror.py on "
                 "the host for that.",
     },
+    # --- Campaigns (workflows 16 / 17 / 18 / 20) ---
+    # Global per-operator ownership cap. Shared-in campaigns do not count.
+    # Administrators change this from the Configuration panel; it takes effect
+    # on the next list/save without recreating containers. Env remains the
+    # deployment pin for installs that never open the panel.
+    "SPOTTER_MAX_CAMPAIGNS_PER_USER": {
+        "type": "int", "default": 3, "lo": 1, "hi": 10000,
+        "group": "Campaigns", "label": "Max owned campaigns per user",
+        "help": "How many campaigns each operator may own. Shared-in and legacy "
+                "unowned campaigns do not count. Applies globally on the next "
+                "list or create — no container recreate. Clear the field to fall "
+                "back to the deployment .env value (or the built-in 3).",
+    },
 }
 
 # Panel section order. Anything not listed falls to the end alphabetically.
 GROUP_ORDER = [
     "Organization",
+    "Campaigns",
     "Flare breach export",
     "Super-Enrich",
     "Cloud bucket exposure",

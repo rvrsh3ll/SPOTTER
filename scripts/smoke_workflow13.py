@@ -219,6 +219,33 @@ def build_fake_requests(thc_mode: str = "normal",
         if parsed.netloc == "example.com":
             return FakeResponse(text="<html><head><title>Example Domain</title></head></html>")
 
+        # HTTP probe targets for FOFA no-key fallback and Shodan InternetDB enrichment.
+        # Subdomains discovered by CT/THC get probed when FOFA_API_KEY is not set.
+        if parsed.netloc in {"alpha.example.com", "www.example.com", "shop.example.com"}:
+            return FakeResponse(
+                text="<html><head><title>Probe Target</title></head></html>",
+                headers={"Server": "nginx/1.18"},
+            )
+
+        # Censys API v2 simulation (optional, free-tier key)
+        if parsed.netloc == "search.censys.io":
+            return FakeResponse(payload={"result": {"hits": [{
+                "ip": "203.0.113.20",
+                "services": [{"port": 443, "cpes": ["cpe:/a:nginx:nginx:1.18"]}],
+                "software": [{"product": "nginx", "vendor": "nginx", "version": "1.18"}],
+                "autonomous_system": {"name": "Example ASN"},
+            }]}})
+
+        # BinaryEdge API v2 simulation (optional, free-tier key)
+        if parsed.netloc == "api.binaryedge.io":
+            return FakeResponse(payload={"events": [{
+                "host": "be.example.com",
+                "ip": "203.0.113.21",
+                "port": 80,
+                "protocol": "http",
+                "banner": "Apache/2.4.41",
+            }]})
+
         if parsed.netloc in {"rdap.verisign.com", "rdap.org"}:
             return FakeResponse(payload={})
 
@@ -1412,6 +1439,31 @@ def main() -> None:
     assert_true("fofa_status" in fofa_run,
                 "fofa_status must be present on a run that included FOFA",
                 sorted(fofa_run))
+
+    # ── FOFA no-key fallback: HTTP probing of discovered subdomains ─────────
+    # When FOFA_API_KEY is not set, WF13 should HTTP-probe discovered subdomains
+    # instead of skipping entirely. The probed data populates fofa_results with
+    # title, server, protocol, host — a subset of what the FOFA API returns.
+    _no_key_env = {"FOFA_API_KEY": ""}
+    _fofa_nokey, _fnk_reqs, _ = run_smoke_case(code, dict(payload, sources=["fofa"]),
+                                                extra_env=_no_key_env)
+    _fnk_status = _fofa_nokey.get("fofa_status") or {}
+    assert_true(_fnk_status.get("state") in ("probed", "no_key"),
+                "FOFA no-key should either probe subdomains or report no_key if none found",
+                _fnk_status)
+    if _fnk_status.get("state") == "probed":
+        assert_true(_fofa_nokey.get("fofa_results"),
+                    "FOFA no-key probing should populate fofa_results when subdomains exist",
+                    _fofa_nokey.get("fofa_results"))
+        assert_true("probed" in (_fnk_status.get("detail") or "").lower(),
+                    "FOFA no-key probed status should mention probing in detail",
+                    _fnk_status)
+    # Verify no FOFA API calls were made
+    _fofa_api_calls = [g for g in _fnk_reqs["gets"]
+                       if urlparse(g["url"]).netloc == "fofa.info"]
+    assert_true(not _fofa_api_calls,
+                "FOFA no-key should NOT call the FOFA API",
+                _fofa_api_calls)
 
     shodan_limited, shodan_limited_reqs, _ = run_smoke_case(code, payload, shodan_mode="429")
     _sl = shodan_limited.get("shodan_api_status") or {}

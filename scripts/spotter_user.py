@@ -356,8 +356,22 @@ def cmd_adopt(conn, args) -> int:
         return 1
 
     owned = sum(1 for c in camps if c.get("owner") == name)
-    limit = int(os.environ.get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or
-                _load_dotenv().get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or 3)
+    # Same resolution as WF17/WF18 (SpotterMeta override -> env -> 3), so a
+    # limit raised in Configuration is honoured by `adopt` without a recreate.
+    try:
+        _scripts = os.path.join(_REPO_ROOT, "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        import spotter_campaign_acl as _acl  # noqa: E402
+        limit = int(_acl.max_campaigns())
+    except Exception:
+        try:
+            limit = int(os.environ.get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or
+                        _load_dotenv().get("SPOTTER_MAX_CAMPAIGNS_PER_USER") or 3)
+        except (TypeError, ValueError):
+            limit = 3
+    if limit <= 0:
+        limit = 3
     if current != name and owned >= limit:
         print(f"{name} already owns {owned} campaign(s); limit is {limit}.", file=sys.stderr)
         return 1

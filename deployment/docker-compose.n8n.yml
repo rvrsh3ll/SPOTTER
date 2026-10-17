@@ -93,6 +93,10 @@ services:
       # --- FOFA.io + Shodan (Domain Recon / workflow 13) ---
       FOFA_API_KEY: ${FOFA_API_KEY:-}
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      # --- Censys + BinaryEdge (optional, free-tier) ---
+      CENSYS_API_ID: ${CENSYS_API_ID:-}
+      CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
+      BINARYEDGE_API_KEY: ${BINARYEDGE_API_KEY:-}
       # --- Cloud storage exposure (Domain Recon / workflow 13) ---
       # GrayhatWarfare is the passive path; the rest bound the active list-check probe.
       # BUCKET_PROBE_MAX_CANDIDATES=0 leaves GrayhatWarfare on and disables probing.
@@ -321,6 +325,9 @@ services:
       FLARE_TENANT_ID: ${FLARE_TENANT_ID:-}
       FOFA_API_KEY: ${FOFA_API_KEY:-}
       SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      CENSYS_API_ID: ${CENSYS_API_ID:-}
+      CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
+      BINARYEDGE_API_KEY: ${BINARYEDGE_API_KEY:-}
       # Workflow 13's Code node runs HERE, in the runners container -- these must be
       # duplicated from the n8n service above or the bucket probe reads its defaults.
       GRAYHATWARFARE_API_KEY: ${GRAYHATWARFARE_API_KEY:-}

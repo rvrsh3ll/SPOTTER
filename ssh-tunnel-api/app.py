@@ -170,6 +170,15 @@ def _extract_supplied_api_token() -> str:
     return ""
 
 
+def _is_admin_request() -> bool:
+    """True when nginx stamped X-Spotter-Admin=1 from the auth subrequest.
+
+    proxy_set_header overwrites any client-supplied value, so this is only
+    trustworthy for requests that arrived through the dashboard proxy.
+    """
+    return (request.headers.get("X-Spotter-Admin") or "").strip() == "1"
+
+
 @app.before_request
 def _enforce_api_token() -> Any:
     # Health endpoint remains open for container healthchecks.
@@ -198,6 +207,21 @@ def _enforce_api_token() -> Any:
             "Unauthorized tunnel control request",
             401,
             "unauthorized",
+        )
+
+    # Writes (start/stop/egress/key upload) are administrator-only. Reads stay
+    # open so any signed-in operator can see tunnel/Tor status.
+    #
+    # This used to live in nginx as `if ($spotter_admin != "1") { return 403; }`
+    # on /infra/tunnel/. That if runs in the rewrite phase, BEFORE auth_request,
+    # so $spotter_admin was always empty and every POST 403'd — including for
+    # real admins (Tor start failed with a bare HTML 403). Enforcing here runs
+    # after nginx has stamped X-Spotter-Admin from the completed auth subrequest.
+    if request.method not in ("GET", "HEAD", "OPTIONS") and not _is_admin_request():
+        return _error_json(
+            "Tunnel control writes require an administrator account",
+            403,
+            "forbidden",
         )
     return None
 
@@ -1493,22 +1517,16 @@ def tunnel_keys() -> Any:
 
 
 # ── Key upload ───────────────────────────────────────────────────────────────
-# Writes are admin-only. nginx stamps X-Spotter-Admin onto every /infra/tunnel/
-# request from the auth subrequest (frontend/nginx.conf) and proxy_set_header
-# OVERWRITES whatever the client sent, so the header is exactly as trustworthy
-# as the session gate in front of it — which is the same thing the rest of this
-# service already relies on. It is never read from a request that did not come
-# through that gate, because n8n and the sidecars have no host port.
+# Writes are admin-only. The before_request gate already refuses non-admin
+# POSTs/DELETEs using X-Spotter-Admin (stamped by nginx after auth_request;
+# proxy_set_header overwrites any client value). The per-route checks below
+# are defence in depth for key management specifically.
 _KEY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-
-
-def _is_admin_request() -> bool:
-    return (request.headers.get("X-Spotter-Admin") or "").strip() == "1"
 
 
 def _forbidden() -> Any:
     return _error_json(
-        "Key management requires an administrator account",
+        "Tunnel control writes require an administrator account",
         403,
         "forbidden",
     )

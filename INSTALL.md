@@ -32,9 +32,9 @@ is working.
 VRAM needed by the selected model and context. These figures are planning
 guidance, not a measured minimum for every workload.
 
-You do **not** need any of the API keys (Shodan, Flare, FOFA, SerpAPI, Tavily,
-GrayhatWarfare, NVD) or a C2 teamserver to stand the stack up. Each one enables
-one feature and is inert when absent.
+You do **not** need any of the API keys (Shodan, Censys, BinaryEdge, Flare, FOFA,
+SerpAPI, Tavily, GrayhatWarfare, NVD) or a C2 teamserver to stand the stack up.
+Each one enables one feature and is inert when absent.
 
 ---
 

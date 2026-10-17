@@ -710,15 +710,15 @@ def run_checks() -> List[str]:
     # Workflow 12 checks - "hosts in use" filter must not be silently reverted.
     # The coverage gate is the safety property: without it a graph that was never
     # backfilled would filter every device out and the Tech Intel tab would go dark.
-    n12_build = nodes["12"].get("Build Tech Inventory + Narratives", "")
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build, "ACTIVITY_COVERAGE_STRICT", failures)
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build, "activity_filter_applied", failures)
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build, "no_timestamp_data", failures)
+    n12_build = nodes["12"].get("Build Tech Inventory", "")
+    require_contains("12", "Build Tech Inventory", n12_build, "ACTIVITY_COVERAGE_STRICT", failures)
+    require_contains("12", "Build Tech Inventory", n12_build, "activity_filter_applied", failures)
+    require_contains("12", "Build Tech Inventory", n12_build, "no_timestamp_data", failures)
     # The prune must cover `devices` too, or the edge loop re-admits stale hosts.
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build,
+    require_contains("12", "Build Tech Inventory", n12_build,
                      "devices = {k: v for k, v in devices.items() if k in device_profiles}", failures)
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build, "'total_devices_all'", failures)
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build, "pasted_processes", failures)
+    require_contains("12", "Build Tech Inventory", n12_build, "'total_devices_all'", failures)
+    require_contains("12", "Build Tech Inventory", n12_build, "pasted_processes", failures)
     # vulnerable_tech's affected-host loop is SINGLE-HOP: it scans edges touching
     # the component and requires the far end to be an individual or a device. So
     # EXPOSES_SERVICE (device -> Service) is the only edge that can ever name the
@@ -726,7 +726,7 @@ def run_checks() -> List[str]:
     # reports no affected host. Verified offline: with EXPOSES_SERVICE the row
     # names the device, with IMPLEMENTED_IN alone it names nothing, because that
     # edge's far end is another component rather than a host.
-    require_contains("12", "Build Tech Inventory + Narratives", n12_build,
+    require_contains("12", "Build Tech Inventory", n12_build,
                      "['USES_TECH', 'EXPOSES_SERVICE']", failures)
 
     # Workflow 13 checks - open cloud storage discovery
@@ -1166,11 +1166,11 @@ def check_high_value_tech_catalog(failures: List[str]) -> None:
         if re.search(r"HIGH_VALUE_TECH\s*(:[^=]+)?=\s*[{[]", text):
             failures.append(f"{rel}: contains an inline high-value technology list")
 
-    n12_code = code_nodes(json.loads(TARGETS["12"].read_text())).get("Build Tech Inventory + Narratives", "")
+    n12_code = code_nodes(json.loads(TARGETS["12"].read_text())).get("Build Tech Inventory", "")
     if "from high_value_tech import HIGH_VALUE_TECH" not in n12_code:
-        failures.append("WF12 Build Tech Inventory + Narratives must import HIGH_VALUE_TECH from high_value_tech")
+        failures.append("WF12 Build Tech Inventory must import HIGH_VALUE_TECH from high_value_tech")
     if re.search(r"HIGH_VALUE_TECH\s*=\s*[{[]", n12_code):
-        failures.append("WF12 Build Tech Inventory + Narratives contains an inline high-value technology list")
+        failures.append("WF12 Build Tech Inventory contains an inline high-value technology list")
 
 
 def check_individual_lookup(failures: List[str]) -> None:
@@ -1627,7 +1627,7 @@ def check_asset_label_catalog(failures: List[str]) -> None:
     # 5. The workflow code nodes that must import it.
     for wf_id, node_name in (("04", "Fetch Full Graph"),
                              ("04", "Score Attack Paths"),
-                             ("12", "Build Tech Inventory + Narratives")):
+                             ("12", "Build Tech Inventory")):
         code = code_nodes(json.loads(TARGETS[wf_id].read_text())).get(node_name, "")
         if "from asset_labels import" not in code:
             failures.append(f"{wf_id}/{node_name}: must import from asset_labels")
@@ -1639,9 +1639,9 @@ def check_asset_label_catalog(failures: List[str]) -> None:
     #    'Technology', which left the CVE-count and vulnerable-tech blocks dead on
     #    any graph written by the fc.add_node writers.
     n12 = code_nodes(json.loads(TARGETS["12"].read_text())).get(
-        "Build Tech Inventory + Narratives", "")
+        "Build Tech Inventory", "")
     if "list(TECH_LABELS)" not in n12:
-        failures.append("12/Build Tech Inventory + Narratives: the node fetch must "
+        failures.append("12/Build Tech Inventory: the node fetch must "
                         "expand list(TECH_LABELS), not a hand-written subset")
 
     # 7. The chat tool must compare nodeType case-INSENSITIVELY. It used to use a
