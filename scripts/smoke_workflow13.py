@@ -2370,6 +2370,72 @@ def main() -> None:
                 "and does not cost the other providers in the run",
                 fail_provs.get("linkedin-serp"))
 
+    # ── Bucket FP filter: _bucket_is_generic ──────────────────────────────────
+    # Extract the function + its blocklist from the WF13 code and test it in
+    # isolation. The full pipeline disables the bucket probe (BUCKET_PROBE_MAX_CANDIDATES=0)
+    # so the filter is not exercised by the integration cases above.
+    import re as _re_filter
+    _bucket_code_lines = []
+    _collecting = False
+    for _line in code.split('\n'):
+        if 'BUCKET_GENERIC_NAMES = {' in _line:
+            _collecting = True
+        if _collecting:
+            _bucket_code_lines.append(_line)
+        if _collecting and 'return False' in _line:
+            break
+    assert_true(len(_bucket_code_lines) > 10,
+                "could not extract BUCKET_GENERIC_NAMES + _bucket_is_generic from WF13 code")
+    # Strip the WF13 indentation so the block can execute at module level
+    _bucket_dedented = textwrap.dedent('\n'.join(_bucket_code_lines))
+    _bucket_ns: Dict[str, Any] = {'re': _re_filter}
+    exec(_bucket_dedented, _bucket_ns)
+    _is_generic = _bucket_ns['_bucket_is_generic']
+    _generic_names = _bucket_ns['BUCKET_GENERIC_NAMES']
+
+    # Exact blocklist hits — common words that are never org-specific
+    for _name in ('pop', 'test', 'dev', 'data', 'backup', 'logs', 'cdn', 'www',
+                  'storage', 'portal', 'mail', 'tmp', 'assets', 'public'):
+        assert_true(_is_generic(_name), f"'{_name}' should be filtered as generic")
+
+    # Short alphabetic-only names (≤3 chars) are generic even if not in the blocklist
+    for _name in ('abc', 'xyz', 'zz'):
+        assert_true(_is_generic(_name), f"short name '{_name}' should be filtered")
+    # 4-char alphabetic names are NOT filtered (could be org names like acme, nike)
+    assert_true(not _is_generic('acme', source='name-guess'),
+                "4-char name 'acme' should pass (could be org-specific)")
+
+    # Org-specific names that contain a base are NOT generic
+    _org_bases = ['acme', 'example-com', 'megacorp']
+    assert_true(not _is_generic('acme-payroll', source='name-guess'),
+                "acme-payroll should pass (active probe, org-specific)")
+    assert_true(not _is_generic('acme-backup', source='name-guess'),
+                "acme-backup should pass (active probe, org-specific)")
+    assert_true(not _is_generic('megacorp-data', source='name-guess'),
+                "megacorp-data should pass (active probe, org-specific)")
+
+    # GrayhatWarfare results without org bases are filtered
+    assert_true(_is_generic('random-bucket', source='grayhatwarfare', org_bases=_org_bases),
+                "GrayhatWarfare hit without org base should be filtered")
+    assert_true(_is_generic('some-public-data', source='grayhatwarfare', org_bases=_org_bases),
+                "GrayhatWarfare hit without org base should be filtered")
+
+    # GrayhatWarfare results WITH an org base are kept
+    assert_true(not _is_generic('acme-public-files', source='grayhatwarfare', org_bases=_org_bases),
+                "GrayhatWarfare hit containing org base 'acme' should pass")
+    assert_true(not _is_generic('megacorp-backup', source='grayhatwarfare', org_bases=_org_bases),
+                "GrayhatWarfare hit containing org base 'megacorp' should pass")
+
+    # Active probe does not require org bases (candidates are constructed from them)
+    assert_true(not _is_generic('acme', source='name-guess'),
+                "active probe hit 'acme' should pass (it IS an org base)")
+
+    # 'pop' specifically — the FP that motivated this filter
+    assert_true(_is_generic('pop', source='grayhatwarfare', org_bases=_org_bases),
+                "gcs:pop should be filtered (the FP that motivated this)")
+    assert_true(_is_generic('pop', source='name-guess'),
+                "active probe 'pop' should also be filtered")
+
     print("smoke_workflow13 passed")
 
 
