@@ -466,6 +466,51 @@ else
     warn "See README.md -- Generate secrets."
 fi
 
+# ── GPU/model validation ─────────────────────────────────────────────────────
+LLM_TIER="$(env_value SPOTTER_LLM_TIER)"
+if [[ "$LLM_TIER" == "local-small" || "$LLM_TIER" == "local-large" ]]; then
+    log "--- GPU/model validation ---"
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        warn "SPOTTER_LLM_TIER=$LLM_TIER but nvidia-smi not found"
+        warn "Install NVIDIA drivers and container toolkit, or set SPOTTER_LLM_TIER=remote/none"
+    else
+        # Get GPU memory
+        GPU_MEM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        if [[ -n "$GPU_MEM_MB" ]]; then
+            GPU_MEM_GB=$((GPU_MEM_MB / 1024))
+            log "  GPU detected: ${GPU_MEM_GB} GB VRAM"
+            
+            if [[ "$LLM_TIER" == "local-small" ]]; then
+                VLLM_MODEL="$(env_value VLLM_MODEL)"
+                VLLM_MAX_MODEL_LEN="$(env_value VLLM_MAX_MODEL_LEN)"
+                
+                if [[ -z "$VLLM_MODEL" ]]; then
+                    warn "SPOTTER_LLM_TIER=local-small requires VLLM_MODEL to be set"
+                    warn "Edit $ENV_FILE and set VLLM_MODEL (e.g., Qwen/Qwen2.5-7B-Instruct-AWQ)"
+                else
+                    log "  VLLM_MODEL=$VLLM_MODEL"
+                fi
+                
+                if [[ -z "$VLLM_MAX_MODEL_LEN" ]]; then
+                    warn "VLLM_MAX_MODEL_LEN not set — default is 32768"
+                    warn "For ${GPU_MEM_GB}GB GPU, consider: 16384 (12GB), 32768 (24GB), 49152 (48GB)"
+                else
+                    log "  VLLM_MAX_MODEL_LEN=$VLLM_MAX_MODEL_LEN"
+                fi
+                
+                # Rough VRAM check
+                if [[ -n "$VLLM_MAX_MODEL_LEN" && "$GPU_MEM_GB" -lt 24 && "$VLLM_MAX_MODEL_LEN" -gt 32768 ]]; then
+                    warn "VLLM_MAX_MODEL_LEN=$VLLM_MAX_MODEL_LEN may exceed ${GPU_MEM_GB}GB GPU capacity"
+                    warn "Consider reducing to 16384 or 24576"
+                fi
+            fi
+        else
+            warn "Could not query GPU memory with nvidia-smi"
+        fi
+    fi
+    echo ""
+fi
+
 echo ""
 log "Done. Review $ENV_FILE, then:"
 log ""
@@ -485,3 +530,6 @@ log ""
 log "Credentials live ENCRYPTED in secrets/*.sops.env, never in $ENV_FILE. Review"
 log "the configuration in $ENV_FILE; check the credentials with:"
 log "  scripts/spotter_secret.py list"
+log ""
+log "Optional: enable automatic Flowsint token rotation (recommended):"
+log "  sudo scripts/install_flowsint_rotation.sh"

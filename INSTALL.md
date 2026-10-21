@@ -143,9 +143,12 @@ what it already did. It will:
 
 ```bash
 python3 scripts/smoke_deploy.py --user <your-operator-name>
+scripts/smoke_postinstall.sh
 ```
 
-Every line should read `PASS`. The `*.localhost` hostnames below resolve to `127.0.0.1` on
+Every line should read `PASS`. The post-install script checks all 4 login layers (SPOTTER portal, Flowsint API, Open WebUI, n8n), container health, vLLM model status (if local tier), and whether the Flowsint token rotation timer is active.
+
+The `*.localhost` hostnames below resolve to `127.0.0.1` on
 their own in any current browser/OS (RFC 6761) — no `/etc/hosts` edit needed. Open
 **https://spotter.localhost:5443** and log in with the operator account from step 4. The
 browser will warn once per hostname until Caddy's internal root CA is trusted:
@@ -203,6 +206,35 @@ Two things that are not obvious:
 - **Workflows deploy with `scripts/deploy_workflow.sh`**, never by importing JSON
   through the n8n UI. The script also repairs the publication pointers, which a
   hand-import does not.
+
+---
+
+## 7b. Automatic Flowsint token rotation (recommended)
+
+Flowsint's JWT token expires every ~60 hours. Without rotation, everything
+Flowsint-related returns 401 after about 2.5 days. The rotation script
+(`scripts/rotate_flowsint_token.py`) can run automatically via a systemd timer:
+
+```bash
+sudo scripts/install_flowsint_rotation.sh
+```
+
+This installs a systemd timer that checks the token every 12 hours and rotates
+it if it expires within 24 hours. It creates `/etc/spotter/flowsint-admin.env`
+where you set `FLOWSINT_ADMIN_PASSWORD` (root-only, mode 600).
+
+Check status:
+
+```bash
+systemctl list-timers spotter-flowsint-rotation.timer
+journalctl -u spotter-flowsint-rotation.service
+```
+
+Without the timer, you must rotate manually when you see 401s:
+
+```bash
+sudo python3 scripts/rotate_flowsint_token.py --force
+```
 
 ---
 

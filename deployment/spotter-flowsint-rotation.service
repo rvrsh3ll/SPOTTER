@@ -1,0 +1,18 @@
+[Unit]
+Description=SPOTTER Flowsint JWT token rotation
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/user/SPOTTER
+# FLOWSINT_ADMIN_PASSWORD must be set in the environment or in a .env file
+# For security, use EnvironmentFile pointing to a root-only file
+EnvironmentFile=-/etc/spotter/flowsint-admin.env
+ExecStart=/usr/bin/python3 scripts/rotate_flowsint_token.py --warn-hours 24
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
