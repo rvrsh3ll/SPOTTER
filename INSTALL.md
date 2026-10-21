@@ -314,3 +314,92 @@ Two practical points:
   archive that contains the encrypted tiers; a backup holding both protects nothing.
 - **`clear-graph` is not a dry run**, and there is no Neo4j backup on a default
   install. Take your own before you experiment.
+
+---
+
+## 10. Teardown — securely uninstalling SPOTTER
+
+To completely remove SPOTTER from a host, run these steps in order. **This is destructive and irreversible.**
+
+### Stop and remove containers
+
+```bash
+# Stop all SPOTTER containers
+sudo scripts/spotter_compose.sh down
+
+# Remove all containers, networks, and images
+sudo docker compose -p spotter -f deployment/docker-compose.n8n.yml down --volumes --remove-orphans
+sudo docker volume rm spotter_vllm_model_cache 2>/dev/null || true
+```
+
+### Remove the systemd timer (if installed)
+
+```bash
+sudo systemctl disable --now spotter-flowsint-rotation.timer
+sudo rm /etc/systemd/system/spotter-flowsint-rotation.{service,timer}
+sudo systemctl daemon-reload
+```
+
+### Remove data directories
+
+```bash
+# Engagement data (Neo4j, Postgres, screenshots, ingest staging)
+sudo rm -rf data/
+
+# Encrypted secrets (SOPS tiers)
+sudo rm -rf secrets/
+
+# Vendor checkout (Flowsint)
+sudo rm -rf vendor/
+
+# Cache and artifacts
+sudo rm -rf .spotter-cache/ screenshots/ sharphound-drops/ deployment/auth-data/
+
+# Environment config
+sudo rm -f .env
+```
+
+### Remove the Caddy CA certificate (if trusted system-wide)
+
+```bash
+# On Nobara/Fedora:
+sudo rm /etc/pki/ca-trust/source/anchors/spotter-caddy-root.crt
+sudo update-ca-trust
+
+# On Debian/Ubuntu:
+# sudo rm /usr/local/share/ca-certificates/spotter-caddy-root.crt
+# sudo update-ca-certificates
+```
+
+### Remove the SOPS age key (⚠️ back up first if you plan to reinstall)
+
+```bash
+# The age key decrypts secrets/*.sops.env. Without it, encrypted secrets are unrecoverable.
+# Back up before deleting if you might reinstall or migrate:
+# cp ~/.config/sops/age/keys.txt ~/age-key-backup.txt
+
+rm -f ~/.config/sops/age/keys.txt
+```
+
+### Remove the repository (optional)
+
+```bash
+cd ..
+sudo rm -rf spotter/
+```
+
+### Verification
+
+After teardown, confirm nothing remains:
+
+```bash
+sudo docker ps -a | grep spotter    # should be empty
+sudo docker volume ls | grep spotter  # should be empty
+ls -la ~/.config/sops/age/          # keys.txt should be gone
+```
+
+**What this does NOT remove:**
+- Host packages (Docker, SOPS, age, NVIDIA drivers) — uninstall via your package manager
+- Browser localStorage/cache for `*.localhost:5443` — clear manually
+- Any backups you made (age key, database dumps)
+- Full-disk encryption keys (if you set up FDE)
