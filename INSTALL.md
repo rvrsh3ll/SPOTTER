@@ -9,6 +9,41 @@ configuration details, not minimums validated by a clean-host benchmark.
 
 ---
 
+## Quickstart — zero to running in 5 commands
+
+```bash
+# 1. Clone and enter the repo
+git clone <spotter-repo-url> spotter && cd spotter
+
+# 2. Generate secrets (creates .env + encrypted tiers)
+sudo deployment/setup-secrets.sh
+
+# 3. Edit .env — set SPOTTER_LLM_TIER (local-large|local-small|remote|none)
+#    For local-small, also set VLLM_MODEL and VLLM_MAX_MODEL_LEN
+sudo nano .env
+
+# 4. Bootstrap (interactive — asks for operator, Flowsint, and OWUI credentials)
+sudo scripts/bootstrap.sh
+
+# 5. Verify
+python3 scripts/smoke_deploy.py --user <your-operator-name>
+scripts/smoke_postinstall.sh
+```
+
+Open **https://spotter.localhost:5443** and log in. Done.
+
+**Optional but recommended** — enable automatic Flowsint token rotation:
+```bash
+sudo scripts/install_flowsint_rotation.sh
+```
+
+**No GPU?** Set `SPOTTER_LLM_TIER=remote` or `none` in step 3. Everything except
+AI analysis and the Prompt tab works without a model.
+
+**First time seeing 4 logins?** See [§6 — The four separate logins](#6-the-four-separate-logins).
+
+---
+
 ## 1. What you need
 
 **A Linux host** with:
