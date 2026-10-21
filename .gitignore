@@ -200,3 +200,13 @@ secrets/
 # never let a copy in.
 *.agekey
 keys.txt
+
+# ── Model training artifacts ──────────────────────────────────────────────────
+# Training data (may contain engagement intelligence) and model checkpoints.
+spotter-train/data/*.jsonl
+!spotter-train/data/.gitkeep
+spotter-train/output/
+unsloth_compiled_cache/
+
+# Qwen Code local settings (user-specific tool config)
+.qwen/

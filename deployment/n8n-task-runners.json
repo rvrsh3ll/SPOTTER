@@ -82,6 +82,7 @@
         "BUCKET_ALERT_MIN_SCORE",
         "BUCKET_PROBE_S3_CANARY",
         "BUCKET_PROBE_PROXY",
+        "SPOTTER_PROXY_URL",
         "THC_IP_BASE_URL",
         "THC_SUBDOMAIN_LIMIT",
         "THC_RDNS_MAX_IPS",

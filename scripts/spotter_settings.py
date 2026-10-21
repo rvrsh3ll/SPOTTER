@@ -568,6 +568,84 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
                 "It does not refresh anything — run scripts/sync_poc_mirror.py on "
                 "the host for that.",
     },
+    # --- Russian Corporate Intelligence (workflow 30) ---
+    "RUS_CORP_MAX_REQUESTS": {
+        "type": "int", "default": 30, "lo": 5, "hi": 200,
+        "group": "Russian Corporate Intelligence", "label": "Max requests per query",
+        "help": "Total HTTP requests across all Russian corporate sources (EGRUL, "
+                "rupep, procurement, courts, bailiffs) in one WF30 run. Each source "
+                "is independent; one failing does not block the others.",
+    },
+    "RUS_CORP_TIMEOUT": {
+        "type": "int", "default": 20, "lo": 5, "hi": 120,
+        "group": "Russian Corporate Intelligence", "label": "Per-request timeout (s)",
+        "help": "Per-request timeout for Russian government portals. Raise when "
+                "running through a slow proxy or Tor.",
+    },
+    "RUS_CORP_MAX_SECONDS": {
+        "type": "int", "default": 120, "lo": 10, "hi": 600,
+        "group": "Russian Corporate Intelligence", "label": "Wall-clock cap (s)",
+        "help": "Hard ceiling on the total time spent querying Russian sources. "
+                "Prevents a slow portal from hanging the workflow.",
+    },
+    # --- Russian Leak DBs (workflow 13 extension) ---
+    "RUS_LEAK_MAX_RESULTS": {
+        "type": "int", "default": 50, "lo": 5, "hi": 500,
+        "group": "Russian Leak DBs", "label": "Max breach results per query",
+        "help": "Breach records kept from Reveng.ee per email/username search. "
+                "Higher values give more coverage but increase response size.",
+    },
+    "RUS_LEAK_TIMEOUT": {
+        "type": "int", "default": 20, "lo": 5, "hi": 60,
+        "group": "Russian Leak DBs", "label": "Per-request timeout (s)",
+        "help": "Per-request timeout for Russian leak DB lookups.",
+    },
+    "PHONE_LOOKUP_MAX": {
+        "type": "int", "default": 10, "lo": 1, "hi": 50,
+        "group": "Russian Leak DBs", "label": "Max phone lookups per run",
+        "help": "Russian phone numbers looked up per WF13 run. Each lookup is "
+                "free/keyless (prefix-based carrier/region), so the cost is time, "
+                "not API credits.",
+    },
+    "PHONE_LOOKUP_TIMEOUT": {
+        "type": "int", "default": 10, "lo": 3, "hi": 30,
+        "group": "Russian Leak DBs", "label": "Phone lookup timeout (s)",
+        "help": "Per-request timeout for phone number lookups.",
+    },
+    # --- Telegram OSINT (workflows 03 / 13) ---
+    "TELEGRAM_OSINT_MAX_QUERIES": {
+        "type": "int", "default": 15, "lo": 1, "hi": 100,
+        "group": "Telegram OSINT", "label": "Max bot queries per run",
+        "help": "Total Telegram bot queries (VkHistoryRobot, AllOSINTrobot, etc.) "
+                "per enrichment run. Each query polls for a response, so the cost "
+                "is time (up to TELEGRAM_OSINT_MAX_WAIT seconds each).",
+    },
+    "TELEGRAM_OSINT_MAX_WAIT": {
+        "type": "int", "default": 60, "lo": 10, "hi": 300,
+        "group": "Telegram OSINT", "label": "Max wait per bot response (s)",
+        "help": "How long to poll getUpdates for a response from a Telegram OSINT "
+                "bot before giving up. Bots can be slow; 60s is a reasonable default.",
+    },
+    "TELEGRAM_OSINT_POLL_TIMEOUT": {
+        "type": "int", "default": 15, "lo": 3, "hi": 60,
+        "group": "Telegram OSINT", "label": "Poll timeout (s)",
+        "help": "Long-poll timeout for getUpdates. Higher values reduce API calls "
+                "but delay cancellation.",
+    },
+    # --- Identity Management ---
+    "IDENTITY_AUTO_ROTATE_DAYS": {
+        "type": "int", "default": 7, "lo": 1, "hi": 90,
+        "group": "Identity Management", "label": "Auto-rotate identities after (days)",
+        "help": "Disposable identities older than this are automatically retired "
+                "and replaced on next use. Prevents long-lived identities from "
+                "becoming attributable.",
+    },
+    "IDENTITY_MAX_ACTIVE": {
+        "type": "int", "default": 10, "lo": 1, "hi": 100,
+        "group": "Identity Management", "label": "Max active identities",
+        "help": "Ceiling on non-retired identities. When reached, the oldest "
+                "identity is retired before a new one is created.",
+    },
     # --- Campaigns (workflows 16 / 17 / 18 / 20) ---
     # Global per-operator ownership cap. Shared-in campaigns do not count.
     # Administrators change this from the Configuration panel; it takes effect
@@ -586,6 +664,10 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
 # Panel section order. Anything not listed falls to the end alphabetically.
 GROUP_ORDER = [
     "Organization",
+    "Russian Corporate Intelligence",
+    "Russian Leak DBs",
+    "Telegram OSINT",
+    "Identity Management",
     "Campaigns",
     "Flare breach export",
     "Super-Enrich",

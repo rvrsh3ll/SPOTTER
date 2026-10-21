@@ -238,8 +238,25 @@ def search():
             return jsonify({"error": f"Subprocess error: {exc}"}), 500
 
         # Locate the produced report (filename derives from a sanitised username).
-        matches = sorted(glob.glob(os.path.join(tmpdir, "report_*_simple.json")))
-        if not matches:
+        # Maigret may write multiple reports: one for the requested username and
+        # additional ones for any extracted IDs (e.g. an OK.ru numeric user ID).
+        # The extracted-ID reports are often empty or near-empty, and their
+        # filenames (e.g. report_31073078859_simple.json) sort before the
+        # username report alphabetically.  Pick the username report first; fall
+        # back to the largest non-empty file if no exact match exists.
+        import re as _re
+        _safe_uname = _re.sub(r'[^\w\-.]', '_', username)
+        all_reports = glob.glob(os.path.join(tmpdir, "report_*_simple.json"))
+        username_report = os.path.join(tmpdir, f"report_{_safe_uname}_simple.json")
+        if os.path.isfile(username_report):
+            chosen = username_report
+        else:
+            # Fall back to the largest non-empty report (skip the extracted-ID ones).
+            non_empty = [(os.path.getsize(p), p) for p in all_reports
+                         if os.path.getsize(p) > 2]
+            non_empty.sort(reverse=True)
+            chosen = non_empty[0][1] if non_empty else (all_reports[0] if all_reports else None)
+        if not chosen:
             return jsonify({
                 "error":  "Maigret produced no output file",
                 "stderr": proc.stderr[-2000:],
@@ -247,7 +264,7 @@ def search():
             }), 500
 
         try:
-            with open(matches[0]) as fh:
+            with open(chosen) as fh:
                 report = json.load(fh)
         except json.JSONDecodeError as exc:
             return jsonify({"error": f"JSON parse error: {exc}"}), 500

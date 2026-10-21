@@ -63,17 +63,22 @@ def to_ascii_domain(value: str) -> str:
         return host
 
 
+# TLDs where precert.ru is the best CT source. These are Russian-language and
+# post-Soviet TLDs where precert.ru has better coverage than crt.sh.
+PRECERT_TLDS = {"ru", "su", "by", "kz", "ua", "uz", "tj", "kg", "am", "az", "ge", "md"}
+
+
 def source_for_domain(domain: str, requested: str | None = None) -> str:
     """CT backend for this domain.
 
-    A .ru TLD is queried on precert.ru only, the same choice as
-    ``certcreep.py --source precert``. An explicit crt.sh or both request is
-    not honored for that TLD. Every other TLD keeps the requested source, or
-    the module default when the caller did not choose one.
+    A .ru or other Cyrillic-adjacent TLD is queried on precert.ru only, the
+    same choice as ``certcreep.py --source precert``. An explicit crt.sh or
+    both request is not honored for those TLDs. Every other TLD keeps the
+    requested source, or the module default when the caller did not choose one.
     """
     host = to_ascii_domain(domain).split(":", 1)[0]
     tld = host.rsplit(".", 1)[-1] if host else ""
-    if tld == "ru":
+    if tld in PRECERT_TLDS:
         return "precert"
     if requested in ("crtsh", "precert", "both"):
         return requested
@@ -173,12 +178,14 @@ def merge_rows(rows: Iterable[dict[str, Any]], apex: str, source: str) -> list[C
     return sorted(names.values(), key=lambda record: (parse_timestamp(record.last_seen) or datetime.min.replace(tzinfo=timezone.utc), record.name), reverse=True)
 
 
-def request_json(url: str, timeout: int, retries: int, user_agent: str) -> Any:
+def request_json(url: str, timeout: int, retries: int, user_agent: str, proxies: dict[str, str] | None = None) -> Any:
     request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json,text/plain,*/*"})
+    proxy_handler = urllib.request.ProxyHandler(proxies) if proxies else urllib.request.ProxyHandler()
+    opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(request, timeout=timeout, context=ssl.create_default_context()) as response:
+            with opener.open(request, timeout=timeout) as response:
                 payload = response.read().decode("utf-8", errors="replace").lstrip()
             if not payload or payload[0] not in "[{":
                 raise ValueError("response was not JSON")
@@ -190,12 +197,12 @@ def request_json(url: str, timeout: int, retries: int, user_agent: str) -> Any:
     raise RuntimeError(str(last_error))
 
 
-def crtsh_rows(apex: str, request: Callable[..., Any], timeout: int, retries: int, user_agent: str) -> list[dict[str, Any]]:
+def crtsh_rows(apex: str, request: Callable[..., Any], timeout: int, retries: int, user_agent: str, proxies: dict[str, str] | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[Any] = set()
     for query in (apex, f"%.{apex}"):
         params = urllib.parse.urlencode({"q": query, "output": "json"})
-        response = request(f"{CRTSH_URL}?{params}", timeout, retries, user_agent)
+        response = request(f"{CRTSH_URL}?{params}", timeout, retries, user_agent, proxies)
         if not isinstance(response, list):
             continue
         for row in response:
@@ -208,15 +215,15 @@ def crtsh_rows(apex: str, request: Callable[..., Any], timeout: int, retries: in
     return rows
 
 
-def precert_rows(apex: str, request: Callable[..., Any], timeout: int, retries: int, user_agent: str) -> list[dict[str, Any]]:
+def precert_rows(apex: str, request: Callable[..., Any], timeout: int, retries: int, user_agent: str, proxies: dict[str, str] | None = None) -> list[dict[str, Any]]:
     params = urllib.parse.urlencode({"query": apex, "draw": 1, "start": 0, "length": 1000})
-    response = request(f"{PRECERT_URL}?{params}", timeout, retries, user_agent)
+    response = request(f"{PRECERT_URL}?{params}", timeout, retries, user_agent, proxies)
     if isinstance(response, dict):
         response = response.get("data") or response.get("rows") or response.get("results") or []
     return [row for row in response if isinstance(row, dict)] if isinstance(response, list) else []
 
 
-def collect(domain: str, source: str = DEFAULT_SOURCE, limit: int = DEFAULT_LIMIT, timeout: int = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES, user_agent: str = DEFAULT_USER_AGENT, request: Callable[..., Any] = request_json) -> dict[str, Any]:
+def collect(domain: str, source: str = DEFAULT_SOURCE, limit: int = DEFAULT_LIMIT, timeout: int = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES, user_agent: str = DEFAULT_USER_AGENT, request: Callable[..., Any] = request_json, proxies: dict[str, str] | None = None) -> dict[str, Any]:
     apex = to_ascii_domain(domain)
     if not apex or "." not in apex:
         raise ValueError("domain must be an apex domain")
@@ -227,7 +234,7 @@ def collect(domain: str, source: str = DEFAULT_SOURCE, limit: int = DEFAULT_LIMI
         if source not in (backend, "both"):
             continue
         try:
-            for record in merge_rows(loader(apex, request, timeout, retries, user_agent), apex, backend):
+            for record in merge_rows(loader(apex, request, timeout, retries, user_agent, proxies), apex, backend):
                 existing = records.get(record.name)
                 if existing is None:
                     records[record.name] = record

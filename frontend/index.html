@@ -559,6 +559,14 @@ button.qa { background: none; cursor: pointer; }
   color: var(--warn); border: 1px dashed rgba(196,124,50,.5);
   border-radius: 2px; padding: 1px 5px; white-space: nowrap;
 }
+/* Validated: annotation-only, like COMP/OI. Green to read as a positive signal —
+   the operator confirmed this entity is real / confirmed / actionable. */
+.badge-val {
+  display: inline-block; font-family: var(--mono); font-size: 8px;
+  letter-spacing: .06em; background: rgba(46,160,67,.16);
+  color: #4ba56a; border: 1px solid rgba(46,160,67,.4);
+  border-radius: 2px; padding: 1px 5px; white-space: nowrap;
+}
 /* Out-of-scope and false-positive rows are excluded from view/analysis; when
    revealed they read as struck-through and dimmer than a merely hidden row. */
 .tr-oos, .tr-fp { opacity: 0.30; }
@@ -580,6 +588,7 @@ button.qa { background: none; cursor: pointer; }
 .bkt-mk.on-oi   { background: rgba(61,143,188,.18); color: var(--data); border-color: rgba(61,143,188,.4); }
 .bkt-mk.on-oos  { background: rgba(140,140,150,.14); color: var(--dim); border-style: dashed; }
 .bkt-mk.on-fp   { background: rgba(196,124,50,.14); color: var(--warn); border-color: rgba(196,124,50,.45); border-style: dashed; }
+.bkt-mk.on-val  { background: rgba(46,160,67,.16); color: #4ba56a; border-color: rgba(46,160,67,.4); }
 /* The FP chip on an analysis-card row. .tgt-row is a flex row with .tgt-rationale
    at flex:1, so the chip right-aligns as a trailing sibling instead of riding
    inside the rationale where a long one would push it off. */
@@ -7998,6 +8007,7 @@ function renderTargetTable(list, cid) {
   const showHidden    = getShowHidden();
   const compromised   = getCompromised();
   const oiTargets     = getOITargets();
+  const valTargets    = getValTargets();
   const oosTargets    = getOOSTargets();
   const showOOS       = getShowOOS();
 
@@ -8038,6 +8048,8 @@ function renderTargetTable(list, cid) {
         <div class="act-item" onclick="unmarkCompromised()">Clear Compromised</div>
         <div class="act-item" onclick="markOfInterest()">Mark Of Interest (OI)</div>
         <div class="act-item" onclick="unmarkOfInterest()">Clear OI</div>
+        <div class="act-item" onclick="markValidated()">Mark Validated (VAL)</div>
+        <div class="act-item" onclick="unmarkValidated()">Clear VAL</div>
         <div class="act-item" onclick="markOutOfScope()" title="Exclude from every view, the export, the Prompt tab and the analysis">Mark Out of Scope (OoS)</div>
         <div class="act-item" onclick="unmarkOutOfScope()">Clear OoS</div>
         <div class="act-item" onclick="markFalsePositive()" title="A result the operator judged wrong — hide it from every view, the export, the Prompt tab and the analysis">Mark False Positive (FP)</div>
@@ -8122,10 +8134,12 @@ function renderTargetTable(list, cid) {
       const safeLabel = esc(rowLabel);
       const isComp    = !!compromised[rowLabel];
       const isOI      = !!oiTargets[rowLabel];
+      const isVal     = !!valTargets[rowLabel];
       const statusCell = (() => {
         const parts = [];
         if (isComp) parts.push(`<span class="badge-comp" title="Marked Compromised">COMP</span>`);
         if (isOI)   parts.push(`<span class="badge-oi"   title="Of Interest">OI</span>`);
+        if (isVal)  parts.push(`<span class="badge-val"  title="Validated — operator confirmed this entity">VAL</span>`);
         if (isOOS)  parts.push(`<span class="badge-oos"  title="Out of scope — excluded from analysis and reports">OoS</span>`);
         if (isFP)   parts.push(`<span class="badge-fp"   title="False positive — excluded from analysis, reports and the Prompt tab">FP</span>`);
         return parts.length ? `<span style="display:flex;gap:3px;flex-wrap:wrap;">${parts.join('')}</span>` : `<span style="color:var(--dim)">—</span>`;
@@ -8273,6 +8287,7 @@ function renderAssetTable(list, cid) {
 
   const compD = getDevCompromised();
   const oiD   = getDevOITargets();
+  const valD  = getDevValTargets();
   const _ixA  = _scopeIndex('assets');
   const showOOS = getShowOOS();
   const showFP  = getShowFP();
@@ -8295,6 +8310,8 @@ function renderAssetTable(list, cid) {
         <div class="act-item" onclick="unmarkCompromised()">Clear Compromised</div>
         <div class="act-item" onclick="markOfInterest()">Mark Of Interest (OI)</div>
         <div class="act-item" onclick="unmarkOfInterest()">Clear OI</div>
+        <div class="act-item" onclick="markValidated()">Mark Validated (VAL)</div>
+        <div class="act-item" onclick="unmarkValidated()">Clear VAL</div>
         <div class="act-item" onclick="markOutOfScope()" title="Exclude from every view, the export, the Prompt tab and the analysis">Mark Out of Scope (OoS)</div>
         <div class="act-item" onclick="unmarkOutOfScope()">Clear OoS</div>
         <div class="act-item" onclick="markFalsePositive()" title="A result the operator judged wrong — hide it from every view, the export, the Prompt tab and the analysis">Mark False Positive (FP)</div>
@@ -8343,6 +8360,7 @@ function renderAssetTable(list, cid) {
       const portsCell = r.ports ? `<span style="color:var(--data)">${r.ports}</span>` : `<span style="color:var(--dim)">—</span>`;
       const isComp = !!compD[nm];
       const isOI   = !!oiD[nm];
+      const isVal  = !!valD[nm];
       const exM    = _scopeMark(_ixA, nm);
       const isOOS  = exM === 'oos';
       const isFP   = exM === 'fp';
@@ -8350,6 +8368,7 @@ function renderAssetTable(list, cid) {
         const parts = [];
         if (isComp) parts.push(`<span class="badge-comp" title="Marked Compromised">COMP</span>`);
         if (isOI)   parts.push(`<span class="badge-oi"   title="Of Interest">OI</span>`);
+        if (isVal)  parts.push(`<span class="badge-val"  title="Validated — operator confirmed this entity">VAL</span>`);
         if (isOOS)  parts.push(`<span class="badge-oos"  title="Out of scope — excluded from analysis and reports">OoS</span>`);
         if (isFP)   parts.push(`<span class="badge-fp"   title="False positive — excluded from analysis, reports and the Prompt tab">FP</span>`);
         return parts.length ? `<span style="display:flex;gap:3px;flex-wrap:wrap;">${parts.join('')}</span>` : `<span style="color:var(--dim)">—</span>`;
@@ -8999,7 +9018,7 @@ function renderWeb() {
       : 'No web endpoints yet — ingest an EyeWitness run from the Ingest tab (zip the output dir), or run scripts/ingest_eyewitness.py.'}</div>`;
     return;
   }
-  const comp = getDevCompromised(), oi = getDevOITargets(), _ixW = _scopeIndex('assets');
+  const comp = getDevCompromised(), oi = getDevOITargets(), val = getDevValTargets(), _ixW = _scopeIndex('assets');
   let h = '<div class="web-grid">';
   list.forEach((s, i) => {
     const shot = safeShotUrl(s.screenshot_url);
@@ -9014,12 +9033,13 @@ function renderWeb() {
       ? `<span class="web-fqdn" title="FQDN">${esc(fq)}</span>` : '';
     const key = _webMarkKey(s), dk = esc(key);
     const exW = _scopeMark(_ixW, key);
-    const isComp = !!comp[key], isOI = !!oi[key], isOOS = exW === 'oos', isFP = exW === 'fp';
+    const isComp = !!comp[key], isOI = !!oi[key], isVal = !!val[key], isOOS = exW === 'oos', isFP = exW === 'fp';
     const oosBadge = isOOS ? `<span class="badge-oos" title="Out of scope">OoS</span>`
                    : isFP  ? `<span class="badge-fp" title="False positive">FP</span>` : '';
     const marks = `<span class="web-marks">
         <span class="bkt-mk${isComp?' on-comp':''}" data-web="${dk}" onclick="event.stopPropagation();toggleWebMark('comp',this.dataset.web)" title="Toggle Compromised">COMP</span>
         <span class="bkt-mk${isOI?' on-oi':''}"     data-web="${dk}" onclick="event.stopPropagation();toggleWebMark('oi',this.dataset.web)"   title="Toggle Of Interest">OI</span>
+        <span class="bkt-mk${isVal?' on-val':''}"   data-web="${dk}" onclick="event.stopPropagation();toggleWebMark('val',this.dataset.web)"  title="Toggle Validated — operator confirmed this entity">VAL</span>
         <span class="bkt-mk${isOOS?' on-oos':''}"    data-web="${dk}" onclick="event.stopPropagation();toggleWebMark('oos',this.dataset.web)"  title="Toggle Out of Scope — excludes this endpoint from the Assets tab and the analysis">OoS</span>
         <span class="bkt-mk${isFP?' on-fp':''}"      data-web="${dk}" onclick="event.stopPropagation();toggleWebMark('fp',this.dataset.web)"   title="Toggle False Positive — excludes this endpoint from the Assets tab, the exports, the Prompt tab and the analysis">FP</span>
       </span>`;
@@ -9753,6 +9773,8 @@ function getDevCompromised()   { try { return JSON.parse(localStorage.getItem(('
 function saveDevCompromised(m) { localStorage.setItem(('s.dev_compromised' + campSuffix()), JSON.stringify(m)); }
 function getDevOITargets()     { try { return JSON.parse(localStorage.getItem(('s.dev_oi_targets' + campSuffix())) || '{}'); } catch { return {}; } }
 function saveDevOITargets(m)   { localStorage.setItem(('s.dev_oi_targets' + campSuffix()), JSON.stringify(m)); }
+function getDevValTargets()    { try { return JSON.parse(localStorage.getItem(('s.dev_val_targets' + campSuffix())) || '{}'); } catch { return {}; } }
+function saveDevValTargets(m)  { localStorage.setItem(('s.dev_val_targets' + campSuffix()), JSON.stringify(m)); }
 /* Out-of-scope is a THIRD per-namespace mark: unlike Compromised/OI it removes the
    entity from every view and from the analysis payload entirely (see runAnalysis
    and _toolListTargets). Same shape/suffix as the other two, and both keys are in
@@ -9821,6 +9843,9 @@ const MARK_KINDS = {
   oi:   { people: getOITargets, savePeople: saveOITargets,
           assets: getDevOITargets, saveAssets: saveDevOITargets,
           chip: 'OI', cls: 'on-oi', noun: 'Of Interest' },
+  val:  { people: getValTargets, savePeople: saveValTargets,
+          assets: getDevValTargets, saveAssets: saveDevValTargets,
+          chip: 'VAL', cls: 'on-val', noun: 'validated' },
   oos:  { people: getOOSTargets, savePeople: saveOOSTargets,
           assets: getDevOOSTargets, saveAssets: saveDevOOSTargets,
           chip: 'OoS', cls: 'on-oos', noun: 'out of scope', excludes: true },
@@ -10063,10 +10088,12 @@ function _scrubTech(d) {
   out.user_tech_profiles = p.rows;
   const s = _scopeFilter(d.stale_devices, r => r && r.hostname, ixA);
   out.stale_devices = s.rows;
+  const ce = _scopeFilter(d.cloud_exposure, r => r && [r.asset, r.endpoint], ixA);
+  out.cloud_exposure = ce.rows;
   if (d.tech_user_map)      out.tech_user_map      = _scopeMapLists(d.tech_user_map, ixP);
   if (d.os_device_map)      out.os_device_map      = _scopeMapLists(d.os_device_map, ixA);
   if (d.device_dossier_map) out.device_dossier_map = _scopeMapKeys(d.device_dossier_map, ixA);
-  out._excluded = _sumCounts(p.counts, s.counts);
+  out._excluded = _sumCounts(p.counts, s.counts, ce.counts);
   return out;
 }
 
@@ -10124,6 +10151,10 @@ function unmarkCompromised() {
 function getOITargets()   { try { return JSON.parse(localStorage.getItem(('s.oi_targets' + campSuffix())) || '{}'); } catch { return {}; } }
 function saveOITargets(m) { localStorage.setItem(('s.oi_targets' + campSuffix()), JSON.stringify(m)); }
 
+/* ── Validated (VAL) tracking ────────────────────────────────────── */
+function getValTargets()   { try { return JSON.parse(localStorage.getItem(('s.val_targets' + campSuffix())) || '{}'); } catch { return {}; } }
+function saveValTargets(m) { localStorage.setItem(('s.val_targets' + campSuffix()), JSON.stringify(m)); }
+
 function markOfInterest() {
   const menu = document.getElementById('act-menu');
   if (menu) menu.style.display = 'none';
@@ -10146,6 +10177,30 @@ function unmarkOfInterest() {
   _saveMarks('oi', oi);
   if (_targetsCache) renderTargetsView();
   toast(`OI cleared for ${labels.length} ${_markNoun(labels.length)}`, 'ok');
+}
+
+function markValidated() {
+  const menu = document.getElementById('act-menu');
+  if (menu) menu.style.display = 'none';
+  const labels = _selectedLabels();
+  if (!labels.length) { toast('Nothing selected', 'inf'); return; }
+  const val = _getMarks('val');
+  labels.forEach(l => { val[l] = { ts: new Date().toISOString() }; });
+  _saveMarks('val', val);
+  if (_targetsCache) renderTargetsView();
+  toast(`${labels.length} ${_markNoun(labels.length)} marked Validated`, 'ok');
+}
+
+function unmarkValidated() {
+  const menu = document.getElementById('act-menu');
+  if (menu) menu.style.display = 'none';
+  const labels = _selectedLabels();
+  if (!labels.length) { toast('Nothing selected', 'inf'); return; }
+  const val = _getMarks('val');
+  labels.forEach(l => { delete val[l]; });
+  _saveMarks('val', val);
+  if (_targetsCache) renderTargetsView();
+  toast(`VAL cleared for ${labels.length} ${_markNoun(labels.length)}`, 'ok');
 }
 
 /* ── Out of Scope (OoS) tracking ─────────────────────────────────────
@@ -10722,6 +10777,7 @@ async function syncCampaignsOnBoot() {
 const CAMP_SCOPED_KEYS = ['s.pinned','s.dossier_enriched','s.hidden_targets','s.show_hidden','s.infrastructure',
   's.flare_enriched','s.flare_anno','s.photo_fps','s.photo_verified','s.compromised',
   's.oi_targets','s.dev_compromised','s.dev_oi_targets','s.targets_cache','s.agents_cache',
+  's.val_targets','s.dev_val_targets',
   's.oos_targets','s.dev_oos_targets','s.show_oos',
   's.fp_targets','s.dev_fp_targets','s.fp_scenarios','s.show_fp',
   's.tiActiveOnly','s.tiActiveDays','s.notifications_cache'];
@@ -12259,8 +12315,10 @@ async function _toolListTargets(args) {
 
   const compromised = getCompromised();
   const oi          = getOITargets();
+  const val         = getValTargets();
   const devComp     = getDevCompromised();
   const devOI       = getDevOITargets();
+  const devVal      = getDevValTargets();
   const hidden      = getHiddenTargets();
   const flare       = getFlareEnriched();
 
@@ -12287,6 +12345,7 @@ async function _toolListTargets(args) {
         annotations: {
           compromised: !!compromised[key],
           of_interest: !!oi[key],
+          validated: !!val[key],
           hidden: !!hidden[key],
           flare_enriched: !!flare[key],
         },
@@ -12295,6 +12354,7 @@ async function _toolListTargets(args) {
     if (query) rows = rows.filter(r => JSON.stringify(r).toLowerCase().includes(query));
     if (only === 'compromised')  rows = rows.filter(r => r.annotations.compromised);
     if (only === 'of_interest')  rows = rows.filter(r => r.annotations.of_interest);
+    if (only === 'validated')    rows = rows.filter(r => r.annotations.validated);
     if (only === 'admins')       rows = rows.filter(r => r.is_admin);
     if (only === 'beacons')      rows = rows.filter(r => r.active_beacon);
     if (only === 'breached')     rows = rows.filter(r => r.breach_count > 0 || r.has_stealer_log);
@@ -12308,6 +12368,7 @@ async function _toolListTargets(args) {
       annotations: {
         compromised: !!devComp[r.hostname || ''],
         of_interest: !!devOI[r.hostname || ''],
+        validated: !!devVal[r.hostname || ''],
       },
       sam_account_name: r.samaccountname || '',
       fqdn: r.fqdn || '',
@@ -12328,6 +12389,7 @@ async function _toolListTargets(args) {
     if (only === 'eol')      rows = rows.filter(r => ['critical','high','medium','low'].includes(r.os_risk));
     if (only === 'compromised') rows = rows.filter(r => r.annotations.compromised);
     if (only === 'of_interest') rows = rows.filter(r => r.annotations.of_interest);
+    if (only === 'validated')   rows = rows.filter(r => r.annotations.validated);
     rows.sort((a, b) => (b.score || 0) - (a.score || 0));
     out.devices = { total: rows.length, showing: Math.min(rows.length, limit), rows: rows.slice(0, limit) };
   }
@@ -12689,7 +12751,7 @@ const SPOTTER_TOOLS = [
         type: 'object',
         properties: {
           kind:  { type: 'string',  description: 'individuals (default) | devices | both' },
-          only:  { type: 'string',  description: 'all (default) | compromised | of_interest | admins | beacons | breached | dc | eol' },
+          only:  { type: 'string',  description: 'all (default) | compromised | of_interest | validated | admins | beacons | breached | dc | eol' },
           query: { type: 'string',  description: 'Optional keyword filter (name, username, email, hostname, OS)' },
           limit: { type: 'integer', description: 'Max rows (default 25)' },
         },
@@ -14524,6 +14586,29 @@ function _fpChip(ns, key, on) {
     + ` title="${on ? 'Clear false positive' : 'Mark false positive — hides this result here and on the Targets tab, and drops it from the exports, the Prompt tab and the next analysis'}">FP</span>`;
 }
 
+/* ── Generic mark chip on an analysis-card row ──────────────────────────
+   COMP / OI / VAL / OoS as toggleable chips alongside the FP chip. Reads the
+   frontend mark store (same one the Targets tab writes) so a mark made on the
+   Targets tab is reflected here and vice versa. Routes through toggleBucketMark
+   which already handles both 'people' and 'assets' namespaces via MARK_KINDS. */
+function toggleAnalysisMark(kind, ns, key) {
+  if (!key) return;
+  toggleBucketMark(kind, key);
+  try { renderAnalysisList(); } catch {}
+}
+
+function _markChip(kind, ns, key, on) {
+  if (!key) return '';
+  const k = _markKind(kind);
+  const cls = k.cls || '';
+  const chip = k.chip || kind.toUpperCase();
+  const noun = k.noun || kind;
+  return `<span class="bkt-mk an-mk${on ? ' ' + cls : ''}" role="button" tabindex="0"`
+    + ` data-mk="${esc(kind)}" data-mkns="${esc(ns)}" data-mkk="${esc(key)}"`
+    + ` onclick="event.stopPropagation();toggleAnalysisMark(this.dataset.mk,this.dataset.mkns,this.dataset.mkk)"`
+    + ` title="${on ? 'Clear ' + noun : 'Mark ' + noun}">${chip}</span>`;
+}
+
 /* Records the operator's correct answer for one WF10/WF12 LLM decision via
    POST /webhook/analysis-correction (see n8n-workflows/29-analysis-correction.json
    and scripts/analysis_history.py). This is the labeled-data prerequisite for
@@ -14665,6 +14750,10 @@ function renderAnalysisCard(a) {
   const _ex   = _rec._excluded || { oos: 0, fp: 0 };
   const _isFpP = n => _scopeMark(_ixP, n) === 'fp';
   const _isFpA = k => _scopeMarkAny(_ixA, k) === 'fp';
+  const _isOosP = n => _scopeMark(_ixP, n) === 'oos';
+  const _isOosA = k => _scopeMarkAny(_ixA, k) === 'oos';
+  const _anComp = getCompromised(), _anOi = getOITargets(), _anVal = getValTargets();
+  const _anDComp = getDevCompromised(), _anDOi = getDevOITargets(), _anDVal = getDevValTargets();
   // What is actually being withheld right now — a revealed mark hides nothing.
   const _exVisible = { oos: _rev.showOOS ? 0 : _ex.oos, fp: _rev.showFP ? 0 : _ex.fp };
   /* WF10 ranked a population, then clipped it; the operator then removed some of
@@ -14713,11 +14802,13 @@ function renderAnalysisCard(a) {
         + ` title="Open the full dossier for ${esc(nm)}">${esc(nm)}</span>`
       : `<span class="tgt-name">&#8212;</span>`;
     const fp = _isFpP(nm);
+    const oos = _isOosP(nm);
+    const isComp = !!_anComp[nm], isOI = !!_anOi[nm], isVal = !!_anVal[nm];
     return `<div class="tgt-row${fp ? ' an-fp' : ''}">
       <span class="tgt-score ${sccls}">${sc}</span>
       ${name}
       <span class="tgt-rationale">${esc(t.rationale || '')}${opComp}${opOI}${adm}${stealer}${conf}${credTag}${bxcTag}${reuseTag}${bTag}${peTag}${liTag}</span>
-      ${_fpChip('people', nm, fp)}
+      ${_markChip('comp', 'people', nm, isComp)}${_markChip('oi', 'people', nm, isOI)}${_markChip('val', 'people', nm, isVal)}${_markChip('oos', 'people', nm, oos)}${_fpChip('people', nm, fp)}
     </div>`;
   };
   const tTotal = _rankTotal(a.targetsTotal, targets.length);
@@ -14753,11 +14844,13 @@ function renderAnalysisCard(a) {
       { noun: 'admin', title: 'Local admins', col: 'Principal', hint: 'Local admins on this host' }) : '';
     const dnm = t.name || '';
     const fp  = _isFpA(dnm);
+    const oos = _isOosA(dnm);
+    const isDComp = !!_anDComp[dnm], isDOI = !!_anDOi[dnm], isDVal = !!_anDVal[dnm];
     return `<div class="tgt-row${fp ? ' an-fp' : ''}">
       <span class="tgt-score ${sccls}">${sc}</span>
       <span class="tgt-name">${esc(dnm || '—')}</span>
       <span class="tgt-rationale">${esc(t.os || '')}${dOpComp}${dOpOI}${dcTag}${riskTag}${ucTag}${cdTag}${sessTag}${admTag}</span>
-      ${_fpChip('assets', dnm, fp)}
+      ${_markChip('comp', 'assets', dnm, isDComp)}${_markChip('oi', 'assets', dnm, isDOI)}${_markChip('val', 'assets', dnm, isDVal)}${_markChip('oos', 'assets', dnm, oos)}${_fpChip('assets', dnm, fp)}
     </div>`;
   };
   const dTotal = _rankTotal(a.deviceTargetsTotal, deviceTargets.length);
@@ -16896,18 +16989,20 @@ function buildTargetRosterReport() {
   const hidden = getHiddenTargets();
   const comp   = getCompromised();
   const oi     = getOITargets();
+  const val    = getValTargets();
   const oos    = getOOSTargets();
   const dComp  = getDevCompromised();
   const dOi    = getDevOITargets();
+  const dVal   = getDevValTargets();
   const dOos   = getDevOOSTargets();
   const domain = _companyDomain();
   const sections = [];
 
-  const status  = n => [comp[n] ? 'COMPROMISED' : '', oi[n] ? 'OF INTEREST' : '', hidden[n] ? 'hidden' : '']
+  const status  = n => [comp[n] ? 'COMPROMISED' : '', oi[n] ? 'OF INTEREST' : '', val[n] ? 'VALIDATED' : '', hidden[n] ? 'hidden' : '']
     .filter(Boolean).join(' / ');
   // Device marks live in their own localStorage maps — the old export read the
   // individuals' maps for both, so a device marked COMPROMISED exported blank.
-  const devStatus = n => [dComp[n] ? 'COMPROMISED' : '', dOi[n] ? 'OF INTEREST' : '', hidden[n] ? 'hidden' : '']
+  const devStatus = n => [dComp[n] ? 'COMPROMISED' : '', dOi[n] ? 'OF INTEREST' : '', dVal[n] ? 'VALIDATED' : '', hidden[n] ? 'hidden' : '']
     .filter(Boolean).join(' / ');
 
   // Out of Scope and False Positive are real exclusions, not a cosmetic hide: those
@@ -17379,6 +17474,7 @@ function _vsHostCells(h) {
   const marks = [
     _vsMarkHit(getDevCompromised(), h.host) ? 'COMPROMISED' : '',
     _vsMarkHit(getDevOITargets(), h.host)   ? 'OF INTEREST' : '',
+    _vsMarkHit(getDevValTargets(), h.host)  ? 'VALIDATED' : '',
   ].filter(Boolean).join(' · ');
   return [
     h.host || '', h.node_type || '', h.os || '', String(h.risk_score || 0),
@@ -17653,6 +17749,7 @@ async function runAnalysis() {
       operator_tags: {
         compromised: Object.keys(getCompromised()).slice(0, 400),
         of_interest: Object.keys(getOITargets()).slice(0, 400),
+        validated: Object.keys(getValTargets()).slice(0, 400),
         // Out-of-scope marks: WF10 drops these entities from scoring, scenarios
         // and the breach/credential rollups entirely (not merely deprioritises).
         out_of_scope: Object.keys(getOOSTargets()).slice(0, 400),
@@ -17665,6 +17762,7 @@ async function runAnalysis() {
         devices: {
           compromised: Object.keys(getDevCompromised()).slice(0, 400),
           of_interest: Object.keys(getDevOITargets()).slice(0, 400),
+          validated: Object.keys(getDevValTargets()).slice(0, 400),
           out_of_scope: Object.keys(getDevOOSTargets()).slice(0, 400),
           false_positive: Object.keys(getDevFPTargets()).slice(0, 400),
         },
@@ -19761,7 +19859,7 @@ function renderDomainRecon(data) {
   // Buckets are markable exactly like Assets-tab CLOUD rows, sharing the SAME
   // per-campaign store keyed by bucket||endpoint (WF05 keys CLOUD `name` the same
   // way), so a mark made here IS the same fact in the Assets tab and the analysis.
-  const _bComp = getDevCompromised(), _bOi = getDevOITargets(), _bIx = _scopeIndex('assets');
+  const _bComp = getDevCompromised(), _bOi = getDevOITargets(), _bVal = getDevValTargets(), _bIx = _scopeIndex('assets');
   const _bKey  = b => (b.bucket || b.endpoint || '');
   const _bEx    = b => _scopeMark(_bIx, _bKey(b));
   const showOOSb = getShowOOS(), showFPb = getShowFP();
@@ -19782,11 +19880,12 @@ function renderDomainRecon(data) {
       const epFinds = findsByEp[b.endpoint] || [];
       const key  = _bKey(b);
       const exB  = _scopeMark(_bIx, key);
-      const isComp = !!_bComp[key], isOI = !!_bOi[key], isOOS = exB === 'oos', isFP = exB === 'fp';
+      const isComp = !!_bComp[key], isOI = !!_bOi[key], isVal = !!_bVal[key], isOOS = exB === 'oos', isFP = exB === 'fp';
       const dk   = esc(key);
       const marks = `<span style="display:inline-flex;gap:3px;margin-left:4px;">
           <span class="bkt-mk${isComp?' on-comp':''}" data-bkt="${dk}" onclick="event.stopPropagation();toggleBucketMark('comp',this.dataset.bkt)" title="Toggle Compromised">COMP</span>
           <span class="bkt-mk${isOI?' on-oi':''}"     data-bkt="${dk}" onclick="event.stopPropagation();toggleBucketMark('oi',this.dataset.bkt)"   title="Toggle Of Interest">OI</span>
+          <span class="bkt-mk${isVal?' on-val':''}"   data-bkt="${dk}" onclick="event.stopPropagation();toggleBucketMark('val',this.dataset.bkt)"  title="Toggle Validated — operator confirmed this entity">VAL</span>
           <span class="bkt-mk${isOOS?' on-oos':''}"    data-bkt="${dk}" onclick="event.stopPropagation();toggleBucketMark('oos',this.dataset.bkt)"  title="Toggle Out of Scope — excludes this bucket from the Assets tab, exports and the analysis">OoS</span>
           <span class="bkt-mk${isFP?' on-fp':''}"      data-bkt="${dk}" onclick="event.stopPropagation();toggleBucketMark('fp',this.dataset.bkt)"   title="Toggle False Positive — excludes this bucket from the Assets tab, exports, the Prompt tab and the analysis">FP</span>
         </span>`;
@@ -21402,8 +21501,8 @@ function _vsSortedHosts() {
   const dir  = _vsHostSortDir;
   // Read the mark stores once, not once per comparison: a comparator that parses
   // localStorage JSON runs O(n log n) times.
-  const comp = getDevCompromised(), oi = getDevOITargets();
-  const rank = h => (_vsMarkHit(comp, h.host) ? 2 : 0) + (_vsMarkHit(oi, h.host) ? 1 : 0);
+  const comp = getDevCompromised(), oi = getDevOITargets(), val = getDevValTargets();
+  const rank = h => (_vsMarkHit(comp, h.host) ? 2 : 0) + (_vsMarkHit(oi, h.host) ? 1 : 0) + (_vsMarkHit(val, h.host) ? 3 : 0);
   rows.sort((a, b) => {
     let av, bv;
     switch (_vsHostSortCol) {
@@ -21461,6 +21560,7 @@ function _vsRenderHosts() {
 
   const comp = getDevCompromised();
   const oi   = getDevOITargets();
+  const val  = getDevValTargets();
 
   const bar = `<div class="tact-row">
     <span id="vs-sel-count" style="font-family:var(--mono);font-size:9px;color:var(--dim);min-width:72px;">0 selected</span>
@@ -21471,6 +21571,8 @@ function _vsRenderHosts() {
         <div class="act-item" onclick="vsMarkHosts('comp',false)">Clear Compromised</div>
         <div class="act-item" onclick="vsMarkHosts('oi',true)">Mark Of Interest (OI)</div>
         <div class="act-item" onclick="vsMarkHosts('oi',false)">Clear OI</div>
+        <div class="act-item" onclick="vsMarkHosts('val',true)">Mark Validated (VAL)</div>
+        <div class="act-item" onclick="vsMarkHosts('val',false)">Clear VAL</div>
         <div class="act-item" onclick="vsMarkHosts('oos',true)" title="Exclude this host from the Targets tab and the analysis">Mark Out of Scope (OoS)</div>
         <div class="act-item" onclick="vsMarkHosts('oos',false)">Clear OoS</div>
         <div class="act-item" onclick="vsMarkHosts('fp',true)" title="A host the operator judged wrong — hide it from every view, the exports, the Prompt tab and the analysis">Mark False Positive (FP)</div>
@@ -21507,12 +21609,14 @@ function _vsRenderHosts() {
     ? hosts.map((h, i) => {
         const isComp = _vsMarkHit(comp, h.host);
         const isOI   = _vsMarkHit(oi, h.host);
+        const isVal  = _vsMarkHit(val, h.host);
         const _hEx   = _scopeMark(_vsIx, h.host);
         const isOOS  = _hEx === 'oos';
         const isFP   = _hEx === 'fp';
         const marks  = [
           isComp ? `<span class="badge-comp" title="Marked Compromised">COMP</span>` : '',
           isOI   ? `<span class="badge-oi"   title="Of Interest">OI</span>` : '',
+          isVal  ? `<span class="badge-val"  title="Validated — operator confirmed this entity">VAL</span>` : '',
           isOOS  ? `<span class="badge-oos"  title="Out of scope — excluded from the Targets tab and the analysis">OoS</span>` : '',
           isFP   ? `<span class="badge-fp"   title="False positive — excluded from every view, the exports, the Prompt tab and the analysis">FP</span>` : '',
         ].filter(Boolean).join(' ') || `<span style="color:var(--dim)">—</span>`;
@@ -21714,6 +21818,7 @@ function vsOpenHost(i) {
 
   const isComp = _vsMarkHit(getDevCompromised(), h.host);
   const isOI   = _vsMarkHit(getDevOITargets(), h.host);
+  const isVal  = _vsMarkHit(getDevValTargets(), h.host);
   const top    = _tiList(h.top_findings);
   const dd     = ((_tiData || {}).device_dossier_map || {})[h.host];
 
@@ -21728,7 +21833,7 @@ function vsOpenHost(i) {
     ['OS',          h.os || ''],
     ['Scan date',   h.scan_date || ''],
     ['Node type',   h.node_type || ''],
-    ['Operator marks', [isComp ? 'COMPROMISED' : '', isOI ? 'OF INTEREST' : ''].filter(Boolean).join(' · ') || 'none'],
+    ['Operator marks', [isComp ? 'COMPROMISED' : '', isOI ? 'OF INTEREST' : '', isVal ? 'VALIDATED' : ''].filter(Boolean).join(' · ') || 'none'],
   ]);
 
   html += `<div class="dev-dm-section">Worst findings on this host &middot; ${top.length}</div>`;
@@ -21767,6 +21872,7 @@ function vsOpenHost(i) {
   const marks = [
     `<button class="xbtn" onclick="vsMarkDetail('comp',${!isComp})">${isComp ? 'Clear COMP' : 'Mark Compromised'}</button>`,
     `<button class="xbtn" onclick="vsMarkDetail('oi',${!isOI})">${isOI ? 'Clear OI' : 'Mark Of Interest'}</button>`,
+    `<button class="xbtn" onclick="vsMarkDetail('val',${!isVal})">${isVal ? 'Clear VAL' : 'Mark Validated'}</button>`,
   ].join('');
 
   _vsShowDetail(
@@ -22284,7 +22390,11 @@ function renderTechIntel(data) {
      scoring a bucket has no route to an Individual, so none of these numbers is
      inside anybody's attack_score. It prints beside the numbers rather than in a
      tooltip so a figure is never quoted without it. */
-  const cloud = data.cloud_exposure || [];
+  const _ixCE = _scopeIndex('assets');
+  const _cloudFiltered = _scopeFilter(data.cloud_exposure,
+    r => r && [r.asset, r.endpoint], _ixCE,
+    { showOOS: getShowOOS(), showFP: getShowFP() });
+  const cloud = _cloudFiltered.rows;
   const cloudEl = document.getElementById('ti-cloud');
   const cloudNote = document.getElementById('ti-cloud-note');
   if (cloudNote) {

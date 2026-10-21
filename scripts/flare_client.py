@@ -31,9 +31,14 @@ _TOKEN_TTL = 3500  # seconds; Flare tokens expire at 3600, refresh 100s early
 
 
 class FlareClient:
-    def __init__(self, api_key: Optional[str] = None, tenant_id: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, tenant_id: Optional[str] = None,
+                 proxy_url: str = ""):
         self.api_key = api_key or os.environ.get("FLARE_API_KEY", "")
         self.tenant_id = tenant_id or os.environ.get("FLARE_TENANT_ID", "")
+        self.proxy_url = (proxy_url or "").strip()
+        self.proxies: Optional[dict] = (
+            {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+        )
         self._token: Optional[str] = None
         self._token_expires: float = 0.0
 
@@ -44,6 +49,7 @@ class FlareClient:
         resp = requests.post(
             f"{FLARE_BASE}/tokens/generate",
             headers={"Authorization": self.api_key},
+            proxies=self.proxies,
             timeout=15,
         )
         resp.raise_for_status()
@@ -70,6 +76,7 @@ class FlareClient:
             resp = requests.get(
                 f"{FLARE_BASE}/tokens/test",
                 headers=self._headers(),
+                proxies=self.proxies,
                 timeout=10,
             )
             return resp.status_code == 200
@@ -98,6 +105,7 @@ class FlareClient:
                 f"{FLARE_BASE}/astp/v2/credentials/_search",
                 headers=self._headers(),
                 json=body,
+                proxies=self.proxies,
                 timeout=30,
             )
             resp.raise_for_status()
@@ -145,6 +153,7 @@ class FlareClient:
             f"{FLARE_BASE}/firework/v4/events/",
             headers=self._headers(),
             params={"uid": uid},
+            proxies=self.proxies,
             timeout=20,
         )
         if resp.status_code == 404:

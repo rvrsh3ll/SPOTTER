@@ -295,7 +295,7 @@ services:
       # /proc/<python-runner-pid>/environ instead. A module missing from the JSON is
       # blocked no matter what is listed here.
       N8N_RUNNERS_STDLIB_ALLOW: "*"
-      N8N_RUNNERS_EXTERNAL_ALLOW: "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup"
+      N8N_RUNNERS_EXTERNAL_ALLOW: "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,spotter_proxy,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup"
       N8N_WEBHOOK_BASE_URL: http://n8n:5678
       # Must match the n8n service block above — the code nodes that call the Analysis LLM
       # run HERE, in the runner, so a value set only on n8n has no effect on WF10/WF12.
@@ -308,6 +308,15 @@ services:
       SPOTTER_LLM_BACKEND: ${SPOTTER_LLM_BACKEND:-vllm}
       VLLM_EMBEDDING_MODE: ${VLLM_EMBEDDING_MODE:-tfidf}
       N8N_BLOCK_RUNNER_ENV_ACCESS: "false"
+      # ── Outbound proxy (Infrastructure tab / container-level default) ──────
+      # SPOTTER_PROXY_URL is the container-level default proxy. The per-campaign
+      # envelope from the Infrastructure tab takes priority when present.
+      # HTTP_PROXY/HTTPS_PROXY catch any code that uses requests with trust_env=True.
+      # NO_PROXY keeps internal Docker network traffic direct (no proxy for services).
+      SPOTTER_PROXY_URL: ${SPOTTER_PROXY_URL:-}
+      HTTP_PROXY: ${SPOTTER_PROXY_URL:-}
+      HTTPS_PROXY: ${SPOTTER_PROXY_URL:-}
+      NO_PROXY: "flowsint-api,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,127.0.0.1,localhost,.flowsint_net"
       FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}

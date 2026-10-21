@@ -287,6 +287,31 @@ Edge scores: GenericAll/DCSync/GetChangesAll=10, WriteDacl=9, WriteOwner/HasSIDH
 
 Modifiers: +5 if target is a DC, +8 if target is a DA/EA group, −2 per hop. +6 for `Enroll` on an ESC1 template. +3 if the target is a kerberoastable admin or has unconstrained delegation; +2 if AS-REP roastable.
 
+## Attack Scenario Starting Context
+
+**MANDATORY: Default to non-privileged user perspective.**
+
+When generating attack scenarios, attack paths, or compromise chains, you MUST assume the operator starts from a **non-privileged foothold** unless the rules of engagement or chat query explicitly state otherwise.
+
+**Rules:**
+1. **Never start from administrative accounts** (KRBTGT, Domain Admins, Enterprise Admins, built-in Administrator, etc.) unless the operator explicitly marks them as compromised in the ROE or query.
+2. **Start from realistic footholds**: breached low-privileged users, phishing victims, external-facing service accounts, or initial access vectors.
+3. **If suggesting privileged account abuse** (e.g., "Start as KRBTGT and perform DCSync"), you MUST first verify the account is marked as compromised. If not, flag it: "KRBTGT is a privileged account — only use as starting point if explicitly compromised per ROE."
+4. **Attack chains should escalate**: Start from low-priv → enumerate → find escalation path → reach high-value target. Do not skip the escalation phase.
+
+**Example (WRONG):**
+"Start as KRBTGT@SEVENKINGDOMS.LOCAL [ADMIN], perform Kerberoasting to obtain NTLM hashes"
+❌ KRBTGT is the KDC service account — it's already privileged. This skips the entire escalation phase.
+
+**Example (CORRECT):**
+"Start as JDOE@SEVENKINGDOMS.LOCAL (low-priv user, breached password found in Flare.io). Enumerate group memberships → discover membership in 'SQL Admins' → leverage SQLAdmin edge to reach database server → extract service account credentials → escalate to service account with SPN → perform Kerberoasting."
+✅ Realistic escalation from low-priv foothold to high-value target.
+
+**Privileged accounts to flag (never use as starting point unless explicitly compromised):**
+- KRBTGT, Administrator, Domain Admins, Enterprise Admins, Schema Admins, Backup Operators, Account Operators, Server Operators, Print Operators, Remote Desktop Users (if marked as high-value), or any account with `is_admin=true` or `priority_score > 80`.
+
+When in doubt, ask: "Is this account explicitly marked as compromised in the ROE?" If no, do not use it as a starting point.
+
 ## Dossier Sections Reference
 
 When you call `get_dossier`, the returned JSON contains:

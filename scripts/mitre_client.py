@@ -30,8 +30,12 @@ DEFAULT_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..
 
 
 class MITREClient:
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, proxy_url: str = ""):
         self.cache_dir = cache_dir or os.environ.get("SPOTTER_CACHE_DIR") or DEFAULT_CACHE_DIR
+        self.proxy_url = (proxy_url or "").strip()
+        self.proxies: Optional[dict] = (
+            {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+        )
         os.makedirs(self.cache_dir, exist_ok=True)
         ensure_cache_path(self.cache_dir, is_dir=True)
         self.bundle_path = os.path.join(self.cache_dir, "enterprise-attack.json")
@@ -61,7 +65,7 @@ class MITREClient:
 
     def refresh(self) -> None:
         """Download the latest ATT&CK STIX bundle."""
-        resp = requests.get(ATTACK_STIX_URL, timeout=120)
+        resp = requests.get(ATTACK_STIX_URL, proxies=self.proxies, timeout=120)
         resp.raise_for_status()
         with open(self.bundle_path, "w", encoding="utf-8") as f:
             json.dump(resp.json(), f)

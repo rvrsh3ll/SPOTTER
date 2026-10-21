@@ -80,6 +80,8 @@ VENDORS = [
     "HH_APP_TOKEN",
     "HH_CLIENT_ID",
     "HH_CLIENT_SECRET",
+    "REVENG_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
 ]
 
 # Reaches live operator infrastructure. Narrowest tier, shortest life.
