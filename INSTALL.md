@@ -403,3 +403,50 @@ ls -la ~/.config/sops/age/          # keys.txt should be gone
 - Browser localStorage/cache for `*.localhost:5443` — clear manually
 - Any backups you made (age key, database dumps)
 - Full-disk encryption keys (if you set up FDE)
+
+---
+
+## 11. Trained model (optional)
+
+SPOTTER includes a fine-tuned LoRA adapter for Qwen2.5-7B-Instruct that improves performance on OSINT analysis, AD attack paths, and SPOTTER tool-calling. The adapter is distributed as a release artifact, not in the git repo.
+
+### Install the trained model
+
+```bash
+scripts/install_trained_model.sh
+```
+
+This downloads the LoRA adapter (~63MB) from the latest GitHub release and installs it to `models/spotter-qwen25-7b-lora/`.
+
+### Enable the trained model
+
+After installation, update `.env`:
+
+```bash
+sudo nano .env
+```
+
+Set:
+```
+VLLM_ENABLE_LORA=true
+VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
+```
+
+Then recreate vLLM:
+
+```bash
+sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
+```
+
+### What the model knows
+
+The adapter was trained on 64 pairs covering:
+- **OSINT methodology** — breach analysis, domain recon, social media enrichment, certificate transparency
+- **AD attack paths** — kerberoasting, AS-REP roasting, delegation abuse, ADCS escalation, DCSync
+- **SPOTTER tool-calling** — correct tool names, parameter shapes, campaign scoping
+
+Training: Unsloth QLoRA, rank 16, 4-bit, 15 epochs, final loss 0.02088. Base model: Qwen2.5-7B-Instruct.
+
+### Without the trained model
+
+SPOTTER works fine with the base Qwen2.5-7B-Instruct (or any compatible model). The trained adapter is an optional enhancement. If you skip it, the LLM will still work but may be less accurate on SPOTTER-specific tasks and tool-calling.
