@@ -440,6 +440,8 @@ sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
 
 ### What the model knows
 
+See [TRAINING_QUERIES.md](TRAINING_QUERIES.md) for an operator playbook of the queries and scenarios the trained model handles well.
+
 The adapter was trained on 64 pairs covering:
 - **OSINT methodology** — breach analysis, domain recon, social media enrichment, certificate transparency
 - **AD attack paths** — kerberoasting, AS-REP roasting, delegation abuse, ADCS escalation, DCSync

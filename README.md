@@ -1939,6 +1939,9 @@ It installs all eleven files from `llm/tools/` under the ids Open WebUI expects,
 `llm/system-prompt.md` to the tooled profile, and reports what it changed. Importing them by hand
 through **Admin → Tools** still works — see §"Open WebUI tools" for the full list and the id trap.
 
+For what to ask once the tools are live — an operator playbook of the queries and scenarios the
+optional trained adapter (INSTALL.md §11) handles well — see [TRAINING_QUERIES.md](TRAINING_QUERIES.md).
+
 `OWUI_ADMIN_EMAIL` / `OWUI_ADMIN_PASSWORD` are a **record of the Open WebUI account, not
 configuration that provisions it** — this command is their only consumer, and it merely signs in
 with them. No container receives either value, and Open WebUI has no env var that resets an existing
