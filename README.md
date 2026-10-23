@@ -2966,7 +2966,7 @@ browser, so those tools execute client-side against the same stores the other ta
 
 | Tool | Reads | Served by |
 |---|---|---|
-| `search_entities`, `get_dossier`, `get_attack_paths`, `run_cypher`, `get_graph_schema` | Neo4j graph — AD objects, beacons, and the OSINT nodes imported by WF13 (`DomainBreach`, `Subdomain`, `WebAsset`, `SocialProfile`, …) | WF08 gateway |
+| `search_entities`, `get_dossier`, `get_attack_paths`, `run_cypher`, `get_graph_schema`, plus the seven AD finders (`find_kerberoastable`, `find_asrep_roastable`, `find_delegation_paths`, `find_adcs_esc`, `find_coercion_relay_targets`, `get_shortest_path_to_tier0`, `find_gpo_abuse`) | Neo4j graph — AD objects, beacons, Kerberos/delegation/ADCS/GPO attack surface, and the OSINT nodes imported by WF13 (`DomainBreach`, `Subdomain`, `WebAsset`, `SocialProfile`, …) | WF08 gateway |
 | `get_osint_recon` | Domain recon: DNS, WHOIS, subdomains, CT certs, Shodan (+ Censys), FOFA (+ BinaryEdge), Flare breaches, LinkedIn, external assets | WF13 cache |
 | `get_tech_intel` | OS inventory + EOL risk, technology catalog, per-user tech profiles, CVEs | WF12 cache |
 | `get_vulnerabilities` | Nessus scan findings: severity picture, findings ranked by priority, public exploit availability, per-host risk | WF25 cache |
@@ -3000,8 +3000,8 @@ database, so it must be redeployed with `scripts/setup_openwebui.py` (or pasted 
 #### The turn is budgeted against the model's context window
 
 The loop appends every tool result to the message array and removes nothing, so a long investigation
-grows the request round by round. Fixed overhead is already ~5.6k tokens (the system prompt with its
-live inventory block, plus the twelve tool schemas), and `MAX_TOOL_ROUNDS = 12` allows twelve more
+grows the request round by round. Fixed overhead is already ~6.5k tokens (the system prompt with its
+live inventory block, plus the nineteen tool schemas), and `MAX_TOOL_ROUNDS = 12` allows twelve more
 results of up to `TOOL_RESULT_MAX_CHARS` each — about **78k tokens** if nothing intervenes. The
 backend on this host does not serve that:
 
@@ -3023,7 +3023,7 @@ and reports `max_model_len: null` — see §"Open WebUI tools"), and pointing th
 
 Order of sacrifice, in `_fitMessages()`: oldest tool results first (the newest two are what the model is
 reasoning about), then earlier conversation turns, then the remaining results, then the system prompt —
-which has a floor and is only ever cut once per turn. **Tool results are replaced in place, never spliced
+cut only as deep as the window forces, and only once per turn. **Tool results are replaced in place, never spliced
 out**: every `role: 'tool'` message has to keep answering the `tool_call_id` of the assistant message
 that requested it, and dropping one to save tokens makes the backend reject the *entire* request. An
 elided result leaves a stub naming its tool and how to re-fetch it, so the model reads a gap rather than

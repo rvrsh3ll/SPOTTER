@@ -22,23 +22,22 @@ and scenario answers more reliable on SPOTTER-specific phrasing.
 | Surface | Tools? | Best for |
 |---|---|---|
 | **Open WebUI chat** (`https://chat.spotter.localhost:5443`, select the **SPOTTER** model) | Yes — all 11 tool plugins registered as callable functions | The full tool set, including the AD finder tools (§3), tech/CVE context, and the company-site RAG tool. The most complete surface. |
-| **Dashboard → PROMPT tab** | Yes — its own 12-tool loop: 7 tools run client-side against the browser-cached campaign stores (`get_campaign_context`, `get_osint_recon`, `get_tech_intel`, `get_vulnerabilities`, `get_analysis`, `list_targets`, `search_intel`), and 5 graph tools proxy through the WF08 gateway (`search_entities`, `get_dossier`, `get_attack_paths`, `run_cypher`, `get_graph_schema`) | Campaign-scoped questions without leaving the dashboard. Does **not** have the AD finder, tech-context, or company-site tools — ask those in Open WebUI chat. |
+| **Dashboard → PROMPT tab** | Yes — its own 19-tool loop: 7 tools run client-side against the browser-cached campaign stores (`get_campaign_context`, `get_osint_recon`, `get_tech_intel`, `get_vulnerabilities`, `get_analysis`, `list_targets`, `search_intel`), and 12 proxy through the WF08 gateway to Neo4j — the 5 graph tools (`search_entities`, `get_dossier`, `get_attack_paths`, `run_cypher`, `get_graph_schema`) plus all 7 AD finders (§3) | Campaign-scoped questions without leaving the dashboard, including the full AD scenario playbook. Does **not** have the tech/CVE-context, company-site, or live attack-narrative tools — ask those in Open WebUI chat. |
 | **Dashboard → Live Analysis → Security Analysis** (WF10) | Runs its own analysis | Attack-path narratives per campaign, filed by triage status. Click, don't chat. |
 
-Rule of thumb: **AD-finder scenarios → Open WebUI chat. Graph and dossier
-questions → either chat surface (the PROMPT tab is scoped to the campaign open
-in the dashboard). Methodology questions → any surface. Attack narratives →
-Live Analysis.**
+Rule of thumb: **graph, dossier, and AD-finder questions → either chat surface
+(the PROMPT tab is scoped to the campaign open in the dashboard). Tech/CVE-context
+and company-site questions → Open WebUI chat. Methodology questions → any
+surface. Attack narratives → Live Analysis.**
 
 ---
 
 ## 2. Tool-calling queries (trained)
 
 These phrasings map directly onto the routing table the adapter was trained on.
-Ask them in Open WebUI chat with the **SPOTTER** model selected. The PROMPT tab
-also handles `search_entities`, `get_dossier`, `get_attack_paths`, and
-`run_cypher` (proxied to Neo4j via workflow 08); `get_shortest_path_to_tier0`
-and the §3 finder tools are registered in chat only.
+Every tool named in this section runs on both chat surfaces — Open WebUI chat
+through the tool plugins, the PROMPT tab through the workflow-08 gateway, under
+the same trained tool names.
 
 ### Dossiers & personal intelligence
 
@@ -77,9 +76,9 @@ group-shaped ("who can reach Domain Admins?"), the trained model routes to
 
 Each scenario below was trained end-to-end: trigger question → correct tool →
 interpretation of results → attack narrative. Use the trigger phrasings for the
-most reliable routing. The finder tools behind these scenarios are registered in
-Open WebUI chat only — from the PROMPT tab the same questions fall back to
-`run_cypher`, which works but loses the trained one-shot routing.
+most reliable routing. The finder tools behind these scenarios run on both chat
+surfaces: Open WebUI chat through the tool plugins, the PROMPT tab through the
+workflow-08 gateway — same trained names, same one-shot routing.
 
 **Starting context defaults to non-privileged.** Scenarios assume your foothold
 is a breached low-privileged user, phishing victim, or external-facing service
@@ -208,12 +207,11 @@ report the `empty_reason`.
 - **Phrasing matters most in chat.** The trigger queries in §2–§4 are close to
   the training data; free-form variants still route correctly most of the time,
   but if the model picks the wrong tool, re-ask with the documented phrasing.
-- **Two tool sets, one graph.** The PROMPT tab runs its own loop: 7 tools read
-  the browser-cached campaign stores (recon, tech, vulnerabilities, analysis,
-  targets, keyword sweep) and 5 graph tools proxy to Neo4j through workflow 08.
-  Open WebUI chat adds the AD finders (§3), tech/CVE context, and the
-  company-site RAG tool on top. Lookups work on both surfaces; the finder-tool
-  scenarios are chat-only.
+- **Two tool sets, one graph.** The PROMPT tab runs its own 19-tool loop: 7
+  tools read the browser-cached campaign stores (recon, tech, vulnerabilities,
+  analysis, targets, keyword sweep) and 12 proxy to Neo4j through workflow 08,
+  including all 7 AD finders (§3). Open WebUI chat adds the tech/CVE-context
+  tools, the company-site RAG tool, and live `generate_attack_narrative` on top.
 - **Attack narratives belong to Live Analysis.** WF10 generates and files them
   per campaign with triage status; Tech Intel panels answer technology
   questions, not attack planning.
