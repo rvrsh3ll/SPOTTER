@@ -438,6 +438,19 @@ Then recreate vLLM:
 sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
 ```
 
+The compose file consumes both variables (wired 2026-10-23): the adapter directory is bind-mounted read-only at the same absolute path, and vLLM serves the module under its **basename** — `spotter-qwen25-7b-lora` — which is the model id to enter in the Prompt tab's MODEL field (LLM CONFIG) or select in Open WebUI. `VLLM_ENABLE_LORA` must be exactly `true` (or `1`/`yes`); any other value, including `false`, leaves vLLM's command line untouched.
+
+### Known limitation: adapter does not load on the AWQ base
+
+With the default `local-small` base (`Qwen/Qwen2.5-7B-Instruct-AWQ`), vLLM v0.17.0 rejects this adapter at startup:
+
+```
+ValueError: Call to add_lora method failed: The size of tensor a (1024) must
+match the size of tensor b (3584) at non-singleton dimension 1
+```
+
+The adapter itself is verified clean (392 standard PEFT tensors, r=16, every `lora_A` shaped `[16, 3584]` or `[16, 18944]`); the mismatch arises inside vLLM's LoRA-on-AWQ weight packing. **vLLM crash-loops when this happens**, so keep `VLLM_ENABLE_LORA=false` on AWQ bases. Candidate paths forward: a newer `VLLM_IMAGE` that fixes the packing, serving an fp16/fp8 base with the adapter, or merging the adapter into the base and serving the merged model without `--enable-lora`.
+
 ### What the model knows
 
 See [TRAINING_QUERIES.md](TRAINING_QUERIES.md) for an operator playbook of the queries and scenarios the trained model handles well.

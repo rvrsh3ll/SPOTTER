@@ -10,8 +10,18 @@
 # After installation, update .env to use the trained model:
 #   VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
 #   VLLM_ENABLE_LORA=true
-#   VLLM_LORA_MODULES=spotter-qwen25-7b-lora
+#   VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
+#       (the adapter DIRECTORY — vLLM serves it under its basename; see
+#        deployment/docker-compose.llm.yml, wired 2026-10-23)
 # Then recreate vLLM: sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
+#
+# NOTE: vLLM v0.17.0 cannot load this adapter onto the AWQ base (shape
+# mismatch in vLLM's LoRA-on-AWQ packing) — see INSTALL.md §11 "Known
+# limitation" before enabling.
+#
+# Where the GitHub repo is private and the release download 404s, pass a
+# release-asset URL as $1, or copy an existing adapter directory instead:
+#   cp -a ~/spotter-train/out/spotter-5070/lora "$SPOTTER_HOME/models/spotter-qwen25-7b-lora"
 
 set -euo pipefail
 

@@ -79,66 +79,100 @@ services:
       # GPU1 used to be left to Ollama; since Ollama was removed (2026-09-04) it is
       # free, and vllm-embed below is what claims it.
       NVIDIA_VISIBLE_DEVICES: ${VLLM_GPUS:-0}
+      # Consumed by the shell-form command below (bash-level expansion), not by
+      # vLLM itself. Both default to empty so the LoRA flags disappear entirely
+      # when the optional trained model (INSTALL.md §11) is not configured.
+      VLLM_ENABLE_LORA: ${VLLM_ENABLE_LORA:-}
+      VLLM_LORA_MODULES: ${VLLM_LORA_MODULES:-}
     # Docker's default /dev/shm is 64 MB. With --tensor-parallel-size > 1 the
     # worker processes hand off through shared memory during NCCL init, and 64 MB
     # is not enough: the workers spin at 100% GPU with the model never loaded and
     # the healthcheck fails forever (observed 2026-09-03, 5.5h of deadlock). vLLM
     # requires --ipc=host or an explicit shm-size for multi-GPU serving.
     shm_size: ${VLLM_SHM_SIZE:-8gb}
+    # Shell-form command (bash -c + exec) because the optional LoRA flags cannot
+    # live in a YAML arg list: an item that interpolates to the empty string is
+    # still passed to vLLM's argparse and crashes startup, while the bash-level
+    # guard below expands to nothing at all when VLLM_ENABLE_LORA is empty. With
+    # LoRA disabled the resulting argv is identical to the previous list form.
+    # `exec` keeps the server as PID 1 so `docker stop` signals reach it.
+    # Compose interpolates ${...} at parse time exactly as before; $$ escapes are
+    # the bash-level ones. Interpolated values are single-quoted so an api key or
+    # model id containing shell metacharacters still arrives as one argument.
+    entrypoint: ["/bin/bash", "-c"]
     command:
-      - ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --api-key
-      - ${VLLM_API_KEY}
-      - --tensor-parallel-size
-      - "${VLLM_TENSOR_PARALLEL_SIZE:-1}"
-      - --gpu-memory-utilization
-      - "${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"
-      - --max-model-len
-      - "${VLLM_MAX_MODEL_LEN:-49152}"
-      # 256 was never servable and actively harmful. vLLM's own startup log reads
-      # "Maximum concurrency for 49,152 tokens per request: 3.85x" -- the KV budget
-      # hosts about four full-length requests, not 256. Worse, this model is a
-      # Qwen3.5 *hybrid* (48 GatedDeltaNet linear-attention layers + 16 full
-      # attention), and its conv-state cache has one slot per sequence: at 256 the
-      # FULL decode CUDA-graph capture pads to batch 512 and dies on
-      # `assert num_cache_lines >= batch` in causal_conv1d_update, which is why
-      # --enforce-eager below looked load-bearing for so long. 16 captures cleanly.
-      - --max-num-seqs
-      - "${VLLM_MAX_NUM_SEQS:-16}"
-      # MTP speculative decoding (--speculative-config method=mtp) is Qwen3.5-only.
-      # This install's local-small model is Qwen2.5-*-AWQ, which crash-loops with:
-      #   NotImplementedError: Unsupported speculative method: 'mtp'
-      # and Live Analysis / Prompt then fail through llm-gateway as Bad Gateway
-      # (2026-10-16). Do not re-add MTP here unless VLLM_MODEL is a Qwen3.5 MTP
-      # checkpoint; if you do, keep num_speculative_tokens at 1 (2 hard-crashes).
-      - --no-enable-flashinfer-autotune
-      # --enforce-eager and --disable-custom-all-reduce were removed 2026-09-08.
-      # Both were added as "startup compatibility options for this two-GPU Ada
-      # host" for the TP=2 configuration that was abandoned: at
-      # --tensor-parallel-size 1 there is no all-reduce to disable, and eager mode
-      # only costs CUDA graphs and torch.compile across all 64 layers. Measured
-      # cost of keeping it: decode 15.8 -> 20.7 tok/s (+31%), 63.5 -> 48.4 ms per
-      # token. If graphs ever need to go away again, add `- --enforce-eager` back
-      # here; it does NOT need --max-num-seqs restored to 256.
-      #
-      # Do NOT pass --reasoning-parser qwen3 or --tool-call-parser qwen3_coder
-      # when VLLM_MODEL is Qwen2.5-*: the Qwen3ReasoningParser requires
-      # think start/end tokens that Qwen2.5 tokenizers do not have, and the
-      # engine dies after a successful weight load with:
-      #   RuntimeError: Qwen3ReasoningParser ... could not locate think start/end tokens
-      # (2026-10-16, local-small). Re-add those flags only for a Qwen3/Qwen3.5
-      # checkpoint. Tool calling for Qwen2.5 uses hermes-style markup instead.
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - hermes
+      - |
+        set -eu
+        ARGS=(
+          '${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}'
+          --host 0.0.0.0
+          --port 8000
+          --api-key '${VLLM_API_KEY}'
+          --tensor-parallel-size '${VLLM_TENSOR_PARALLEL_SIZE:-1}'
+          --gpu-memory-utilization '${VLLM_GPU_MEMORY_UTILIZATION:-0.90}'
+          --max-model-len '${VLLM_MAX_MODEL_LEN:-49152}'
+          # 256 was never servable and actively harmful. vLLM's own startup log reads
+          # "Maximum concurrency for 49,152 tokens per request: 3.85x" -- the KV budget
+          # hosts about four full-length requests, not 256. Worse, this model is a
+          # Qwen3.5 *hybrid* (48 GatedDeltaNet linear-attention layers + 16 full
+          # attention), and its conv-state cache has one slot per sequence: at 256 the
+          # FULL decode CUDA-graph capture pads to batch 512 and dies on
+          # `assert num_cache_lines >= batch` in causal_conv1d_update, which is why
+          # --enforce-eager below looked load-bearing for so long. 16 captures cleanly.
+          --max-num-seqs '${VLLM_MAX_NUM_SEQS:-16}'
+          # MTP speculative decoding (--speculative-config method=mtp) is Qwen3.5-only.
+          # This install's local-small model is Qwen2.5-*-AWQ, which crash-loops with:
+          #   NotImplementedError: Unsupported speculative method: 'mtp'
+          # and Live Analysis / Prompt then fail through llm-gateway as Bad Gateway
+          # (2026-10-16). Do not re-add MTP here unless VLLM_MODEL is a Qwen3.5 MTP
+          # checkpoint; if you do, keep num_speculative_tokens at 1 (2 hard-crashes).
+          --no-enable-flashinfer-autotune
+          # --enforce-eager and --disable-custom-all-reduce were removed 2026-09-08.
+          # Both were added as "startup compatibility options for this two-GPU Ada
+          # host" for the TP=2 configuration that was abandoned: at
+          # --tensor-parallel-size 1 there is no all-reduce to disable, and eager mode
+          # only costs CUDA graphs and torch.compile across all 64 layers. Measured
+          # cost of keeping it: decode 15.8 -> 20.7 tok/s (+31%), 63.5 -> 48.4 ms per
+          # token. If graphs ever need to go away again, add --enforce-eager back to
+          # ARGS; it does NOT need --max-num-seqs restored to 256.
+          #
+          # Do NOT pass --reasoning-parser qwen3 or --tool-call-parser qwen3_coder
+          # when VLLM_MODEL is Qwen2.5-*: the Qwen3ReasoningParser requires
+          # think start/end tokens that Qwen2.5 tokenizers do not have, and the
+          # engine dies after a successful weight load with:
+          #   RuntimeError: Qwen3ReasoningParser ... could not locate think start/end tokens
+          # (2026-10-16, local-small). Re-add those flags only for a Qwen3/Qwen3.5
+          # checkpoint. Tool calling for Qwen2.5 uses hermes-style markup instead.
+          --enable-auto-tool-choice
+          --tool-call-parser hermes
+        )
+        # Trained-model LoRA adapter (INSTALL.md §11). VLLM_LORA_MODULES is the
+        # adapter DIRECTORY on the host, bind-mounted below at the same absolute
+        # path; the served module id is its basename (e.g. spotter-qwen25-7b-lora)
+        # and is what the Prompt tab's MODEL field / Open WebUI select.
+        # Truthy check, NOT [ -n ]: the string "false" is non-empty, and an
+        # emptiness guard passed it straight through — a .env toggle alone then
+        # crash-looped vLLM (observed 2026-10-23 during LoRA bring-up).
+        case "$${VLLM_ENABLE_LORA:-}" in
+          true|True|TRUE|1|yes)
+            if [ -n "$${VLLM_LORA_MODULES:-}" ]; then
+              ARGS+=(--enable-lora --lora-modules "$$(basename "$$VLLM_LORA_MODULES")=$$VLLM_LORA_MODULES")
+            else
+              echo "VLLM_ENABLE_LORA is set but VLLM_LORA_MODULES is empty - starting WITHOUT LoRA" >&2
+            fi
+            ;;
+        esac
+        exec python3 -m vllm.entrypoints.openai.api_server "$${ARGS[@]}"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - vllm_model_cache:/root/.cache/huggingface
+      # Trained-model adapters, bind-mounted at the SAME absolute path as on the
+      # host so VLLM_LORA_MODULES (a host path, per INSTALL.md §11) resolves
+      # inside the container. Read-only: vLLM only reads adapter weights. On a
+      # host without models/ Docker creates the directory (root-owned) at first
+      # up — scripts/install_trained_model.sh copes with that.
+      - ${SPOTTER_HOME}/models:${SPOTTER_HOME}/models:ro
     # The standard vLLM image includes Python even when curl is absent.
     healthcheck:
       test:
