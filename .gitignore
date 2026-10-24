@@ -207,6 +207,11 @@ spotter-train/data/*.jsonl
 !spotter-train/data/.gitkeep
 spotter-train/output/
 unsloth_compiled_cache/
+# Trained LoRA adapters installed by scripts/install_trained_model.sh. The
+# 2026-10-21 distribution decision ships them as GitHub release artifacts, not
+# repo content (~88 MB each); the compose vllm service bind-mounts this tree
+# read-only, so the directory exists on any LoRA-configured host.
+/models/
 
 # Qwen Code local settings (user-specific tool config)
 .qwen/
