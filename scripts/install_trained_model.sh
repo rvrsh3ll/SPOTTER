@@ -8,16 +8,21 @@
 # The adapter is installed to $SPOTTER_HOME/models/spotter-qwen25-7b-lora/
 #
 # After installation, update .env to use the trained model:
-#   VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+#   VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct      (fp16 base — see the recipe note below)
+#   VLLM_QUANTIZATION=fp8
+#   VLLM_GPU_MEMORY_UTILIZATION=0.92         (12 GB card)
 #   VLLM_ENABLE_LORA=true
 #   VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
 #       (the adapter DIRECTORY — vLLM serves it under its basename; see
 #        deployment/docker-compose.llm.yml, wired 2026-10-23)
 # Then recreate vLLM: sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
 #
-# NOTE: vLLM v0.17.0 cannot load this adapter onto the AWQ base (shape
-# mismatch in vLLM's LoRA-on-AWQ packing) — see INSTALL.md §11 "Known
-# limitation" before enabling.
+# NOTE (the model_tag trap): the compose service must exec `vllm serve`, NOT
+# `python3 -m vllm.entrypoints.openai.api_server`. In vLLM v0.17.0 the module
+# form parses the model positional into `model_tag` and never copies it onto
+# `model`, so the engine silently serves vLLM's default Qwen/Qwen3-0.6B while
+# looking healthy — and every add_lora then fails with a 1024-vs-3584 shape
+# error that mimics an adapter incompatibility. See INSTALL.md §11.
 #
 # Where the GitHub repo is private and the release download 404s, pass a
 # release-asset URL as $1, or copy an existing adapter directory instead:

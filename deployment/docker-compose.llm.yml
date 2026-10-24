@@ -80,10 +80,13 @@ services:
       # free, and vllm-embed below is what claims it.
       NVIDIA_VISIBLE_DEVICES: ${VLLM_GPUS:-0}
       # Consumed by the shell-form command below (bash-level expansion), not by
-      # vLLM itself. Both default to empty so the LoRA flags disappear entirely
-      # when the optional trained model (INSTALL.md §11) is not configured.
+      # vLLM itself. All default to empty: the LoRA flags disappear entirely
+      # when the optional trained model (INSTALL.md §11) is not configured, and
+      # an empty VLLM_QUANTIZATION leaves vLLM's autodetection of pre-quantized
+      # checkpoints (AWQ/GPTQ/FP8) untouched.
       VLLM_ENABLE_LORA: ${VLLM_ENABLE_LORA:-}
       VLLM_LORA_MODULES: ${VLLM_LORA_MODULES:-}
+      VLLM_QUANTIZATION: ${VLLM_QUANTIZATION:-}
     # Docker's default /dev/shm is 64 MB. With --tensor-parallel-size > 1 the
     # worker processes hand off through shared memory during NCCL init, and 64 MB
     # is not enough: the workers spin at 100% GPU with the model never loaded and
@@ -146,6 +149,15 @@ services:
           --enable-auto-tool-choice
           --tool-call-parser hermes
         )
+        # Optional on-the-fly quantization, e.g. VLLM_QUANTIZATION=fp8 to serve
+        # an fp16 checkpoint as W8A8 fp8 (native on Blackwell). This is how the
+        # trained-adapter path fits the 12 GB card: fp16 weights (~15 GB) do
+        # not fit, fp8 (~7.6 GB) leaves room for the 32k KV window plus the
+        # LoRA buffers. Empty leaves autodetection of pre-quantized checkpoints
+        # (AWQ/GPTQ/FP8) untouched.
+        if [ -n "$${VLLM_QUANTIZATION:-}" ]; then
+          ARGS+=(--quantization "$$VLLM_QUANTIZATION")
+        fi
         # Trained-model LoRA adapter (INSTALL.md §11). VLLM_LORA_MODULES is the
         # adapter DIRECTORY on the host, bind-mounted below at the same absolute
         # path; the served module id is its basename (e.g. spotter-qwen25-7b-lora)
@@ -162,7 +174,17 @@ services:
             fi
             ;;
         esac
-        exec python3 -m vllm.entrypoints.openai.api_server "$${ARGS[@]}"
+        # `vllm serve`, NOT `python3 -m vllm.entrypoints.openai.api_server`:
+        # in v0.17.0 the api_server module parses the model positional into
+        # `model_tag`, and ONLY the serve subcommand copies it onto `model`
+        # (entrypoints/cli/serve.py:50-51). Invoking the module directly left
+        # ModelConfig.model at its built-in default "Qwen/Qwen3-0.6B": the
+        # server came up HEALTHY serving the wrong model and silently
+        # auto-downloaded it. That is how this stack served a 0.6B model for
+        # days with VLLM_MODEL=7B in .env (found 2026-10-24), and why every
+        # LoRA load died with "tensor a (1024) vs tensor b (3584)" — the
+        # adapter's 7B hidden size meeting the 0.6B default's.
+        exec vllm serve "$${ARGS[@]}"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

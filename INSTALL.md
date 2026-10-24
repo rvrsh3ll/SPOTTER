@@ -428,6 +428,9 @@ sudo nano .env
 
 Set:
 ```
+VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+VLLM_QUANTIZATION=fp8
+VLLM_GPU_MEMORY_UTILIZATION=0.92
 VLLM_ENABLE_LORA=true
 VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
 ```
@@ -440,16 +443,11 @@ sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
 
 The compose file consumes both variables (wired 2026-10-23): the adapter directory is bind-mounted read-only at the same absolute path, and vLLM serves the module under its **basename** — `spotter-qwen25-7b-lora` — which is the model id to enter in the Prompt tab's MODEL field (LLM CONFIG) or select in Open WebUI. `VLLM_ENABLE_LORA` must be exactly `true` (or `1`/`yes`); any other value, including `false`, leaves vLLM's command line untouched.
 
-### Known limitation: adapter does not load on the AWQ base
+### Serving recipe (verified 2026-10-24 on a 12 GB RTX 5070)
 
-With the default `local-small` base (`Qwen/Qwen2.5-7B-Instruct-AWQ`), vLLM v0.17.0 rejects this adapter at startup:
+The adapter serves on the **fp16 `Qwen/Qwen2.5-7B-Instruct` base with on-the-fly fp8 quantization** (the `.env` block above): weights ~7.6 GB, leaving a 36,288-token KV cache — 1.11x concurrency at the 32768 window. vLLM then serves two model ids: the base and **`spotter-qwen25-7b-lora`** (the adapter directory's basename), which is what the Prompt tab's MODEL field selects. Plain fp16 does not fit the card; fp8 is what makes base + adapter + 32k window fit together.
 
-```
-ValueError: Call to add_lora method failed: The size of tensor a (1024) must
-match the size of tensor b (3584) at non-singleton dimension 1
-```
-
-The adapter itself is verified clean (392 standard PEFT tensors, r=16, every `lora_A` shaped `[16, 3584]` or `[16, 18944]`); the mismatch arises inside vLLM's LoRA-on-AWQ weight packing. **vLLM crash-loops when this happens**, so keep `VLLM_ENABLE_LORA=false` on AWQ bases. Candidate paths forward: a newer `VLLM_IMAGE` that fixes the packing, serving an fp16/fp8 base with the adapter, or merging the adapter into the base and serving the merged model without `--enable-lora`.
+**The trap that misdiagnosed this for a day:** invoking `python3 -m vllm.entrypoints.openai.api_server <model>` directly — as this compose file did until 2026-10-24 — parses the positional into `model_tag`, and only the `vllm serve` subcommand copies it onto `model` (`entrypoints/cli/serve.py`). The engine silently falls back to vLLM's built-in default **`Qwen/Qwen3-0.6B`**, comes up **healthy**, and serves that. Every LoRA load then failed with `add_lora ... size of tensor a (1024) must match tensor b (3584)`, which reads like an adapter/quantization incompatibility but is just the 0.6B default's hidden size meeting the adapter's. The compose service now execs `vllm serve`; if the engine-init log line ever names a model you did not configure, check this first.
 
 ### What the model knows
 
