@@ -420,8 +420,9 @@ homepage title.
 | **Site Clone job card: webcrack was not run because a network-less namespace is unavailable**, or it names `site-clone-deobf` | Under OPSEC, webcrack runs in the `site-clone-deobf` worker (`network_mode: none`). Start it with `sudo ./spotter compose up -d --build site-clone-deobf`. Deobfuscation is skipped until it is up; the rest of the clone still finishes. `sudo ./spotter doctor` flags a missing worker. |
 | **`restart` succeeds but nothing restarted** | Compose was run without `-p spotter`, so it found nothing under that project name and exited 0. Use the launcher. |
 | **Open WebUI signup is refused** | An account already exists — only the first one can be created that way. Sign in instead. |
-| **`setup_openwebui.py` fails to sign in** | Either the account has not been created yet (visit https://chat.spotter.localhost:5443 and sign up) or `OWUI_ADMIN_*` in `.env` no longer matches it. |
-| **vLLM will not start / the engine dies** | On `local-small`, `VLLM_MAX_MODEL_LEN` is probably larger than the KV cache can hold. Read the "GPU KV cache size" line in `docker logs spotter-vllm` and set the window below it. |
+| **`setup_openwebui.py` fails to sign in** | Either the account has not been created yet (visit https://chat.spotter.localhost:5443 and sign up) or the recorded credentials drifted: `OWUI_ADMIN_EMAIL` lives in `.env`, `OWUI_ADMIN_PASSWORD` in `secrets/machine.sops.env`, and the **live bcrypt hash in `webui.db` is the truth** — resync it per §6 (Open WebUI row). |
+| **vLLM will not start / the engine dies** | On `local-small`, `VLLM_MAX_MODEL_LEN` is probably larger than the KV cache can hold. Read the "GPU KV cache size" line in `docker logs spotter-vllm` and set the window below it. A single KV-check failure on the FIRST start after a recreate can also mean the previous process's GPU memory had not drained yet — the restart-policy retry seconds later succeeds. |
+| **vLLM serves a model you did not configure** — engine-init names e.g. `Qwen/Qwen3-0.6B`, or LoRA loading fails with a hidden-size mismatch like `tensor a (1024) vs tensor b (3584)` | The v0.17.0 `model_tag` trap: `python3 -m vllm.entrypoints.openai.api_server <model>` never maps the positional onto `model`, and the engine silently falls back to vLLM's built-in default while looking healthy. The service must exec `vllm serve` — see §11. |
 | **`sudoedit .env` fails with "editing files in a writable directory is not permitted"** | Expected when the checkout is under a user-writable path such as `~/SPOTTER`. Use `sudo nano .env` (or another editor via `sudo`), or edit from a root shell instead. |
 | **`fatal: destination path '.../vendor/flowsint' already exists and is not an empty directory`** | A previous interrupted clone left a partial Flowsint checkout. Remove it and re-run bootstrap: `sudo rm -rf vendor/flowsint` then `sudo scripts/bootstrap.sh`. Bootstrap also clears an incomplete checkout (present, but no `.git`) automatically. |
 
@@ -561,6 +562,14 @@ script with no arguments exits with a clear message instead of hitting a 404.
 When you have a tarball or adapter directory, the script installs it to
 `models/spotter-qwen25-7b-lora/`.
 
+No reachable release (private repo, offline host)? Pass an asset URL as the first argument, or copy an adapter directory produced by a training run:
+
+```bash
+scripts/install_trained_model.sh https://example.internal/spotter-model-v1.tar.gz
+# or, from the machine that trained it:
+cp -a ~/spotter-train/out/spotter-5070/lora "$SPOTTER_HOME/models/spotter-qwen25-7b-lora"
+```
+
 ### Enable the trained model
 
 After installation, update `.env`:
@@ -569,13 +578,13 @@ After installation, update `.env`:
 sudo nano .env
 ```
 
-Set:
+Set (`VLLM_LORA_MODULES` must be the **absolute** path of the adapter directory inside your checkout — the value is used verbatim inside the container, where the same path is bind-mounted, and no variable expansion happens there):
 ```
 VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
 VLLM_QUANTIZATION=fp8
 VLLM_GPU_MEMORY_UTILIZATION=0.92
 VLLM_ENABLE_LORA=true
-VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
+VLLM_LORA_MODULES=/absolute/path/to/spotter/models/spotter-qwen25-7b-lora
 ```
 
 Then recreate vLLM:
