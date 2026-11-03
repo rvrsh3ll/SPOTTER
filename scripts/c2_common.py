@@ -10,7 +10,7 @@ the graph.
 
 Canonical C2Session dict (what normalisers must produce):
 
-    c2_framework      "cobalt_strike" | "brute_ratel" | "adaptix"   discriminator
+    c2_framework      "cobalt_strike" | "brute_ratel" | "adaptix" | "tuoni"   discriminator
     session_id        framework-assigned session id     CS bid / BR badger / AX a_id
     session_key       "<framework>:<session_id>"        dedup key, see session_key()
     c2_server         team server / listener URL
@@ -407,12 +407,16 @@ SESSION_NOUN: Dict[str, str] = {
     # regardless of which implant family answered -- "beacon" and "gopher" are
     # agent *types* within Adaptix, not the operator-facing noun for a session.
     "adaptix":       "Agent",
+    # Tuoni, like Adaptix, calls every session an "agent" in its UI and REST API
+    # (/api/v2/agents), whatever the underlying implant family.
+    "tuoni":         "Agent",
 }
 
 FRAMEWORK_LABEL: Dict[str, str] = {
     "cobalt_strike": "Cobalt Strike",
     "brute_ratel":   "Brute Ratel",
     "adaptix":       "Adaptix C2",
+    "tuoni":         "Tuoni",
 }
 
 

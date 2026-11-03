@@ -3,7 +3,7 @@ C2Session — Flowsint custom node type.
 
 Represents a single C2 session observed during an authorized red team engagement,
 regardless of which framework produced it: a Cobalt Strike beacon, a Brute Ratel
-badger, or anything added later. One C2Session node is linked to an Individual
+badger, an Adaptix or Tuoni agent, or anything added later. One C2Session node is linked to an Individual
 node via a HAS_BEACON relationship.
 
 Flowsint node label : C2Session
@@ -39,6 +39,7 @@ SESSION_NOUN = {
     "cobalt_strike": "Beacon",
     "brute_ratel":   "Badger",
     "adaptix":       "Agent",
+    "tuoni":         "Agent",
 }
 
 
@@ -46,7 +47,7 @@ class C2Session(BaseModel):
     # ── Framework identity ────────────────────────────────────────────────────
     c2_framework: str = Field(
         default="cobalt_strike",
-        description="Framework that owns this session: cobalt_strike | brute_ratel | adaptix",
+        description="Framework that owns this session: cobalt_strike | brute_ratel | adaptix | tuoni",
     )
     session_id: str = Field(
         description="Framework-assigned session id (CS beacon bid, BR badger id, Adaptix a_id)"
