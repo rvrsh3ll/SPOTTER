@@ -41,6 +41,8 @@
      and the pivot marker IN THE SAME TABLE -- reusing it there would read as a
      status, not a framework. Teal is the nearest unclaimed hue. */
   --fw-adaptix: #3aa88f;
+  /* Fourth C2-framework pill (Tuoni). Indigo/violet, distinct from Adaptix teal. */
+  --fw-tuoni: #7b6cf0;
   --mono: "Courier New", Courier, monospace;
   --sans: "Segoe UI", "Helvetica Neue", -apple-system, sans-serif;
 }
@@ -62,6 +64,7 @@
   --data:     #256f97;
   --warn:     #9c5a15;
   --fw-adaptix: #1f7a66;
+  --fw-tuoni: #5a4dcc;
 }
 /* The dark theme lifts elements with faint white glints; on a light ground
    those vanish, so flip them to matching black tints. */
@@ -664,6 +667,7 @@ button.qa { background: none; cursor: pointer; }
 .agt-fw.fw-cobalt_strike { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .agt-fw.fw-brute_ratel   { color: var(--data);   border-color: color-mix(in srgb, var(--data) 45%, transparent); }
 .agt-fw.fw-adaptix       { color: var(--fw-adaptix); border-color: color-mix(in srgb, var(--fw-adaptix) 45%, transparent); }
+.agt-fw.fw-tuoni         { color: var(--fw-tuoni);   border-color: color-mix(in srgb, var(--fw-tuoni) 45%, transparent); }
 
 .agt-st { font-family: var(--mono); font-size: 9px; letter-spacing: .06em; white-space: nowrap; }
 .agt-st.st-live    { color: var(--data); }
@@ -2512,6 +2516,8 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
           onclick="setAgentsFw('brute_ratel')">Badgers<span class="tv-count" id="agt-fw-br-count"></span></button>
         <button class="tv-btn" id="agt-fw-adaptix" role="tab" aria-selected="false"
           onclick="setAgentsFw('adaptix')">Agents<span class="tv-count" id="agt-fw-ax-count"></span></button>
+        <button class="tv-btn" id="agt-fw-tuoni" role="tab" aria-selected="false"
+          onclick="setAgentsFw('tuoni')">Tuoni<span class="tv-count" id="agt-fw-tu-count"></span></button>
       </div>
       <input type="search" id="agt-search" class="fi-sm" placeholder="Search host, user, IP, listener, process…"
         oninput="searchAgents(this.value)" autocomplete="off" aria-label="Search C2 agents">
@@ -8497,7 +8503,7 @@ let _agentsCache = (() => {
 let _agentsSortCol = 'status';
 let _agentsSortDir = 1;      /* live first — matches the order WF23 returns */
 let _agentsSearch  = '';
-let _agentsFw      = 'all';  /* 'all' | 'cobalt_strike' | 'brute_ratel' | 'adaptix' */
+let _agentsFw      = 'all';  /* 'all' | 'cobalt_strike' | 'brute_ratel' | 'adaptix' | 'tuoni' */
 
 const AGT_STATUS_ORDER = { live: 0, unknown: 1, stale: 2, dead: 3 };
 
@@ -8561,7 +8567,7 @@ function searchAgents(val) {
 
 function setAgentsFw(fw) {
   _agentsFw = fw;
-  ['all', 'cobalt_strike', 'brute_ratel', 'adaptix'].forEach(k => {
+  ['all', 'cobalt_strike', 'brute_ratel', 'adaptix', 'tuoni'].forEach(k => {
     const b = document.getElementById('agt-fw-' + k);
     if (!b) return;
     b.classList.toggle('tv-active', k === fw);
@@ -8682,6 +8688,7 @@ function renderAgentsView() {
   setCount('agt-fw-cs-count', fwCounts.cobalt_strike || 0);
   setCount('agt-fw-br-count', fwCounts.brute_ratel || 0);
   setCount('agt-fw-ax-count', fwCounts.adaptix || 0);
+  setCount('agt-fw-tu-count', fwCounts.tuoni || 0);
 
   document.getElementById('agt-stats').innerHTML = [
     `<div class="ti-stat" data-agt-stat="total"><span class="ti-sv">${all.length}</span><span class="ti-sl">Agents</span></div>`,
@@ -8700,7 +8707,7 @@ function renderAgentsView() {
   if (!all.length) {
     el.innerHTML = `<div class="obar">No C2 sessions in this campaign's graph.
       Cobalt Strike beacons arrive from WF01's team-server poll; Brute Ratel badgers
-      from a listener webhook into WF21; Adaptix agents from WF28's teamserver poll.</div>`;
+      from a listener webhook into WF21; Adaptix agents from WF28's teamserver poll; Tuoni agents from WF31's teamserver poll.</div>`;
     return;
   }
 
@@ -16534,7 +16541,7 @@ function exportAssetCard(key, fmt) {
    Returns null for "not recorded" so absent fields stay out of the export. */
 /* Framework discriminator → display name. Mirrors scripts/c2_common.py's
    FRAMEWORK_LABEL, which is what WF23 and the ingestors use server-side. */
-const _C2_FW_LABEL = { cobalt_strike: 'Cobalt Strike', brute_ratel: 'Brute Ratel', adaptix: 'Adaptix C2' };
+const _C2_FW_LABEL = { cobalt_strike: 'Cobalt Strike', brute_ratel: 'Brute Ratel', adaptix: 'Adaptix C2', tuoni: 'Tuoni' };
 
 function _dossierBool(v) {
   if (v === undefined || v === null || v === '') return null;
@@ -17130,7 +17137,7 @@ function buildAgentsReport() {
 
   if (!sections.length) {
     sections.push({ key: 'empty', title: 'C2 Agents', blocks: [{ type: 'note',
-      text: 'No C2 sessions in this campaign. Cobalt Strike beacons arrive from WF01\'s team-server poll; Brute Ratel badgers from a listener webhook into WF21; Adaptix agents from WF28\'s teamserver poll.' }] });
+      text: 'No C2 sessions in this campaign. Cobalt Strike beacons arrive from WF01\'s team-server poll; Brute Ratel badgers from a listener webhook into WF21; Adaptix agents from WF28\'s teamserver poll; Tuoni agents from WF31\'s teamserver poll.' }] });
   }
 
   const fwLabel = _agentsFw === 'all' ? 'all frameworks'

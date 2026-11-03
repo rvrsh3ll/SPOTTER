@@ -7,7 +7,7 @@ The code is distributed under the MIT License; intended use is described in
 
 ## What it is
 
-Ingests SharpHound/BloodHound, Cobalt Strike, Brute Ratel, PingCastle, Nessus, nmap, Amass,
+Ingests SharpHound/BloodHound, Cobalt Strike, Brute Ratel, Adaptix, Tuoni, PingCastle, Nessus, nmap, Amass,
 EyeWitness, CloudSchism, Flare.io, and freeform recon; correlates it into a Neo4j graph via **Flowsint**; runs the
 analysis loop as **n8n** workflows; exposes it through an operator dashboard and an
 **Open WebUI + vLLM** natural-language interface. Ollama was removed from the stack 2026-09-04.

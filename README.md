@@ -1,7 +1,7 @@
 # SPOTTER
 ## Continuous OSINT & Red Team Recon Platform
 
-Self-hosted, operator-facing intelligence platform for authorized red team engagements. Ingests data from Cobalt Strike, **Brute Ratel**, **Adaptix C2**, SharpHound/BloodHound, PingCastle, nmap, Amass, Nessus, EyeWitness, **ScoutSuite**, **subfinder/httpx JSON-lines**, Flare.io, CSV, and plain-text recon; correlates everything into interactive Individual dossiers in a Neo4j-backed graph via **Flowsint**; runs a continuous OODA Loop through **n8n** automation workflows; and provides a natural-language query interface via **Open WebUI** over a local **vLLM** server.
+Self-hosted, operator-facing intelligence platform for authorized red team engagements. Ingests data from Cobalt Strike, **Brute Ratel**, **Adaptix C2**, **Tuoni**, SharpHound/BloodHound, PingCastle, nmap, Amass, Nessus, EyeWitness, **ScoutSuite**, **subfinder/httpx JSON-lines**, Flare.io, CSV, and plain-text recon; correlates everything into interactive Individual dossiers in a Neo4j-backed graph via **Flowsint**; runs a continuous OODA Loop through **n8n** automation workflows; and provides a natural-language query interface via **Open WebUI** over a local **vLLM** server.
 
 > **Authorization required.** Designed for use under documented Rules of Engagement on authorized engagements only.
 
@@ -64,6 +64,7 @@ feature and is inert when absent — see INSTALL.md §1:
 
 - Cobalt Strike Team Server with REST API enabled (for workflow 01)
 - Adaptix C2 teamserver reachable from this host, plus an operator account (for workflow 28)
+- Tuoni C2 teamserver reachable from this host, plus an operator account (for workflow 31)
 - Flare.io API key (for workflow 09)
 - FOFA.io API key (for workflow 13)
 - Shodan API key (optional, for workflow 13 — keyless InternetDB mode works without it)
@@ -1574,6 +1575,84 @@ while the timestamps stay frozen is the `edit_node` namespace bug, not a quiet t
 
 ---
 
+## Tuoni C2 teamserver poll
+
+Workflow 31 polls the Tuoni teamserver's REST API every five minutes and writes its agent
+roster into the campaign sketch as `C2Session` nodes — the same node type, the same
+`HAS_BEACON` / `USES_TECH` edges, and the same AGENTS tab as Cobalt Strike, Brute Ratel and
+Adaptix.
+
+Tuoni ([docs.tuoni.io](https://docs.tuoni.io), [tuoni.io](https://tuoni.io)) is a third-party
+Docker-native C2 aimed at cyber-defense exercises and authorized red teaming. It ships as a
+Community Edition (free) plus a Commercial tier; SPOTTER does **not** redistribute Tuoni
+binaries — see tuoni.io for licensing. Use only under documented Rules of Engagement.
+
+Two things differ from Adaptix (WF28) and cause most of the confusion:
+
+- **The base URL has NO path prefix.** Adaptix hangs every route off an operator-chosen
+  prefix (commonly `/endpoint`); Tuoni does not. `TUONI_API_URL` is just `scheme://host:port`
+  (default port **8443**), e.g. `https://10.0.0.5:8443`.
+- **Auth is HTTP Basic → Bearer.** `POST /api/v2/auth/login` takes an
+  `Authorization: Basic …` header (not a JSON body) and answers with a short-lived
+  `accessToken`. A rejected login is a plain **401** — no Adaptix-style 404 trap.
+
+It is a poll, not a push (WebSocket ingest is deferred): SPOTTER dials the teamserver
+outbound every five minutes. Tuoni's STOMP event bus is not used in v1 because its
+heartbeat topic carries little more than a GUID and the access JWT expires without
+renewing an open socket. `lastCallbackTime` on every `/api/v2/agents` poll is what keeps
+the AGENTS tab's live/stale/dead honest.
+
+### Setup
+
+**1. Confirm the teamserver is reachable from this host.** Either it routes directly, or you
+hold a forward:
+
+```bash
+ssh -N -L 8443:127.0.0.1:8443 <tuoni-host>
+```
+
+**2. Set the URL in `.env` and the credentials in the engagement tier.** The URL is config;
+username/password are secrets (CLI only today — the Admin UI Vendor API keys portal cannot
+set engagement C2 credentials):
+
+```bash
+# .env (config)
+TUONI_API_URL=https://10.0.0.5:8443     # or 127.0.0.1:8443 through the forward
+
+# engagement secrets
+python3 scripts/spotter_secret.py set TUONI_USERNAME --tier engagement
+python3 scripts/spotter_secret.py set TUONI_PASSWORD --tier engagement
+```
+
+**3. Recreate the containers.** Env is fixed at container creation, so editing `.env` alone
+changes nothing:
+
+```bash
+scripts/spotter_compose.sh up -d --force-recreate n8n task-runners
+```
+
+**4. Import/reload WF31** if it is not already loaded, then trigger it once manually in n8n
+rather than waiting for the schedule, and check the AGENTS tab's **Tuoni** filter.
+
+### Verifying an ingest landed
+
+```bash
+docker exec flowsint-neo4j-prod cypher-shell -u neo4j -p "$NEO4J_PASSWORD" \
+  "MATCH (s:C2Session) WHERE s.\`nodeProperties.c2_framework\` = 'tuoni'
+   RETURN count(s) AS agents, count(s.\`nodeProperties.last_checkin\`) AS with_checkin"
+```
+
+Then wait one poll cycle and run it again. `last_checkin` **must advance**.
+
+### What Tuoni does not send
+
+- **No process list** on the agent roster — leave `process_list` / `tech_stack` empty; the
+  upsert guard refuses to overwrite prior enrichment with empty lists.
+- **No parent-agent id** — no `PIVOTS_TO` edge is written.
+- **No victim-side external IP** — `external_ip` stays empty.
+
+---
+
 ## Quick Start
 
 > **Installing for the first time? Read [INSTALL.md](INSTALL.md) instead.**
@@ -1621,6 +1700,7 @@ which prompts without echoing and writes it to the right encrypted tier:
 - `AUTH_SECRET` / `MASTER_VAULT_KEY_V1` / `NEO4J_PASSWORD` / `WEBUI_SECRET_KEY` / `N8N_PASSWORD` — generated by `setup-secrets.sh`
 - `CS_API_URL` / `CS_API_TOKEN` — your Cobalt Strike Team Server REST API
 - `ADAPTIX_API_URL` / `ADAPTIX_USERNAME` / `ADAPTIX_PASSWORD` — your Adaptix teamserver (the URL **must** include the endpoint prefix from its `profile.json`)
+- `TUONI_API_URL` / `TUONI_USERNAME` / `TUONI_PASSWORD` — your Tuoni teamserver (URL is `scheme://host:port` with **no** path prefix; default port 8443)
 - `FLOWSINT_API_KEY` — generated after step 3
 - `FLOWSINT_SKETCH_ID` — generated after step 3 (fallback/default sketch only; campaigns provision their own via WF16)
 - `FLARE_API_KEY` — from https://app.flare.io → Profile → API Keys
@@ -1866,8 +1946,9 @@ below is an inventory of the workflow files, not a manual import procedure:
 | `20-import-campaign.json` | Writes a decrypted bundle into a freshly provisioned sketch |
 | `21-brute-ratel-receiver.json` | Receives Brute Ratel listener webhooks and ingests badgers as `C2Session` nodes. A **push receiver, not a poller** — BRc4 has no REST API. Enable the webhook **per listener** in Commander; see §"Brute Ratel listener webhook" |
 | `28-adaptix-ingestor.json` | Polls the Adaptix teamserver Web API every 5 min and ingests its agent roster as `C2Session` nodes. A **poller, like WF01** — Adaptix's own webhook fires on new-agent registration ONLY and never on check-in, so push alone would leave every agent reading `stale`. Ships **active**, and no-ops immediately while `ADAPTIX_API_URL` is the `.env` placeholder; see §"Adaptix C2 teamserver poll" |
+| `31-tuoni-ingestor.json` | Polls the Tuoni teamserver REST API every 5 min and ingests its agent roster as `C2Session` nodes. A **poller, like WF01/WF28** — auth is HTTP Basic login → Bearer; base URL has **no** path prefix (port 8443). Ships **active**, and no-ops immediately while `TUONI_API_URL` is the `.env` placeholder; see §"Tuoni C2 teamserver poll" |
 | `22-settings.json` | Runtime configuration panel (admin-gated) |
-| `23-c2-agents.json` | `/webhook/agents` — the unified C2 roster behind the **Agents** tab: Cobalt Strike beacons, Brute Ratel badgers and Adaptix agents side by side, live/stale decided from `last_checkin` against `active_minutes` (default 30). It imports `c2_common.framework_display` hard rather than falling back to a local map — a fallback would relabel every badger as a beacon and look like it worked. **Framework-agnostic:** adding a C2 needs no change here, only the two `c2_common` registry entries |
+| `23-c2-agents.json` | `/webhook/agents` — the unified C2 roster behind the **Agents** tab: Cobalt Strike beacons, Brute Ratel badgers, Adaptix agents and Tuoni agents side by side, live/stale decided from `last_checkin` against `active_minutes` (default 30). It imports `c2_common.framework_display` hard rather than falling back to a local map — a fallback would relabel every badger as a beacon and look like it worked. **Framework-agnostic:** adding a C2 needs no change here, only the two `c2_common` registry entries |
 | `24-notifications.json` | `/webhook/notifications` — the header ticker's feed, and **the only alerting surface in SPOTTER**. It replaced the Slack emitters stripped from WF01/02/04/09/13/14/25. `scripts/spotter_notify.py` sweeps the graph on a rate limit (attack scores, C2 check-ins, Flare breaches, alert tags, cloud buckets), diffs against what it already reported, and persists each notification as a node labelled **both** `:SpotterMeta` and `:SpotterNotification` carrying **no** `sketch_id` — so WF07's orphan sweep inherits its existing guard and cannot delete the feed. Its sketch comes from the campaign registry, never the request body. Reading never raises: a failed sweep degrades to "no new notifications" rather than painting an error across every operator's header |
 | `25-vulnerability-context.json` | `/webhook/vuln-context` contextualizes ingested Nessus findings (exploit availability, ATT&CK, priority) and rolls them up onto the affected hosts; `/webhook/vuln-summary` reads the campaign's vulnerability picture back for the UI and the LLM tool |
 | `26-web-inventory.json` | `/webhook/web-inventory` reads every `Website` node in the campaign sketch (captured by EyeWitness ingest) back for the **Web** tab — URL, resolved host, page title, category, default-cred hits and the served screenshot URL |
@@ -2238,6 +2319,8 @@ python3 scripts/smoke_workflow13.py        # domain recon: THC, source quotas, p
 python3 scripts/smoke_workflow23.py        # C2 roster (beacons + badgers + agents)
 python3 scripts/smoke_adaptix.py           # Adaptix normalizer (offline fixtures)
 python3 scripts/smoke_workflow28.py        # Adaptix ingest node code (offline fixtures)
+python3 scripts/smoke_tuoni.py             # Tuoni normalizer (offline fixtures)
+python3 scripts/smoke_workflow31.py        # Tuoni ingest node code (offline fixtures)
 python3 scripts/smoke_notify_agents.py     # WF24's C2 liveness source (offline fixtures)
 python3 scripts/smoke_super_enrich.py      # WF27 identity pivot
 
@@ -2314,6 +2397,7 @@ SPOTTER/
 │   ├── brc4_normalizer.py                 # BRc4 webhook payload normaliser (badger -> C2Session)
 │   ├── c2_common.py                       # Canonical C2 session schema + framework registry, shared by every C2
 │   ├── adaptix_normalizer.py              # Adaptix /agent/list -> canonical C2Session (workflow 28)
+│   ├── tuoni_normalizer.py                # Tuoni /api/v2/agents -> canonical C2Session (workflow 31)
 │   ├── flare_client.py                    # Flare.io breach API client (JWT rotation)
 │   ├── setup_openwebui.py                 # Open WebUI bootstrap helper
 │   ├── upload_router.py                   # Multi-format detector + dispatcher
@@ -2362,6 +2446,7 @@ SPOTTER/
 │   ├── 26-web-inventory.json              # Website nodes + screenshots for the Web tab
 │   ├── 27-super-enrich.json               # Identity pivot: corporate identity -> real-world persona
 │   ├── 28-adaptix-ingestor.json           # OBSERVE: poll the Adaptix teamserver Web API (poll, not push)
+│   ├── 31-tuoni-ingestor.json             # OBSERVE: poll the Tuoni teamserver REST API (poll, not push)
 │   └── 29-analysis-correction.json        # Capture operator corrections for analysis history
 │
 ├── flowsint-custom/
@@ -2444,7 +2529,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
-| **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers** and Adaptix **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |
+| **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |
 | **Web** | Every `Website` node EyeWitness captured, with its screenshot — filterable *All / Screenshots / High-value / Default creds*. Backed by WF26 |
 | **Tech Intel** | OS inventory, technology stacks, CVE context, and risk tiers |
 
