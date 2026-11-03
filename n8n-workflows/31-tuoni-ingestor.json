@@ -1,0 +1,203 @@
+{
+  "name": "31 - Tuoni C2 Ingestor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000001",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b7c8d9e0-0031-0031-0031-000000000002",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import os, json, ssl, base64\nimport urllib.request, urllib.parse\nimport urllib.error\n\ntu_url  = os.environ.get('TUONI_API_URL', '').strip()\ntu_user = os.environ.get('TUONI_USERNAME', '').strip()\ntu_pass = os.environ.get('TUONI_PASSWORD', '')\n\n# The shipped .env carries REPLACE_WITH_* placeholders. Treat those as \"not\n# configured\" so a stack that never wired up Tuoni does not attempt a doomed\n# connection on every 5-minute tick.\ndef _placeholder(v):\n    return v.upper().startswith('REPLACE_WITH')\n\nif not tu_url or _placeholder(tu_url):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'TUONI_API_URL is not set (or still the .env placeholder)',\n                      'agents': [], 'listeners': {}}}]\nif not tu_user or _placeholder(tu_user):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'TUONI_USERNAME is not set (or still the .env placeholder)',\n                      'agents': [], 'listeners': {}}}]\nif _placeholder(tu_pass):\n    return [{'json': {'fetch_ok': False, 'configured': False,\n                      'error': 'TUONI_PASSWORD is still the .env placeholder',\n                      'agents': [], 'listeners': {}}}]\n\n# NO PATH PREFIX, unlike Adaptix: TUONI_API_URL is just scheme://host:port\n# (default port 8443) and the API paths are fixed.\nbase = tu_url.rstrip('/')\n\n# The teamserver's TLS is operator-generated and typically self-signed, exactly as\n# with the Cobalt Strike team server in workflow 01 and Adaptix in workflow 28.\nctx = ssl.create_default_context()\nctx.check_hostname = False\nctx.verify_mode = ssl.CERT_NONE\n\n\ndef _req(url, data=None, headers=None, method='GET'):\n    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)\n    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:\n        return r.read()\n\n\n# -- Step 1: authenticate (HTTP Basic -> Bearer accessToken) -------------------\n# Tuoni issues no static API token; a short-lived accessToken (~15 min) is minted\n# per login. Each n8n run is a fresh process with nowhere to cache one, so at a\n# 5-minute cadence a login per poll is cheaper than /refresh bookkeeping. The\n# login endpoint takes an Authorization: Basic header, NOT a JSON body. A rejected\n# login is a plain 401 (no 404 trap, unlike Adaptix).\ntry:\n    basic = base64.b64encode((tu_user + ':' + tu_pass).encode('utf-8')).decode('ascii')\n    raw = _req(base + '/api/v2/auth/login', data=b'',\n               headers={'Authorization': 'Basic ' + basic}, method='POST')\n    token = ''\n    try:\n        token = (json.loads(raw) or {}).get('accessToken', '')\n    except Exception:\n        # The deprecated v1 login returns the raw JWT as the whole body.\n        token = raw.decode('utf-8', 'replace').strip()\n    if not token:\n        return [{'json': {'fetch_ok': False, 'agents': [], 'listeners': {},\n                          'error': 'Tuoni login returned no accessToken'}}]\nexcept urllib.error.HTTPError as e:\n    return [{'json': {'fetch_ok': False, 'agents': [], 'listeners': {},\n                      'error': ('Tuoni login HTTP ' + str(e.code) +\n                                ' (401 almost always means bad credentials)')}}]\nexcept Exception as e:\n    return [{'json': {'fetch_ok': False, 'agents': [], 'listeners': {},\n                      'error': 'Tuoni login failed: ' + repr(e)}}]\n\nauth_hdr = {'Authorization': 'Bearer ' + token}\n\n# -- Step 2: listeners map (best-effort; a failure only blanks one column) -----\nlisteners = {}\ntry:\n    ldata = json.loads(_req(base + '/api/v1/listeners', headers=auth_hdr))\n    if isinstance(ldata, dict):\n        inner = None\n        for key in ('items', 'listeners', 'data'):\n            if isinstance(ldata.get(key), list):\n                inner = ldata[key]\n                break\n        if inner is not None:\n            for l in inner:\n                if isinstance(l, dict) and l.get('id') is not None:\n                    listeners[str(l['id'])] = str(l.get('name') or l['id'])\n        else:\n            for lid, l in ldata.items():\n                nm = l.get('name') if isinstance(l, dict) else None\n                listeners[str(lid)] = str(nm or lid)\n    elif isinstance(ldata, list):\n        for l in ldata:\n            if isinstance(l, dict) and l.get('id') is not None:\n                listeners[str(l['id'])] = str(l.get('name') or l['id'])\nexcept Exception:\n    listeners = {}\n\n# -- Step 3: pull the roster (prefer v2 pagination, fall back to v1) -----------\n# No status filter, so ACTIVE and INACTIVE both come back and WF23 decides\n# stale/dead from lastCallbackTime rather than this node.\ntry:\n    agents = []\n    try:\n        page = 0\n        while page < 1000:\n            q = urllib.parse.urlencode({'page': page, 'pageSize': 200})\n            payload = json.loads(_req(base + '/api/v2/agents?' + q, headers=auth_hdr))\n            if isinstance(payload, list):\n                agents = payload\n                break\n            if not isinstance(payload, dict):\n                break\n            batch = None\n            for key in ('items', 'content', 'agents', 'data'):\n                if isinstance(payload.get(key), list):\n                    batch = payload[key]\n                    break\n            if batch is None:\n                break\n            agents.extend(batch)\n            if not payload.get('hasMorePages'):\n                break\n            page += 1\n    except urllib.error.HTTPError:\n        # v2 unavailable -> v1, which may answer with a bare array OR a dict.\n        vdata = json.loads(_req(base + '/api/v1/agents', headers=auth_hdr))\n        if isinstance(vdata, list):\n            agents = vdata\n        elif isinstance(vdata, dict):\n            inner = None\n            for key in ('items', 'agents', 'data'):\n                if isinstance(vdata.get(key), list):\n                    inner = vdata[key]\n                    break\n            if inner is not None:\n                agents = inner\n            else:\n                agents = [v for v in vdata.values() if isinstance(v, dict)]\n        else:\n            agents = []\n\n    return [{'json': {'fetch_ok': True, 'error': '', 'agents': agents,\n                      'listeners': listeners}}]\nexcept urllib.error.HTTPError as e:\n    body = ''\n    try:\n        body = e.read().decode('utf-8', errors='replace')[:300]\n    except Exception:\n        body = ''\n    return [{'json': {'fetch_ok': False, 'agents': [], 'listeners': {},\n                      'error': 'Tuoni API HTTP ' + str(e.code) + ': ' + body}}]\nexcept Exception as e:\n    return [{'json': {'fetch_ok': False, 'agents': [], 'listeners': {},\n                      'error': 'Tuoni API request failed: ' + repr(e)}}]"
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000003",
+      "name": "Fetch Tuoni Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nfrom tuoni_normalizer import normalise_agent\n\ntu_url = os.environ.get('TUONI_API_URL', '')\nraw = _items[0].get('json', {}) if _items else {}\n\nif isinstance(raw, dict) and raw.get('fetch_ok') is False:\n    # Emit NO items so the run ends here. Everything downstream reads the graph\n    # and writes to it; returning a sentinel item instead of nothing would make\n    # every failed poll pay that cost, and on a 5-minute schedule the runs then\n    # overlap and pile up until the execution timeout. WF01 shipped that bug.\n    print('tuoni ingest skipped: ' + str(raw.get('error', 'fetch_failed')))\n    return []\n\n# recentListenerId -> name map, assembled once by the Fetch node, so the\n# normaliser can resolve the listener column without a per-agent lookup.\nlisteners = raw.get('listeners', {}) if isinstance(raw, dict) else {}\n\nif isinstance(raw, dict):\n    agents = raw.get('agents', [raw])\nelse:\n    agents = raw if isinstance(raw, list) else [raw]\n\n# A single agent handed over as a bare dict must become a one-element list.\n# Iterating a dict yields its KEYS, so the isinstance(a, dict) filter below would\n# reject every one of them and the node would return zero agents while reporting\n# success -- the fail-green shape this codebase keeps getting bitten by.\nif isinstance(agents, dict):\n    agents = [agents]\n\nif not agents:\n    return []\n\nnormalised = [normalise_agent(a, tu_url, listeners) for a in agents if isinstance(a, dict)]\n\n# An agent with no guid cannot be deduped -- session_key would collapse to\n# 'tuoni:' and every such record would MERGE onto one node, because add_node\n# treats the label as the node's identity.\nnormalised = [a for a in normalised if a.get('session_id')]\n\nreturn [{'json': a} for a in normalised]"
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000004",
+      "name": "Normalise Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body, so there is no sketch_id to read the\n# way a UI webhook supplies one. Falling straight back to FLOWSINT_SKETCH_ID\n# points every ingest at the throwaway default sketch, which no campaign reads -\n# and writing to an empty sketch succeeds, so it fails silently. Resolve the most\n# recent campaign from the shared registry instead, with env as the last resort.\nsketch_id = fc.resolve_campaign_sketch()\n\n# Only the three labels this dedup inspects are read. The full-graph endpoint is\n# unpaginated (110-235s on an AD-sized sketch) and truncates at 100k nodes, which\n# would silently drop existing sessions from the map and re-create them.\ntry:\n    existing_nodes = fc.get_nodes_by_type(\n        ['C2Session', 'CobaltBeacon', 'individual'], sketch_id=sketch_id)\nexcept Exception as e:\n    print('tuoni ingest skipped: graph fetch failed: ' + str(e))\n    return []\n\nexisting_sessions = {}\nexisting_individuals = {}\n\nfor n in existing_nodes:\n    ntype = (n.get('nodeType') or (n.get('data') or {}).get('type') or '').lower()\n    props = n.get('nodeProperties') or n.get('data') or {}\n\n    # c2session is the current type; cobaltbeacon is the pre-migration one. Key on\n    # session_key so a Tuoni agent, a CS beacon and a BR badger sharing an id\n    # stay distinct, falling back to the legacy beacon_id for un-migrated nodes.\n    if ntype in ('c2session', 'cobaltbeacon'):\n        skey = props.get('session_key', '')\n        if not skey:\n            sid = props.get('session_id') or props.get('beacon_id') or ''\n            fw = props.get('c2_framework') or 'cobalt_strike'\n            skey = f'{fw}:{sid}' if sid else ''\n        if skey:\n            existing_sessions[skey] = n.get('id')\n    elif ntype == 'individual':\n        sam = (props.get('sam_account_name') or props.get('username') or '').lower()\n        if sam:\n            existing_individuals[sam] = n.get('id')\n\nresult = []\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        result.append({'json': a})\n        continue\n\n    a['_existing_session_id'] = existing_sessions.get(a.get('session_key', ''), '')\n    a['_existing_individual_id'] = existing_individuals.get((a.get('sam_account_name') or '').lower(), '')\n    result.append({'json': a})\n\nreturn result"
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000005",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body - see the Dedup Check node for why the\n# env fallback alone fails silently.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\n\ndef _np(props):\n    \"\"\"Prefix an edit_node patch into the nodeProperties namespace.\n\n    add_node nests whatever it is given under nodeProperties.*, but edit_node\n    passes `updates` keys through verbatim, so a bare key lands at the node's TOP\n    level -- a second namespace that get_nodes_by_type, the dossier query and the\n    AGENTS roster all read straight past. The write reports success and the value\n    is genuinely in Neo4j, just not where anything looks, which is why a beacon\n    kept its first-contact last_checkin no matter how many times the 5-minute poll\n    saw it. Every workflow that calls edit_node prefixes the same way\n    (WF01/WF09/WF12/WF13/WF21).\n    \"\"\"\n    return {'nodeProperties.' + k: v for k, v in props.items()}\n\n\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        results.append({'json': {**a, 'upsert_status': 'skipped'}})\n        continue\n\n    sam = (a.get('sam_account_name') or a.get('username', 'unknown')).split('\\\\')[-1]\n    ind_id = a.get('_existing_individual_id', '')\n    session_node_id = a.get('_existing_session_id', '')\n    item_errors = []\n\n    try:\n        ind_props = {\n            'username': a.get('username'),\n            'sam_account_name': sam,\n            'hostname': a.get('hostname'),\n            'source': a.get('c2_framework', 'tuoni'),\n            'last_seen': a.get('last_checkin'),\n            'active_beacon': True,\n        }\n        if not ind_id:\n            # Lowercase: 'individual' is a Flowsint built-in and Neo4j labels are\n            # case-sensitive, with no normalisation in create_node. 'Individual'\n            # creates a second, unregistered label that this workflow's own dedup\n            # (which reads 'individual') could never see.\n            node = fc.add_node(\n                label=a.get('username') or sam,\n                node_type='individual',\n                properties=ind_props,\n                sketch_id=sketch_id,\n            )\n            ind_id = node.get('id', '')\n        else:\n            # Drop empty values before patching an EXISTING individual: this is\n            # frequently a SharpHound-ingested identity, so an agent record with no\n            # user or an unparseable last-checkin must not blank the username /\n            # last_seen the AD ingest already established.\n            fc.edit_node(\n                ind_id,\n                _np({k: v for k, v in ind_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n    except Exception as e:\n        item_errors.append('individual_upsert_failed: ' + repr(e))\n\n    try:\n        # Every key normalise_agent() + finalize_session() produce and\n        # C2SESSION_SCHEMA declares. Deliberately absent: last_checkin_dt (a raw\n        # datetime, not JSON serialisable and not in the schema -- last_checkin is\n        # the ISO string), and listener_ip, which is Brute Ratel-only and would\n        # only ever write None from a Tuoni agent.\n        session_props = {\n            'c2_framework': a.get('c2_framework', 'tuoni'),\n            'session_id': a.get('session_id'),\n            'session_key': a.get('session_key'),\n            'c2_server': a.get('c2_server'),\n            'hostname': a.get('hostname'),\n            'internal_ip': a.get('internal_ip'),\n            'external_ip': a.get('external_ip'),\n            'os_version': a.get('os_version'),\n            'arch': a.get('arch'),\n            'username': a.get('username'),\n            'sam_account_name': sam,\n            'process_name': a.get('process_name'),\n            'pid': a.get('pid'),\n            'thread_id': a.get('thread_id'),\n            'is_admin': a.get('is_admin'),\n            'last_checkin': a.get('last_checkin'),\n            'sleep_seconds': a.get('sleep_seconds'),\n            'jitter_pct': a.get('jitter_pct'),\n            'listener': a.get('listener'),\n            'note': a.get('note'),\n            'priority_score': a.get('priority_score'),\n            'process_list': a.get('process_list', []),\n            'tech_stack': a.get('tech_stack', []),\n            'is_dead': a.get('is_dead', False),\n            'is_pivot': a.get('is_pivot'),\n            'pivot_parent': a.get('pivot_parent'),\n            'pivot_channel': a.get('pivot_channel'),\n            'source': a.get('source', 'tuoni'),\n        }\n        if session_node_id:\n            # Same empty-value guard. The Tuoni agent roster carries NO process list -- that\n            # only arrives from a `ps` task -- so patching the empty\n            # process_list/tech_stack in would wipe any enrichment on every\n            # 5-minute poll. Only None and [] are dropped: False and 0 are real\n            # values (is_dead, is_admin, priority_score), and the create path below\n            # keeps the empty lists so the property exists with the right type from\n            # the start.\n            fc.edit_node(\n                session_node_id,\n                _np({k: v for k, v in session_props.items() if v is not None and v != []}),\n                sketch_id=sketch_id,\n            )\n        else:\n            session_node = fc.add_node(\n                label='Agent:' + str(a.get('session_id')) + '@' + str(a.get('hostname')),\n                node_type='C2Session',\n                properties=session_props,\n                sketch_id=sketch_id,\n            )\n            session_node_id = session_node.get('id', '')\n    except Exception as e:\n        item_errors.append('session_upsert_failed: ' + repr(e))\n\n    status = 'ok' if not item_errors else 'partial'\n    results.append({'json': {\n        **a,\n        '_ind_id': ind_id,\n        '_session_node_id': session_node_id,\n        'upsert_status': status,\n        'upsert_errors': item_errors,\n    }})\n\nreturn results"
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000006",
+      "name": "Upsert Individual + Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os\nsys.path.insert(0, '/data/scripts')\nimport flowsint_client as fc\n\n# Schedule triggers carry no request body - see the Dedup Check node.\nsketch_id = fc.resolve_campaign_sketch()\nresults = []\n\nfor item in _items:\n    a = item.get('json', {})\n    if a.get('_skip_ingest'):\n        results.append({'json': {**a, 'rel_status': 'skipped_fetch_error'}})\n        continue\n\n    ind_id = a.get('_ind_id', '')\n    session_node_id = a.get('_session_node_id', '')\n    tech_stack = a.get('tech_stack', [])\n    rel_errors = []\n    edges_created = 0\n\n    if not ind_id:\n        results.append({'json': {**a, 'rel_status': 'skipped_no_ind',\n                                 'rel_errors': ['missing individual id']}})\n        continue\n\n    if session_node_id:\n        try:\n            # HAS_BEACON, not HAS_SESSION: the AD graph already uses HAS_SESSION\n            # for logon sessions. The name is framework-neutral by convention.\n            fc.create_edge(ind_id, session_node_id, 'HAS_BEACON', sketch_id)\n            edges_created += 1\n        except Exception as e:\n            rel_errors.append('HAS_BEACON: ' + repr(e))\n\n    for tech in tech_stack:\n        if not tech:\n            continue\n        try:\n            tnode = fc.add_node(\n                label=tech,\n                node_type='Technology',\n                # 'name' is REQUIRED on the built-in Technology type. Flowsint's\n                # graph serializer retries once with invalid fields stripped, but a\n                # *missing* required field cannot be recovered that way, so a single\n                # name-less Technology node makes GET /graph return 500 for the\n                # entire sketch.\n                properties={'name': tech, 'source': a.get('c2_framework', 'tuoni')},\n                sketch_id=sketch_id,\n            )\n            tid = tnode.get('id', '')\n            if tid:\n                fc.create_edge(ind_id, tid, 'USES_TECH', sketch_id)\n                edges_created += 1\n        except Exception as e:\n            rel_errors.append('USES_TECH[' + str(tech) + ']: ' + repr(e))\n\n    # No PIVOTS_TO edge is written. Tuoni's agent roster carries no documented\n    # parent-agent id, so pivot_parent is always empty here and there is nothing\n    # to link to. Guessing a parent would fabricate a relayed-through relationship\n    # between two agents that may share nothing. If a live teamserver turns out\n    # to expose a parent id, add the same search_nodes-then-exact-session_key\n    # lookup WF01 and WF21 use.\n    if session_node_id and a.get('is_pivot') and a.get('pivot_parent'):\n        parent_key = 'tuoni:' + str(a.get('pivot_parent'))\n        try:\n            matches = fc.search_nodes(parent_key, node_type='C2Session', sketch_id=sketch_id) or []\n            parent_id = ''\n            for m in matches:\n                props = m.get('nodeProperties') or m.get('data') or {}\n                if props.get('session_key') == parent_key:\n                    parent_id = m.get('id', '')\n                    break\n            if parent_id:\n                fc.create_edge(parent_id, session_node_id, 'PIVOTS_TO', sketch_id)\n                edges_created += 1\n            else:\n                rel_errors.append('PIVOTS_TO: parent ' + parent_key + ' not in graph yet')\n        except Exception as e:\n            rel_errors.append('PIVOTS_TO: ' + repr(e))\n\n    rel_status = 'ok' if not rel_errors else ('partial' if edges_created > 0 else 'error')\n    results.append({'json': {\n        **a,\n        'rel_status': rel_status,\n        'rel_errors': rel_errors[:10],\n        'edges_created': edges_created,\n    }})\n\nreturn results"
+      },
+      "id": "b7c8d9e0-0031-0031-0031-000000000007",
+      "name": "Create Relationships",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        80
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Fetch Tuoni Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Tuoni Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Agents": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "Upsert Individual + Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Individual + Session": {
+      "main": [
+        [
+          {
+            "node": "Create Relationships",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Tuoni Agents": {
+      "main": [
+        [
+          {
+            "node": "Normalise Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all"
+  },
+  "versionId": "b7c8d9e0-0031-0031-0031-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "Polls the Tuoni C2 teamserver REST API every 5 minutes and ingests its agent roster as C2Session nodes, alongside Cobalt Strike (WF01), Brute Ratel (WF21) and Adaptix (WF28). Feeds the AGENTS tab via WF23.\n\nA POLL, NOT A PUSH. Tuoni exposes a STOMP/SockJS event bus (/events), but its heartbeat topic carries little more than a GUID and the access JWT that authorises the socket expires (~15 min) without the open socket being renewed. A correct live/stale/dead roster only needs lastCallbackTime, refreshed on every /api/v2/agents poll, so WebSocket ingestion is deliberately deferred and this polls REST like WF28.\n\nAuth is two-step and per-run: POST /api/v2/auth/login with an Authorization: Basic header (NOT a JSON body) -> accessToken, then GET /api/v2/agents with Authorization: Bearer. There is no static API token. A rejected login is a plain 401 (no 404 trap, unlike Adaptix).\n\nTWO DIFFERENCES FROM ADAPTIX. (1) TUONI_API_URL has NO path prefix -- it is just scheme://host:port (default port 8443), e.g. https://10.0.0.5:8443. (2) The roster is paged: the Fetch node walks /api/v2/agents?page=&pageSize=200 until hasMorePages is false, and falls back to /api/v1/agents (bare array or dict-of-agents) if v2 is absent.\n\nReaching the teamserver is outbound, so either it is directly routable from the SPOTTER host or the operator holds an ssh -N -L 8443:127.0.0.1:8443 forward and TUONI_API_URL points at the local end.\n\nEnv: TUONI_API_URL, TUONI_USERNAME, TUONI_PASSWORD -- all three must be in the runner's allowed-env and in both compose environment blocks, or os.environ.get() silently returns the default and the poll no-ops as 'not configured'."
+  },
+  "id": "spotter-workflow-31",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "Ingest"
+    },
+    {
+      "name": "Tuoni"
+    }
+  ]
+}

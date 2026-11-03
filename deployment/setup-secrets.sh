@@ -524,7 +524,7 @@ log "Add each with:  scripts/spotter_secret.py set <KEY>   (prompts; never echoe
 log "  FLARE_API_KEY, SHODAN_API_KEY, FOFA_API_KEY, SERP_API_KEY,"
 log "  TAVILY_API_KEY, GRAYHATWARFARE_API_KEY,"
 log "  NVD_API_KEY                           — optional; each disables one feature"
-log "  CS_API_TOKEN, ADAPTIX_*               — optional; C2 ingest only"
+log "  CS_API_TOKEN, ADAPTIX_*, TUONI_*       — optional; C2 ingest only"
 log "FLOWSINT_API_KEY and FLOWSINT_SKETCH_ID are obtained by the bootstrap, not here."
 log ""
 log "Credentials live ENCRYPTED in secrets/*.sops.env, never in $ENV_FILE. Review"

@@ -59,6 +59,7 @@ TARGETS = {
     "25": WORKFLOW_DIR / "25-vulnerability-context.json",
     "28": WORKFLOW_DIR / "28-adaptix-ingestor.json",
     "29": WORKFLOW_DIR / "29-analysis-correction.json",
+    "31": WORKFLOW_DIR / "31-tuoni-ingestor.json",
 }
 
 # Flowsint's built-in node types. Neo4j labels are case-sensitive and
@@ -303,6 +304,7 @@ def run_checks() -> List[str]:
         ("01", ("Dedup Check", "Upsert Individual + Beacon", "Create Relationships")),
         ("21", ("Dedup Check", "Upsert Individual + Session", "Create Relationships")),
         ("28", ("Dedup Check", "Upsert Individual + Session", "Create Relationships")),
+        ("31", ("Dedup Check", "Upsert Individual + Session", "Create Relationships")),
     ):
         for node_name in node_names:
             code = nodes[wf_id].get(node_name, "")
@@ -362,6 +364,34 @@ def run_checks() -> List[str]:
     require_contains("28", "Create Relationships", n28_rel, "'HAS_BEACON'", failures)
     # A name-less Technology node makes GET /graph return 500 for the WHOLE sketch.
     require_contains("28", "Create Relationships", n28_rel, "'name': tech", failures)
+
+    # Workflow 31 checks — Tuoni poll mirrors Adaptix (WF28) invariants.
+    n31_dedup  = nodes["31"].get("Dedup Check", "")
+    n31_upsert = nodes["31"].get("Upsert Individual + Session", "")
+    n31_rel    = nodes["31"].get("Create Relationships", "")
+
+    require_contains("31", "Dedup Check", n31_dedup, "fc.get_nodes_by_type(", failures)
+    require_absent("31", "Dedup Check", n31_dedup, "fc.get_graph(", failures,
+                   why="full-graph read truncates at 100k nodes and breaks dedup")
+
+    for node_name, code in (("Upsert Individual + Session", n31_upsert),):
+        require_contains("31", node_name, code, "'nodeProperties.' + k", failures)
+
+    require_contains("31", "Upsert Individual + Session", n31_upsert,
+                     "node_type='individual'", failures)
+    require_absent("31", "Upsert Individual + Session", n31_upsert,
+                   "node_type='Individual'", failures,
+                   why="capitalised label is invisible to the dedup that reads 'individual'")
+
+    for key in ("'listener'", "'pid'", "'os_version'", "'arch'",
+                "'sleep_seconds'", "'jitter_pct'", "'is_admin'", "'last_checkin'"):
+        require_contains("31", "Upsert Individual + Session", n31_upsert, key + ":", failures)
+
+    require_contains("31", "Upsert Individual + Session", n31_upsert,
+                     "if v is not None and v != []", failures)
+
+    require_contains("31", "Create Relationships", n31_rel, "'HAS_BEACON'", failures)
+    require_contains("31", "Create Relationships", n31_rel, "'name': tech", failures)
 
     # Workflow 04 checks — attack-path scoring must stay exploit-aware.
     # WF04 used to score AD ACEs and nothing else, so a host with working public
@@ -2205,6 +2235,8 @@ def check_task_runner_env(failures: List[str]) -> None:
                 # "not configured" forever. BRC4_SERVER_TZ_OFFSET_HOURS is the
                 # standing proof that an unlisted var stays silently inert.
                 "ADAPTIX_API_URL", "ADAPTIX_USERNAME", "ADAPTIX_PASSWORD",
+                # WF31's fetch node reads all three; same silent-noop trap as WF28.
+                "TUONI_API_URL", "TUONI_USERNAME", "TUONI_PASSWORD",
                 # WF13's org source. HH_USER_AGENT unlisted is the nastiest of
                 # these: hh_client refuses API mode without it, so the block
                 # silently drops back to scraping and an operator who configured
@@ -2270,6 +2302,7 @@ def check_task_runner_env(failures: List[str]) -> None:
                 "spotter_campaign_acl", "spotter_settings", "spotter_notify",
                 "spotter_cache", "analysis_history", "cobalt_normalizer", "brc4_normalizer",
                 "adaptix_normalizer",
+                "tuoni_normalizer",
                 "c2_common", "high_value_tech", "asset_labels", "cve_client",
                 # Both are imported DIRECTLY by WF13's org block, so their
                 # absence kills the node before line 1 with "Security violations
