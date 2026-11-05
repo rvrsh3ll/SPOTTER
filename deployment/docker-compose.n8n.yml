@@ -510,6 +510,23 @@ services:
       # `allowed-env` in n8n-task-runners.json or the code node silently sees the
       # module default (3) instead of this value.
       SPOTTER_MAX_CAMPAIGNS_PER_USER: ${SPOTTER_MAX_CAMPAIGNS_PER_USER:-3}
+      # Russian OSINT (WF30 corporate, WF13 leak/phone), Telegram OSINT
+      # (WF03/WF13) and identity-store budget knobs. Configuration-panel keys
+      # in spotter_settings.SETTINGS_SPEC; defaults mirror the spec and
+      # .env.example. Each name must ALSO be in the python runner's
+      # `allowed-env` in n8n-task-runners.json or a .env pin is silently inert.
+      RUS_CORP_MAX_REQUESTS: ${RUS_CORP_MAX_REQUESTS:-30}
+      RUS_CORP_TIMEOUT: ${RUS_CORP_TIMEOUT:-20}
+      RUS_CORP_MAX_SECONDS: ${RUS_CORP_MAX_SECONDS:-120}
+      RUS_LEAK_MAX_RESULTS: ${RUS_LEAK_MAX_RESULTS:-50}
+      RUS_LEAK_TIMEOUT: ${RUS_LEAK_TIMEOUT:-20}
+      PHONE_LOOKUP_MAX: ${PHONE_LOOKUP_MAX:-10}
+      PHONE_LOOKUP_TIMEOUT: ${PHONE_LOOKUP_TIMEOUT:-10}
+      TELEGRAM_OSINT_MAX_QUERIES: ${TELEGRAM_OSINT_MAX_QUERIES:-15}
+      TELEGRAM_OSINT_MAX_WAIT: ${TELEGRAM_OSINT_MAX_WAIT:-60}
+      TELEGRAM_OSINT_POLL_TIMEOUT: ${TELEGRAM_OSINT_POLL_TIMEOUT:-15}
+      IDENTITY_AUTO_ROTATE_DAYS: ${IDENTITY_AUTO_ROTATE_DAYS:-7}
+      IDENTITY_MAX_ACTIVE: ${IDENTITY_MAX_ACTIVE:-10}
       # --- Technology context: CVE (NVD) + MITRE ATT&CK + PoC-in-GitHub ---
       # WF14's enricher code node runs HERE, so this is the copy that decides
       # where cve_cache.db, the ATT&CK STIX bundle, the RAG index and the

@@ -2345,7 +2345,15 @@ def _check_certcreep_ru_source(failures: List[str]) -> None:
     if "source=_cc_source" not in code:
         failures.append("WF13: CertCreep collect() must be called with the selected source")
     helper = (REPO_ROOT / "scripts" / "certcreep.py").read_text(encoding="utf-8")
-    if 'if tld == "ru":' not in helper or 'return "precert"' not in helper:
+    # Contract: PRECERT_TLDS membership (expanded beyond .ru) forces precert.
+    # The old literal `if tld == "ru":` was replaced by the set; pin the set
+    # and require "ru" still be a quoted member so a later trim cannot drop it.
+    if (
+        "PRECERT_TLDS" not in helper
+        or '"ru"' not in helper
+        or 'if tld in PRECERT_TLDS:' not in helper
+        or 'return "precert"' not in helper
+    ):
         failures.append("scripts/certcreep.py: a .ru TLD must force source precert")
 
 

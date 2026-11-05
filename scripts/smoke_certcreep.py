@@ -18,7 +18,7 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def fake_request(url: str, timeout: int, retries: int, user_agent: str) -> Any:
+def fake_request(url: str, timeout: int, retries: int, user_agent: str, proxies=None, no_retry=()) -> Any:
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
     check(timeout == 9, "timeout must reach each backend")
@@ -56,7 +56,7 @@ def test_idn_and_cap() -> None:
 
 
 def test_failure_is_structured() -> None:
-    def broken_request(url: str, timeout: int, retries: int, user_agent: str) -> Any:
+    def broken_request(url: str, timeout: int, retries: int, user_agent: str, proxies=None, no_retry=()) -> Any:
         raise RuntimeError("offline")
 
     result = certcreep.collect("example.com", source="crtsh", request=broken_request)
@@ -79,7 +79,7 @@ def test_ru_tld_is_precert_only() -> None:
     check(certcreep.source_for_domain("example.com") == "crtsh", "an omitted source keeps the module default")
     seen: list[str] = []
 
-    def recording_request(url: str, timeout: int, retries: int, user_agent: str) -> Any:
+    def recording_request(url: str, timeout: int, retries: int, user_agent: str, proxies=None, no_retry=()) -> Any:
         seen.append(urlparse(url).netloc)
         return {"data": [{"cn": "vpn.example.ru", "issued": "2026-01-01", "expires": "2027-01-01", "issuer": "National CA"}]}
 

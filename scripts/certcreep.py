@@ -9,6 +9,15 @@ the inline CertKit call), so `certcreep` MUST be listed in
 N8N_RUNNERS_EXTERNAL_ALLOW in deployment/docker-compose.n8n.yml and
 deployment/n8n-task-runners.json, or the import fails the whole node with a
 security violation before line 1 runs.
+
+Upstream OOAFA/certcreep (post-initial) additions folded in here where they
+fit the library contract: crt.name as a third CT index, richer timestamp
+parsing, unicode-aware in-scope checks, host-shape filtering, and HTTP
+no-retry for hard 4xx from rate-limited indexes. SPOTTER-only surfaces kept:
+`source_for_domain` / PRECERT_TLDS, injectable `request` + proxies on
+`collect()`, and the `{domain, records, count, truncated, errors}` return
+shape. CLI `--source both` still means crt.sh + precert.ru (WF13); pass
+`crtname` or `all` to include crt.name.
 """
 
 from __future__ import annotations
@@ -28,11 +37,13 @@ from typing import Any, Callable, Iterable
 
 CRTSH_URL = "https://crt.sh/"
 PRECERT_URL = "https://precert.ru/results/ajax"
+CRTNAME_URL = "https://crt.name/v1/search"
 DEFAULT_TIMEOUT = 15
 DEFAULT_RETRIES = 3
 DEFAULT_LIMIT = 200
 DEFAULT_SOURCE = "crtsh"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+SOURCES = ("crtsh", "precert", "crtname")
 
 
 @dataclass
@@ -80,7 +91,7 @@ def source_for_domain(domain: str, requested: str | None = None) -> str:
     tld = host.rsplit(".", 1)[-1] if host else ""
     if tld in PRECERT_TLDS:
         return "precert"
-    if requested in ("crtsh", "precert", "both"):
+    if requested in ("crtsh", "precert", "crtname", "both", "all"):
         return requested
     return DEFAULT_SOURCE
 
@@ -93,15 +104,39 @@ def to_unicode_domain(value: str) -> str:
 
 
 def in_scope(name: str, apex: str) -> bool:
-    return name == apex or name.endswith("." + apex)
+    if name == apex or name.endswith("." + apex):
+        return True
+    u_name, u_apex = to_unicode_domain(name), to_unicode_domain(apex)
+    return u_name == u_apex or u_name.endswith("." + u_apex)
+
+
+def looks_like_host(part: str) -> bool:
+    if not part or "@" in part:
+        return False
+    if part.startswith("http://") or part.startswith("https://"):
+        return False
+    if " " in part:
+        return False
+    if part.replace(".", "").isdigit():
+        return False
+    return "." in part or part.endswith(".local") or part.endswith(".internal")
 
 
 def parse_timestamp(value: str) -> datetime | None:
     if not value:
         return None
-    for pattern in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    text = str(value).strip().rstrip("Z")
+    if not text:
+        return None
+    for pattern in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+    ):
         try:
-            return datetime.strptime(value[:19], pattern).replace(tzinfo=timezone.utc)
+            return datetime.strptime(text[:26], pattern).replace(tzinfo=timezone.utc)
         except ValueError:
             pass
     return None
@@ -162,7 +197,7 @@ def merge_rows(rows: Iterable[dict[str, Any]], apex: str, source: str) -> list[C
         for raw_name in _row_names(row):
             wildcard = raw_name.startswith("*.")
             name = to_ascii_domain(raw_name)
-            if "." not in name or not in_scope(name, apex):
+            if (not looks_like_host(name) and name != apex) or not in_scope(name, apex):
                 continue
             record = names.get(name)
             if record is None:
@@ -178,8 +213,22 @@ def merge_rows(rows: Iterable[dict[str, Any]], apex: str, source: str) -> list[C
     return sorted(names.values(), key=lambda record: (parse_timestamp(record.last_seen) or datetime.min.replace(tzinfo=timezone.utc), record.name), reverse=True)
 
 
-def request_json(url: str, timeout: int, retries: int, user_agent: str, proxies: dict[str, str] | None = None) -> Any:
-    request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json,text/plain,*/*"})
+def request_json(
+    url: str,
+    timeout: int,
+    retries: int,
+    user_agent: str,
+    proxies: dict[str, str] | None = None,
+    no_retry: tuple[int, ...] = (),
+) -> Any:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.8",
+        },
+    )
     proxy_handler = urllib.request.ProxyHandler(proxies) if proxies else urllib.request.ProxyHandler()
     opener = urllib.request.build_opener(proxy_handler, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     last_error: Exception | None = None
@@ -192,6 +241,8 @@ def request_json(url: str, timeout: int, retries: int, user_agent: str, proxies:
             return json.loads(payload)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as error:
             last_error = error
+            if isinstance(error, urllib.error.HTTPError) and error.code in no_retry:
+                raise
             if attempt + 1 < retries:
                 time.sleep(min(8.0, 1.5 * (attempt + 1)) + random.uniform(0.2, 1.0))
     raise RuntimeError(str(last_error))
@@ -223,16 +274,77 @@ def precert_rows(apex: str, request: Callable[..., Any], timeout: int, retries: 
     return [row for row in response if isinstance(row, dict)] if isinstance(response, list) else []
 
 
-def collect(domain: str, source: str = DEFAULT_SOURCE, limit: int = DEFAULT_LIMIT, timeout: int = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES, user_agent: str = DEFAULT_USER_AGENT, request: Callable[..., Any] = request_json, proxies: dict[str, str] | None = None) -> dict[str, Any]:
+def crtname_rows(apex: str, request: Callable[..., Any], timeout: int, retries: int, user_agent: str, proxies: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """crt.name /v1/search: one row per indexed name. Hard 4xx is not retried.
+
+    A sub-apex (corp.example.ru) may get HTTP 400 naming the eTLD+1; retry once
+    with that parent and let the in-scope filter narrow it. Free tier is 100
+    requests per IP per day.
+    """
+    no_retry = (400, 401, 403, 404, 429)
+
+    def fetch(q: str) -> Any:
+        params = urllib.parse.urlencode({"apex": q, "format": "json", "dates": 1})
+        return request(f"{CRTNAME_URL}?{params}", timeout, retries, user_agent, proxies, no_retry)
+
+    try:
+        data = fetch(apex)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            raise
+        body = exc.read().decode("utf-8", errors="replace")
+        marker = "eTLD+1 is "
+        if marker not in body:
+            raise ValueError(f"HTTP 400: {body.strip()[:120]}") from exc
+        parent = body.split(marker, 1)[1].strip().rstrip(")").split()[0]
+        if not parent or parent == apex:
+            raise ValueError(f"HTTP 400: {body.strip()[:120]}") from exc
+        data = fetch(parent)
+    rows: list[dict[str, Any]] = []
+    if not isinstance(data, list):
+        return rows
+    for item in data:
+        if not isinstance(item, dict) or not item.get("sub"):
+            continue
+        seen = str(item.get("first_seen") or "").rstrip("Z")
+        rows.append({"name_value": str(item["sub"]), "entry_timestamp": seen})
+    return rows
+
+
+def _backends_for_source(source: str) -> tuple[str, ...]:
+    """Map a SPOTTER/CLI source token to the backend loaders to run."""
+    if source == "both":
+        return ("crtsh", "precert")
+    if source == "all":
+        return SOURCES
+    if source in SOURCES:
+        return (source,)
+    return (DEFAULT_SOURCE,)
+
+
+def collect(
+    domain: str,
+    source: str = DEFAULT_SOURCE,
+    limit: int = DEFAULT_LIMIT,
+    timeout: int = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    request: Callable[..., Any] = request_json,
+    proxies: dict[str, str] | None = None,
+) -> dict[str, Any]:
     apex = to_ascii_domain(domain)
     if not apex or "." not in apex:
         raise ValueError("domain must be an apex domain")
     source = source_for_domain(apex, source)
+    loaders = {
+        "crtsh": crtsh_rows,
+        "precert": precert_rows,
+        "crtname": crtname_rows,
+    }
     records: dict[str, CertificateName] = {}
     errors: list[str] = []
-    for backend, loader in (("crtsh", crtsh_rows), ("precert", precert_rows)):
-        if source not in (backend, "both"):
-            continue
+    for backend in _backends_for_source(source):
+        loader = loaders[backend]
         try:
             for record in merge_rows(loader(apex, request, timeout, retries, user_agent, proxies), apex, backend):
                 existing = records.get(record.name)
@@ -261,8 +373,13 @@ def collect(domain: str, source: str = DEFAULT_SOURCE, limit: int = DEFAULT_LIMI
 def main() -> int:
     parser = argparse.ArgumentParser(description="Passive CT discovery for one apex domain")
     parser.add_argument("-d", "--domain", required=True)
-    parser.add_argument("--source", choices=("crtsh", "precert", "both"), default=DEFAULT_SOURCE,
-                        help="CT backend. A .ru TLD is forced to precert regardless of this flag.")
+    parser.add_argument(
+        "--source",
+        choices=("crtsh", "precert", "crtname", "both", "all"),
+        default=DEFAULT_SOURCE,
+        help="CT backend. A .ru TLD is forced to precert regardless of this flag. "
+             "'both' = crt.sh + precert.ru (WF13 default); 'all' also includes crt.name.",
+    )
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
