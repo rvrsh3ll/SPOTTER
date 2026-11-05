@@ -21,8 +21,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE="$ROOT_DIR/scripts/spotter_compose.sh"
 
 BOLD=$'\033[1m'; RESET=$'\033[0m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
+FAILURES=0
 pass() { echo "  ${GREEN}PASS${RESET}  $*"; }
-fail() { echo "  ${RED}FAIL${RESET}  $*"; }
+fail() { echo "  ${RED}FAIL${RESET}  $*"; ((FAILURES++)) || true; }
 warn() { echo "  ${YELLOW}WARN${RESET}  $*"; }
 info() { echo "        $*"; }
 
@@ -36,13 +37,11 @@ sys.stdout.write(spotter_env.get(os.environ["KEY"]) or "")
 ' 2>/dev/null || true
 }
 
-FAILURES=0
 check() {
     if eval "$2" >/dev/null 2>&1; then
         pass "$1"
     else
         fail "$1"
-        ((FAILURES++)) || true
     fi
 }
 
@@ -53,7 +52,14 @@ echo ""
 # ── 1. Container health ──────────────────────────────────────────────────────
 echo "${BOLD}── Container health ──${RESET}"
 if [[ -x "$COMPOSE" ]]; then
-    UNHEALTHY=$(sudo "$COMPOSE" ps --format json 2>/dev/null | python3 -c '
+    if ! command -v docker >/dev/null 2>&1; then
+        warn "docker not available — skipping container check"
+    else
+        PS_JSON=$(sudo "$COMPOSE" ps --format json 2>/dev/null) || PS_JSON=""
+        if [[ -z "$PS_JSON" ]]; then
+            fail "Could not list containers (compose error or none running)"
+        else
+            UNHEALTHY=$(printf '%s\n' "$PS_JSON" | python3 -c '
 import json, sys
 for line in sys.stdin:
     try:
@@ -62,10 +68,12 @@ for line in sys.stdin:
             print(d.get("Name","?"))
     except: pass
 ' 2>/dev/null || true)
-    if [[ -z "$UNHEALTHY" ]]; then
-        pass "All containers healthy"
-    else
-        fail "Unhealthy containers: $UNHEALTHY"
+            if [[ -z "$UNHEALTHY" ]]; then
+                pass "All containers healthy"
+            else
+                fail "Unhealthy containers: $UNHEALTHY"
+            fi
+        fi
     fi
 else
     warn "spotter_compose.sh not executable — skipping container check"
@@ -134,7 +142,12 @@ check "n8n editor reachable (https://n8n.spotter.localhost:5443)" \
 echo ""
 
 # ── 6. vLLM (if local tier) ─────────────────────────────────────────────────
-LLM_TIER=$(sudo sed -n 's/^SPOTTER_LLM_TIER=//p' "$ROOT_DIR/.env" 2>/dev/null | tail -1)
+if [[ ! -f "$ROOT_DIR/.env" ]]; then
+    fail ".env not found — cannot determine LLM tier"
+    LLM_TIER=""
+else
+    LLM_TIER=$(sudo sed -n 's/^SPOTTER_LLM_TIER=//p' "$ROOT_DIR/.env" 2>/dev/null | tail -1 || true)
+fi
 if [[ "$LLM_TIER" == "local-small" || "$LLM_TIER" == "local-large" ]]; then
     echo "${BOLD}── vLLM ──${RESET}"
     # vLLM itself is on 8000 and wants its API key; 8001 is llm-gateway,
