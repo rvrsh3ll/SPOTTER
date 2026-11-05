@@ -147,7 +147,12 @@ def main() -> int:
         if not pairs and not existing:
             continue
         merged = dict(existing)
-        merged.update(dict(pairs))
+        for key, value in pairs:
+            # An empty or placeholder .env value must never replace a real
+            # encrypted one; that is how a re-run blanked saved API keys.
+            if (not value or value.startswith("REPLACE_WITH_")) and existing.get(key):
+                continue
+            merged[key] = value
         pairs = sorted(merged.items())
         # Encrypt from a 0600 temp file inside secrets/ -- not /tmp, and never
         # by piping through a shell, so the plaintext never becomes an argv or
