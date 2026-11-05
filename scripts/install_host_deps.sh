@@ -103,10 +103,10 @@ PY
 }
 
 if have dnf; then
-    dnf install -y git curl jq openssl python3 age
+    dnf install -y git curl jq openssl python3 python3-requests age
 elif have apt-get; then
     apt-get update
-    apt-get install -y git curl jq openssl python3 age
+    apt-get install -y git curl jq openssl python3 python3-requests age
 else
     echo "install_host_deps: no dnf or apt-get" >&2
     exit 1

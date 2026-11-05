@@ -9,6 +9,41 @@ configuration details, not minimums validated by a clean-host benchmark.
 
 ---
 
+## Quickstart — zero to running in 5 commands
+
+```bash
+# 1. Clone and enter the repo
+git clone <spotter-repo-url> spotter && cd spotter
+
+# 2. Generate secrets (creates .env + encrypted tiers)
+sudo deployment/setup-secrets.sh
+
+# 3. Edit .env — set SPOTTER_LLM_TIER (local-large|local-small|remote|none)
+#    For local-small, also set VLLM_MODEL and VLLM_MAX_MODEL_LEN
+sudo nano .env
+
+# 4. Bootstrap (interactive — asks for operator, Flowsint, and OWUI credentials)
+sudo scripts/bootstrap.sh
+
+# 5. Verify
+python3 scripts/smoke_deploy.py --user <your-operator-name>
+scripts/smoke_postinstall.sh
+```
+
+Open **https://spotter.localhost:5443** and log in. Done.
+
+**Optional but recommended** — enable automatic Flowsint token rotation:
+```bash
+sudo scripts/install_flowsint_rotation.sh
+```
+
+**No GPU?** Set `SPOTTER_LLM_TIER=remote` or `none` in step 3. Everything except
+AI analysis and the Prompt tab works without a model.
+
+**First time seeing 4 logins?** See [§6 — The four separate logins](#6-the-four-separate-logins).
+
+---
+
 ## 1. What you need
 
 **A Linux host** with:
@@ -32,9 +67,9 @@ is working.
 VRAM needed by the selected model and context. These figures are planning
 guidance, not a measured minimum for every workload.
 
-You do **not** need any of the API keys (Shodan, Flare, FOFA, SerpAPI, Tavily,
-GrayhatWarfare, NVD) or a C2 teamserver to stand the stack up. Each one enables
-one feature and is inert when absent.
+You do **not** need any of the API keys (Shodan, Censys, BinaryEdge, Flare, FOFA,
+SerpAPI, Tavily, GrayhatWarfare, NVD) or a C2 teamserver to stand the stack up.
+Each one enables one feature and is inert when absent.
 
 ---
 
@@ -143,9 +178,12 @@ what it already did. It will:
 
 ```bash
 python3 scripts/smoke_deploy.py --user <your-operator-name>
+scripts/smoke_postinstall.sh
 ```
 
-Every line should read `PASS`. The `*.localhost` hostnames below resolve to `127.0.0.1` on
+Every line should read `PASS`. The post-install script checks all 4 login layers (SPOTTER portal, Flowsint API, Open WebUI, n8n), container health, vLLM model status (if local tier), and whether the Flowsint token rotation timer is active.
+
+The `*.localhost` hostnames below resolve to `127.0.0.1` on
 their own in any current browser/OS (RFC 6761) — no `/etc/hosts` edit needed. Open
 **https://spotter.localhost:5443** and log in with the operator account from step 4. The
 browser will warn once per hostname until Caddy's internal root CA is trusted:
@@ -206,6 +244,37 @@ Two things that are not obvious:
 
 ---
 
+## 7b. Automatic Flowsint token rotation (recommended)
+
+Flowsint's JWT token expires every ~60 hours. Without rotation, everything
+Flowsint-related returns 401 after about 2.5 days. The rotation script
+(`scripts/rotate_flowsint_token.py`) can run automatically via a systemd timer:
+
+```bash
+sudo scripts/install_flowsint_rotation.sh
+```
+
+This installs a systemd timer that checks the token every 12 hours and rotates
+it if it expires within 24 hours. `bootstrap.sh` offers to install it, and stores
+the Flowsint email (`FLOWSINT_ADMIN_EMAIL`, `.env`) and password
+(`FLOWSINT_ADMIN_PASSWORD`, machine tier) it needs. `/etc/spotter/flowsint-admin.env`
+(root-only, mode 600) can override either one.
+
+Check status:
+
+```bash
+systemctl list-timers spotter-flowsint-rotation.timer
+journalctl -u spotter-flowsint-rotation.service
+```
+
+Without the timer, you must rotate manually when you see 401s:
+
+```bash
+sudo python3 scripts/rotate_flowsint_token.py --force
+```
+
+---
+
 ## 8. Troubleshooting, by symptom
 
 | What you see | What it is |
@@ -247,3 +316,152 @@ Two practical points:
   archive that contains the encrypted tiers; a backup holding both protects nothing.
 - **`clear-graph` is not a dry run**, and there is no Neo4j backup on a default
   install. Take your own before you experiment.
+
+---
+
+## 10. Teardown — securely uninstalling SPOTTER
+
+To completely remove SPOTTER from a host, run these steps in order. **This is destructive and irreversible.**
+
+### Stop and remove containers
+
+```bash
+# Stop all SPOTTER containers
+sudo scripts/spotter_compose.sh down
+
+# Remove all containers, networks, and images
+sudo docker compose -p spotter -f deployment/docker-compose.n8n.yml down --volumes --remove-orphans
+sudo docker volume rm spotter_vllm_model_cache 2>/dev/null || true
+```
+
+### Remove the systemd timer (if installed)
+
+```bash
+sudo systemctl disable --now spotter-flowsint-rotation.timer
+sudo rm /etc/systemd/system/spotter-flowsint-rotation.{service,timer}
+sudo systemctl daemon-reload
+```
+
+### Remove data directories
+
+```bash
+# Engagement data (Neo4j, Postgres, screenshots, ingest staging)
+sudo rm -rf data/
+
+# Encrypted secrets (SOPS tiers)
+sudo rm -rf secrets/
+
+# Vendor checkout (Flowsint)
+sudo rm -rf vendor/
+
+# Cache and artifacts
+sudo rm -rf .spotter-cache/ screenshots/ sharphound-drops/ deployment/auth-data/
+
+# Environment config
+sudo rm -f .env
+```
+
+### Remove the Caddy CA certificate (if trusted system-wide)
+
+```bash
+# On Nobara/Fedora:
+sudo rm /etc/pki/ca-trust/source/anchors/spotter-caddy-root.crt
+sudo update-ca-trust
+
+# On Debian/Ubuntu:
+# sudo rm /usr/local/share/ca-certificates/spotter-caddy-root.crt
+# sudo update-ca-certificates
+```
+
+### Remove the SOPS age key (⚠️ back up first if you plan to reinstall)
+
+```bash
+# The age key decrypts secrets/*.sops.env. Without it, encrypted secrets are unrecoverable.
+# Back up before deleting if you might reinstall or migrate:
+# cp ~/.config/sops/age/keys.txt ~/age-key-backup.txt
+
+rm -f ~/.config/sops/age/keys.txt
+```
+
+### Remove the repository (optional)
+
+```bash
+cd ..
+sudo rm -rf spotter/
+```
+
+### Verification
+
+After teardown, confirm nothing remains:
+
+```bash
+sudo docker ps -a | grep spotter    # should be empty
+sudo docker volume ls | grep spotter  # should be empty
+ls -la ~/.config/sops/age/          # keys.txt should be gone
+```
+
+**What this does NOT remove:**
+- Host packages (Docker, SOPS, age, NVIDIA drivers) — uninstall via your package manager
+- Browser localStorage/cache for `*.localhost:5443` — clear manually
+- Any backups you made (age key, database dumps)
+- Full-disk encryption keys (if you set up FDE)
+
+---
+
+## 11. Trained model (optional)
+
+SPOTTER includes a fine-tuned LoRA adapter for Qwen2.5-7B-Instruct that improves performance on OSINT analysis, AD attack paths, and SPOTTER tool-calling. The adapter is distributed as a release artifact, not in the git repo.
+
+### Install the trained model
+
+```bash
+scripts/install_trained_model.sh
+```
+
+This downloads the LoRA adapter (~63MB) from the latest GitHub release and installs it to `models/spotter-qwen25-7b-lora/`.
+
+### Enable the trained model
+
+After installation, update `.env`:
+
+```bash
+sudo nano .env
+```
+
+Set:
+```
+VLLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+VLLM_QUANTIZATION=fp8
+VLLM_GPU_MEMORY_UTILIZATION=0.92
+VLLM_ENABLE_LORA=true
+VLLM_LORA_MODULES=/home/user/SPOTTER/models/spotter-qwen25-7b-lora
+```
+
+Then recreate vLLM:
+
+```bash
+sudo scripts/spotter_compose.sh up -d --no-deps --force-recreate vllm
+```
+
+The compose file consumes both variables (wired 2026-10-23): the adapter directory is bind-mounted read-only at the same absolute path, and vLLM serves the module under its **basename** — `spotter-qwen25-7b-lora` — which is the model id to enter in the Prompt tab's MODEL field (LLM CONFIG) or select in Open WebUI. `VLLM_ENABLE_LORA` must be exactly `true` (or `1`/`yes`); any other value, including `false`, leaves vLLM's command line untouched.
+
+### Serving recipe (verified 2026-10-24 on a 12 GB RTX 5070)
+
+The adapter serves on the **fp16 `Qwen/Qwen2.5-7B-Instruct` base with on-the-fly fp8 quantization** (the `.env` block above): weights ~7.6 GB, leaving a 36,288-token KV cache — 1.11x concurrency at the 32768 window. vLLM then serves two model ids: the base and **`spotter-qwen25-7b-lora`** (the adapter directory's basename), which is what the Prompt tab's MODEL field selects. Plain fp16 does not fit the card; fp8 is what makes base + adapter + 32k window fit together.
+
+**The trap that misdiagnosed this for a day:** invoking `python3 -m vllm.entrypoints.openai.api_server <model>` directly — as this compose file did until 2026-10-24 — parses the positional into `model_tag`, and only the `vllm serve` subcommand copies it onto `model` (`entrypoints/cli/serve.py`). The engine silently falls back to vLLM's built-in default **`Qwen/Qwen3-0.6B`**, comes up **healthy**, and serves that. Every LoRA load then failed with `add_lora ... size of tensor a (1024) must match tensor b (3584)`, which reads like an adapter/quantization incompatibility but is just the 0.6B default's hidden size meeting the adapter's. The compose service now execs `vllm serve`; if the engine-init log line ever names a model you did not configure, check this first.
+
+### What the model knows
+
+See [TRAINING_QUERIES.md](TRAINING_QUERIES.md) for an operator playbook of the queries and scenarios the trained model handles well.
+
+The adapter was trained on 64 pairs covering:
+- **OSINT methodology** — breach analysis, domain recon, social media enrichment, certificate transparency
+- **AD attack paths** — kerberoasting, AS-REP roasting, delegation abuse, ADCS escalation, DCSync
+- **SPOTTER tool-calling** — correct tool names, parameter shapes, campaign scoping
+
+Training: Unsloth QLoRA, rank 16, 4-bit, 15 epochs, final loss 0.02088. Base model: Qwen2.5-7B-Instruct.
+
+### Without the trained model
+
+SPOTTER works fine with the base Qwen2.5-7B-Instruct (or any compatible model). The trained adapter is an optional enhancement. If you skip it, the LLM will still work but may be less accurate on SPOTTER-specific tasks and tool-calling.
