@@ -26,6 +26,16 @@ fail() { echo "  ${RED}FAIL${RESET}  $*"; }
 warn() { echo "  ${YELLOW}WARN${RESET}  $*"; }
 info() { echo "        $*"; }
 
+# One value from .env or the encrypted tiers, through spotter_env.get().
+env_get() {
+    KEY="$1" ROOTD="$ROOT_DIR" sudo --preserve-env=KEY,ROOTD python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["ROOTD"], "scripts"))
+import spotter_env
+sys.stdout.write(spotter_env.get(os.environ["KEY"]) or "")
+' 2>/dev/null || true
+}
+
 FAILURES=0
 check() {
     if eval "$2" >/dev/null 2>&1; then
@@ -71,23 +81,19 @@ echo ""
 # ── 3. Flowsint API ──────────────────────────────────────────────────────────
 echo "${BOLD}── Flowsint API ──${RESET}"
 
-# Get token from encrypted tier
-FLOWSINT_KEY=""
-if [[ -d "$ROOT_DIR/secrets" ]] && command -v sops >/dev/null 2>&1; then
-    FLOWSINT_KEY=$(sudo python3 "$ROOT_DIR/scripts/spotter_env.py" --get FLOWSINT_API_KEY 2>/dev/null || true)
-fi
-if [[ -z "$FLOWSINT_KEY" ]]; then
-    FLOWSINT_KEY=$(sudo sed -n 's/^FLOWSINT_API_KEY=//p' "$ROOT_DIR/.env" 2>/dev/null | tail -1)
-fi
+# Token from .env or the encrypted tier. Exported, not interpolated into the
+# check strings, so it never ends up inside an eval'd command line.
+FLOWSINT_KEY="$(env_get FLOWSINT_API_KEY)"
+export FLOWSINT_KEY
 
 if [[ -n "$FLOWSINT_KEY" ]]; then
     check "Flowsint API responds to auth test" \
-        "curl -sf -H 'Authorization: Bearer $FLOWSINT_KEY' http://127.0.0.1:5001/api/auth/test"
+        'curl -sf -H "Authorization: Bearer $FLOWSINT_KEY" http://127.0.0.1:5001/api/auth/test'
 
     # Token expiry check
     EXPIRY=$(python3 -c "
-import base64, json, sys
-token = '$FLOWSINT_KEY'
+import base64, json, os, sys
+token = os.environ['FLOWSINT_KEY']
 try:
     payload = token.split('.')[1]
     payload += '=' * (4 - len(payload) % 4)
@@ -131,9 +137,18 @@ echo ""
 LLM_TIER=$(sudo sed -n 's/^SPOTTER_LLM_TIER=//p' "$ROOT_DIR/.env" 2>/dev/null | tail -1)
 if [[ "$LLM_TIER" == "local-small" || "$LLM_TIER" == "local-large" ]]; then
     echo "${BOLD}── vLLM ──${RESET}"
-    check "vLLM /v1/models responds" \
-        'curl -sf http://127.0.0.1:8001/v1/models'
-    MODEL_INFO=$(curl -sf http://127.0.0.1:8001/v1/models 2>/dev/null | python3 -c '
+    # vLLM itself is on 8000 and wants its API key; 8001 is llm-gateway,
+    # which does not serve /v1/models.
+    VLLM_API_KEY="$(env_get VLLM_API_KEY)"
+    export VLLM_API_KEY
+    VLLM_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' spotter-vllm 2>/dev/null || true)
+    if [[ "$VLLM_HEALTH" == "starting" ]]; then
+        warn "vLLM is still starting (model may be downloading) — watch: docker logs -f spotter-vllm"
+    else
+        check "vLLM /v1/models responds" \
+            'curl -sf -H "Authorization: Bearer $VLLM_API_KEY" http://127.0.0.1:8000/v1/models'
+    fi
+    MODEL_INFO=$(curl -sf -H "Authorization: Bearer $VLLM_API_KEY" http://127.0.0.1:8000/v1/models 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)

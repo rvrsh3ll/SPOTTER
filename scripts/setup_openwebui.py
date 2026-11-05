@@ -386,14 +386,24 @@ def main():
     global MODEL_ID
     ap = argparse.ArgumentParser(description="Install SPOTTER tools into Open WebUI")
     ap.add_argument("--url",      default="http://localhost:3000", help="Open WebUI base URL")
-    ap.add_argument("--email",    required=True,  help="Admin account email")
-    ap.add_argument("--password", required=True,  help="Admin account password")
+    ap.add_argument("--email",    help="Admin account email (default: OWUI_ADMIN_EMAIL)")
+    ap.add_argument("--password", help="Admin account password (default: OWUI_ADMIN_PASSWORD; "
+                                       "prefer that over this flag, which is visible in ps)")
     ap.add_argument("--model",    default=MODEL_ID,
                     help=f"vLLM/OpenAI-compatible model ID to configure (default: {MODEL_ID})")
     ap.add_argument("--prune", action="store_true",
                     help="delete workspace model entries that no backend serves any more "
                          "(the leftovers of a backend swap)")
     args = ap.parse_args()
+
+    if not args.email or not args.password:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import spotter_env
+        args.email = args.email or spotter_env.get("OWUI_ADMIN_EMAIL")
+        args.password = args.password or spotter_env.get("OWUI_ADMIN_PASSWORD")
+        if not args.email or not args.password:
+            ap.error("OWUI_ADMIN_EMAIL / OWUI_ADMIN_PASSWORD are not set; "
+                     "pass --email/--password or re-run scripts/bootstrap.sh")
 
     MODEL_ID = args.model
 

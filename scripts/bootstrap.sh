@@ -86,6 +86,16 @@ if not done:
 path.write_text(''.join(out))
 PY
 }
+# The real value, for the few callers that must use a secret rather than test
+# it. Goes through spotter_env so it works whether the key is in .env or a tier.
+secret_value() {
+    KEY="$1" ROOTD="$ROOT_DIR" python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["ROOTD"], "scripts"))
+import spotter_env
+sys.stdout.write(spotter_env.get(os.environ["KEY"]) or "")
+'
+}
 is_unset() {
     local v; v="$(env_value "$1")"
     [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" == /absolute/path/to/* ]]
@@ -264,11 +274,21 @@ if is_unset FLOWSINT_API_KEY; then
     [[ -n "$TOKEN" ]] || die "could not mint a Flowsint token — check the password"
     env_set FLOWSINT_API_KEY "$TOKEN"
     ok "FLOWSINT_API_KEY stored (encrypted tier if configured, else .env)"
+    # Kept for scripts/rotate_flowsint_token.py, which re-mints the token.
+    env_set FLOWSINT_ADMIN_EMAIL "$FL_EMAIL"
+    env_set FLOWSINT_ADMIN_PASSWORD "$FL_PASS"
     warn "This token EXPIRES (Flowsint's default is about 2.5 days). When the stack"
     warn "  starts answering 401 everywhere at once, that is what happened:"
     warn "  re-run scripts/refresh_flowsint_token.py"
+    if command -v systemctl >/dev/null 2>&1; then
+        read -r -p "        Enable automatic Flowsint token rotation (systemd timer)? [Y/n] " ans
+        if [[ ! "$ans" =~ ^[Nn] ]]; then
+            "$ROOT_DIR/scripts/install_flowsint_rotation.sh" \
+                || warn "timer install failed — re-run: sudo scripts/install_flowsint_rotation.sh"
+        fi
+    fi
 else
-    TOKEN="$(env_value FLOWSINT_API_KEY)"
+    TOKEN="$(secret_value FLOWSINT_API_KEY)"
     ok "FLOWSINT_API_KEY already set"
 fi
 
@@ -338,19 +358,18 @@ if is_unset OWUI_ADMIN_EMAIL; then
     env_set OWUI_ADMIN_EMAIL "$OW_EMAIL"
     env_set OWUI_ADMIN_PASSWORD "$OW_PASS"
 else
-    OW_EMAIL="$(env_value OWUI_ADMIN_EMAIL)"; OW_PASS="$(env_value OWUI_ADMIN_PASSWORD)"
     ok "OWUI_ADMIN_EMAIL already recorded"
 fi
 
 step "Installing Open WebUI tools"
-if python3 "$ROOT_DIR/scripts/setup_openwebui.py" --url "$OWUI" \
-        --email "$OW_EMAIL" --password "$OW_PASS" >/dev/null 2>&1; then
+# No --email/--password: the script reads OWUI_ADMIN_* itself, which keeps the
+# password off argv and works on re-runs where only the encrypted tier has it.
+if python3 "$ROOT_DIR/scripts/setup_openwebui.py" --url "$OWUI" >/dev/null 2>&1; then
     ok "tools and the spotter model profile installed"
 else
     warn "setup_openwebui.py failed — usually vLLM is still loading its weights."
     warn "  Watch it with: docker logs -f spotter-vllm"
-    warn "  Then re-run:   python3 scripts/setup_openwebui.py --url $OWUI \\"
-    warn "                   --email \"\$OWUI_ADMIN_EMAIL\" --password \"\$OWUI_ADMIN_PASSWORD\""
+    warn "  Then re-run:   sudo python3 scripts/setup_openwebui.py --url $OWUI"
 fi
 
 # ── 12. verify ───────────────────────────────────────────────────────────────
@@ -372,5 +391,6 @@ echo ""
 echo "  Trust Caddy's internal CA to stop the browser warning per hostname:"
 echo "    docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt"
 echo ""
-echo "  Verify:  python3 scripts/smoke_deploy.py"
+echo "  Verify:  sudo python3 scripts/smoke_deploy.py --user ${SPOTTER_OP:-<operator>}"
+echo "           sudo scripts/smoke_postinstall.sh"
 echo "  Docs:    INSTALL.md, then README.md"
