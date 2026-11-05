@@ -4,8 +4,8 @@
 # Usage:
 #   sudo scripts/install_flowsint_rotation.sh
 #
-# This installs the systemd unit and timer, creates /etc/spotter/flowsint-admin.env
-# if it doesn't exist (where you put FLOWSINT_ADMIN_PASSWORD), and enables the timer.
+# This installs the systemd unit and timer and enables it. Credentials come from
+# what bootstrap.sh stored; /etc/spotter/flowsint-admin.env can override them.
 
 set -euo pipefail
 
@@ -21,16 +21,39 @@ echo "==> Installing Flowsint token rotation timer"
 mkdir -p "$CONF_DIR"
 chmod 700 "$CONF_DIR"
 
-# Create env file template if it doesn't exist
+# bootstrap.sh stores FLOWSINT_ADMIN_EMAIL (.env) and FLOWSINT_ADMIN_PASSWORD
+# (machine tier), and the rotation script reads them from there. The env file
+# below is only an override for installs that predate that.
+resolve() {
+    KEY="$1" ROOTD="$ROOT_DIR" python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["ROOTD"], "scripts"))
+import spotter_env
+v = (spotter_env.get(os.environ["KEY"]) or "").strip()
+print("set" if v and v != "CHANGE_ME" else "missing")
+' 2>/dev/null || echo missing
+}
+env_file_value() { sed -n "s/^$1=//p" "$CONF_DIR/flowsint-admin.env" 2>/dev/null | tail -1; }
+
 if [[ ! -f "$CONF_DIR/flowsint-admin.env" ]]; then
     cat > "$CONF_DIR/flowsint-admin.env" <<'EOF'
-# Flowsint admin password for token rotation
-# Get this from your Flowsint admin account or .env FLOWSINT_ADMIN_PASSWORD
-FLOWSINT_ADMIN_PASSWORD=CHANGE_ME
+# Optional overrides for Flowsint token rotation. Leave empty to use the values
+# bootstrap.sh stored (FLOWSINT_ADMIN_EMAIL in .env, FLOWSINT_ADMIN_PASSWORD in
+# secrets/machine.sops.env).
+FLOWSINT_ADMIN_EMAIL=
+FLOWSINT_ADMIN_PASSWORD=
 EOF
     chmod 600 "$CONF_DIR/flowsint-admin.env"
-    echo "    Created $CONF_DIR/flowsint-admin.env — edit it to set FLOWSINT_ADMIN_PASSWORD"
 fi
+
+for key in FLOWSINT_ADMIN_EMAIL FLOWSINT_ADMIN_PASSWORD; do
+    v="$(env_file_value "$key")"
+    if [[ "$v" == "CHANGE_ME" ]] || { [[ -z "$v" ]] && [[ "$(resolve "$key")" != "set" ]]; }; then
+        echo "ERROR: $key is not set (or still CHANGE_ME)." >&2
+        echo "       Re-run scripts/bootstrap.sh, or set it in $CONF_DIR/flowsint-admin.env" >&2
+        exit 1
+    fi
+done
 
 # Install systemd units (point WorkingDirectory to actual SPOTTER checkout)
 sed "s|/home/user/SPOTTER|$ROOT_DIR|g" "$ROOT_DIR/deployment/spotter-flowsint-rotation.service" \

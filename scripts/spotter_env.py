@@ -61,6 +61,7 @@ MACHINE = [
     "TUNNEL_API_TOKEN",
     "FLOWSINT_API_KEY",
     "OWUI_ADMIN_PASSWORD",
+    "FLOWSINT_ADMIN_PASSWORD",
 ]
 
 # Third-party accounts. Billable and attributable, but not engagement-specific,

@@ -19,8 +19,9 @@ Usage:
     python3 scripts/rotate_flowsint_token.py --check
 
 Environment:
-    FLOWSINT_ADMIN_EMAIL    Flowsint admin email (default: rvrsh3ll@gmail.com)
-    FLOWSINT_ADMIN_PASSWORD Flowsint admin password (REQUIRED)
+    FLOWSINT_ADMIN_EMAIL    Flowsint admin email (REQUIRED; bootstrap.sh records it)
+    FLOWSINT_ADMIN_PASSWORD Flowsint admin password (REQUIRED; bootstrap.sh stores it
+                            in the machine tier)
     FLOWSINT_API_URL        Flowsint API URL (default: http://127.0.0.1:5001)
 """
 
@@ -32,10 +33,28 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import spotter_env  # noqa: E402
+
+PLACEHOLDERS = {"CHANGE_ME", "<set-in-encrypted-tier>"}
+
+
+def _real(value: str | None) -> str:
+    """Treat empty and template placeholders as unset."""
+    value = (value or "").strip()
+    if value in PLACEHOLDERS or value.startswith("REPLACE_WITH_"):
+        return ""
+    return value
+
+
+def _sudo() -> list[str]:
+    return [] if os.geteuid() == 0 else ["sudo"]
 
 
 def decode_jwt_payload(token: str) -> dict:
@@ -62,32 +81,22 @@ def get_token_expiration(token: str) -> datetime:
 
 
 def get_current_token() -> str | None:
-    """Get current FLOWSINT_API_KEY from SOPS-encrypted tier."""
+    """Get current FLOWSINT_API_KEY from .env or the encrypted tiers."""
     try:
-        result = subprocess.run(
-            ["sudo", "sops", "-d", "secrets/machine.sops.env"],
-            cwd="/home/user/SPOTTER",
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in result.stdout.splitlines():
-            if line.startswith("FLOWSINT_API_KEY="):
-                return line.split("=", 1)[1].strip()
-    except subprocess.CalledProcessError:
-        pass
-    return None
+        return _real(spotter_env.load().get("FLOWSINT_API_KEY")) or None
+    except Exception:
+        return None
 
 
 def mint_new_token(api_url: str, email: str, password: str) -> str:
     """Mint new Flowsint JWT token via /api/auth/token."""
-    resp = requests.post(
-        f"{api_url}/api/auth/token",
-        data={"username": email, "password": password},
-        timeout=30,
+    body = urllib.parse.urlencode({"username": email, "password": password}).encode()
+    req = urllib.request.Request(
+        f"{api_url}/api/auth/token", data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    resp.raise_for_status()
-    data = resp.json()
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode())
     token = data.get("access_token") or data.get("token")
     if not token:
         raise RuntimeError(f"No token in response: {data}")
@@ -96,33 +105,15 @@ def mint_new_token(api_url: str, email: str, password: str) -> str:
 
 def store_token_in_sops(token: str) -> None:
     """Store token in SOPS-encrypted machine tier."""
-    # Use spotter_secret.py to store in machine tier
-    result = subprocess.run(
-        [
-            "sudo",
-            "python3",
-            "scripts/spotter_secret.py",
-            "set",
-            "--stdin",
-            "--tier",
-            "machine",
-            "FLOWSINT_API_KEY",
-        ],
-        input=token,
-        cwd="/home/user/SPOTTER",
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    print(result.stdout)
+    path = spotter_env.set_value("FLOWSINT_API_KEY", token)
+    print(f"wrote FLOWSINT_API_KEY to {path}")
 
 
 def recreate_containers() -> None:
     """Recreate n8n, task-runners, and open-webui containers."""
     result = subprocess.run(
-        [
-            "sudo",
-            "scripts/spotter_compose.sh",
+        _sudo() + [
+            str(ROOT / "scripts" / "spotter_compose.sh"),
             "up",
             "-d",
             "--no-deps",
@@ -131,7 +122,7 @@ def recreate_containers() -> None:
             "task-runners",
             "open-webui",
         ],
-        cwd="/home/user/SPOTTER",
+        cwd=str(ROOT),
         capture_output=True,
         text=True,
         check=True,
@@ -166,9 +157,18 @@ def main():
     parser.add_argument("--check", action="store_true", help="Check expiration only (no rotation)")
     parser.add_argument("--warn-hours", type=int, default=24, help="Warn if token expires within this many hours (default: 24)")
     parser.add_argument("--api-url", default=os.environ.get("FLOWSINT_API_URL", "http://127.0.0.1:5001"))
-    parser.add_argument("--email", default=os.environ.get("FLOWSINT_ADMIN_EMAIL", "rvrsh3ll@gmail.com"))
+    parser.add_argument("--email", default=os.environ.get("FLOWSINT_ADMIN_EMAIL", ""))
     parser.add_argument("--password", default=os.environ.get("FLOWSINT_ADMIN_PASSWORD", ""))
     args = parser.parse_args()
+
+    def _lookup(key: str) -> str:
+        try:
+            return _real(spotter_env.load().get(key))
+        except Exception:
+            return ""
+
+    args.email = _real(args.email) or _lookup("FLOWSINT_ADMIN_EMAIL")
+    args.password = _real(args.password) or _lookup("FLOWSINT_ADMIN_PASSWORD")
     
     # Get current token
     current_token = get_current_token()
@@ -190,9 +190,9 @@ def main():
             sys.exit(0)
     
     # Check if we have credentials
-    if not args.password:
-        print("❌ FLOWSINT_ADMIN_PASSWORD not set")
-        print("Set it via environment variable or --password flag")
+    if not args.email or not args.password:
+        print("❌ FLOWSINT_ADMIN_EMAIL / FLOWSINT_ADMIN_PASSWORD not set (or still CHANGE_ME)")
+        print("Re-run scripts/bootstrap.sh, or set them in /etc/spotter/flowsint-admin.env")
         sys.exit(1)
     
     # Mint new token

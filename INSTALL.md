@@ -255,8 +255,10 @@ sudo scripts/install_flowsint_rotation.sh
 ```
 
 This installs a systemd timer that checks the token every 12 hours and rotates
-it if it expires within 24 hours. It creates `/etc/spotter/flowsint-admin.env`
-where you set `FLOWSINT_ADMIN_PASSWORD` (root-only, mode 600).
+it if it expires within 24 hours. `bootstrap.sh` offers to install it, and stores
+the Flowsint email (`FLOWSINT_ADMIN_EMAIL`, `.env`) and password
+(`FLOWSINT_ADMIN_PASSWORD`, machine tier) it needs. `/etc/spotter/flowsint-admin.env`
+(root-only, mode 600) can override either one.
 
 Check status:
 
