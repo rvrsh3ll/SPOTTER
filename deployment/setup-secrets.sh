@@ -50,7 +50,11 @@ env_has_key() { grep -q "^$1=" "$ENV_FILE" 2>/dev/null; }
 # .env grew by a block per bootstrap. Only the append path wants this; fill() and
 # needs_value() must keep ignoring commented lines, or a key commented out on
 # purpose could never be filled.
-env_mentions_key() { grep -qE "^[[:space:]]*#?[[:space:]]*$1=" "$ENV_FILE" 2>/dev/null; }
+# It must also see the split pointer lines (`# KEY -> secrets/<tier>.sops.env`),
+# otherwise every key already moved to a tier is re-appended -- live and empty
+# for keys whose example value is blank, which the merge then encrypted over the
+# real value.
+env_mentions_key() { grep -qE "^[[:space:]]*#?[[:space:]]*$1([[:space:]]*=|[[:space:]]+->)" "$ENV_FILE" 2>/dev/null; }
 
 # A key that is resolvable from an ENCRYPTED TIER must not be regenerated.
 #
