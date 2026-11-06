@@ -188,7 +188,8 @@ their own in any current browser/OS (RFC 6761) — no `/etc/hosts` edit needed. 
 **https://spotter.localhost:5443** and log in with the operator account from step 4. The
 browser will warn once per hostname until Caddy's internal root CA is trusted:
 ```bash
-docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt
+sudo ./spotter trust-cert
+# or: sudo scripts/trust_caddy_cert.sh
 ```
 
 | Port | What |
@@ -228,10 +229,18 @@ Always through the launcher, which supplies the project name, env file, profiles
 and absolute paths that the stack needs and that are easy to get wrong by hand:
 
 ```bash
-scripts/spotter_compose.sh ps
-scripts/spotter_compose.sh up -d
-scripts/spotter_compose.sh logs -f n8n
+./spotter status
+./spotter up
+./spotter logs -f n8n
+
+# Equivalent long form (also used by ./spotter under the hood):
+# scripts/spotter_compose.sh ps
+# scripts/spotter_compose.sh up -d
+# scripts/spotter_compose.sh logs -f n8n
 ```
+
+`./spotter` is a thin sudo wrapper for common actions (`up`, `down`, `status`,
+`logs`, `smoke`, `trust-cert`, `bootstrap`, and `compose …` pass-through).
 
 Two things that are not obvious:
 
@@ -363,12 +372,14 @@ sudo rm -f .env
 
 ### Remove the Caddy CA certificate (if trusted system-wide)
 
+Installed by `sudo ./spotter trust-cert` (or `scripts/trust_caddy_cert.sh`):
+
 ```bash
 # On Nobara/Fedora:
 sudo rm /etc/pki/ca-trust/source/anchors/spotter-caddy-root.crt
 sudo update-ca-trust
 
-# On Debian/Ubuntu:
+# On Debian/Ubuntu/Kali:
 # sudo rm /usr/local/share/ca-certificates/spotter-caddy-root.crt
 # sudo update-ca-certificates
 ```
@@ -415,10 +426,18 @@ SPOTTER includes a fine-tuned LoRA adapter for Qwen2.5-7B-Instruct that improves
 ### Install the trained model
 
 ```bash
-scripts/install_trained_model.sh
+# When a release asset exists, or you have a tarball/URL:
+scripts/install_trained_model.sh /path/to/spotter-model-v1.tar.gz
+# scripts/install_trained_model.sh https://…/spotter-model-v1.tar.gz
+
+# Or copy an adapter directory you already built:
+# mkdir -p models && cp -a /path/to/lora models/spotter-qwen25-7b-lora
 ```
 
-This downloads the LoRA adapter (~63MB) from the latest GitHub release and installs it to `models/spotter-qwen25-7b-lora/`.
+No GitHub release currently publishes `spotter-model-v1.tar.gz`. Running the
+script with no arguments exits with a clear message instead of hitting a 404.
+When you have a tarball or adapter directory, the script installs it to
+`models/spotter-qwen25-7b-lora/`.
 
 ### Enable the trained model
 

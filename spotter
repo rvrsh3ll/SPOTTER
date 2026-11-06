@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# SPOTTER convenience launcher — common actions without remembering long paths.
+#
+#   ./spotter up
+#   ./spotter down
+#   ./spotter status
+#   ./spotter logs [-f] [service]
+#   ./spotter smoke
+#   ./spotter trust-cert
+#   ./spotter bootstrap
+#   ./spotter compose <docker-compose-args...>
+#
+# Compose actions that need the decrypted-secrets ramfs are run via sudo when
+# this process is not already root.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE="$ROOT_DIR/scripts/spotter_compose.sh"
+
+run_root() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: ./spotter <command> [args...]
+
+Commands:
+  up [args...]       Start (or update) the stack: spotter_compose.sh up -d
+  down [args...]     Stop the stack: spotter_compose.sh down
+  status | ps        Show compose status
+  logs [args...]     Tail logs (pass-through to compose logs)
+  smoke              Run scripts/smoke_postinstall.sh
+  trust-cert         Install Caddy's local CA into the OS trust store
+  bootstrap          Run scripts/bootstrap.sh (fresh / resume install)
+  compose <args...>  Pass-through to scripts/spotter_compose.sh
+  help               Show this help
+
+Examples:
+  ./spotter up
+  ./spotter logs -f n8n
+  ./spotter trust-cert
+  ./spotter compose up -d --no-deps --force-recreate vllm
+USAGE
+}
+
+cmd="${1:-}"
+if [[ -z "$cmd" ]]; then
+    usage
+    exit 1
+fi
+shift || true
+
+case "$cmd" in
+    up)
+        run_root "$COMPOSE" up -d "$@"
+        ;;
+    down)
+        run_root "$COMPOSE" down "$@"
+        ;;
+    status|ps)
+        run_root "$COMPOSE" ps "$@"
+        ;;
+    logs)
+        run_root "$COMPOSE" logs "$@"
+        ;;
+    smoke)
+        run_root "$ROOT_DIR/scripts/smoke_postinstall.sh" "$@"
+        ;;
+    trust-cert)
+        run_root "$ROOT_DIR/scripts/trust_caddy_cert.sh" "$@"
+        ;;
+    bootstrap)
+        run_root "$ROOT_DIR/scripts/bootstrap.sh" "$@"
+        ;;
+    compose)
+        run_root "$COMPOSE" "$@"
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        echo "spotter: unknown command '$cmd'" >&2
+        echo "" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
