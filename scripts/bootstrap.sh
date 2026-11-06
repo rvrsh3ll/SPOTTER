@@ -119,7 +119,11 @@ if [[ ! -f "$ENV_FILE" ]] || is_unset AUTH_SECRET; then
     "$ROOT_DIR/deployment/setup-secrets.sh"
 else
     ok ".env present with secrets — running setup-secrets.sh to pick up new keys"
-    "$ROOT_DIR/deployment/setup-secrets.sh" >/dev/null
+    # Keep stderr so missing tools / permission errors are visible; stdout is
+    # progress noise on an already-configured host.
+    if ! "$ROOT_DIR/deployment/setup-secrets.sh" >/dev/null; then
+        die "setup-secrets.sh failed — re-run without quieting to see the full log: sudo deployment/setup-secrets.sh"
+    fi
 fi
 FLOWSINT_HOME="$(env_value FLOWSINT_HOME)"
 [[ -n "$FLOWSINT_HOME" ]] || die "FLOWSINT_HOME not set in .env"
@@ -170,7 +174,9 @@ for patch in "$ROOT_DIR"/deployment/flowsint-patches/*.patch; do
     fi
 done
 # setup-secrets.sh links the env file, but only if the checkout already existed.
-"$ROOT_DIR/deployment/setup-secrets.sh" >/dev/null
+if ! "$ROOT_DIR/deployment/setup-secrets.sh" >/dev/null; then
+    die "setup-secrets.sh failed after Flowsint checkout — re-run: sudo deployment/setup-secrets.sh"
+fi
 
 # Chunked browser uploads and EyeWitness screenshots are written by uid 1000
 # (the ingest sidecar and the task runner). Docker creates a missing bind
@@ -189,8 +195,10 @@ if docker image inspect spotter-n8n-runners:local >/dev/null 2>&1; then
     ok "spotter-n8n-runners:local present (rebuild after editing deployment/Dockerfile.runners)"
 else
     info "building — first run takes a few minutes"
-    docker build -q -t spotter-n8n-runners:local "$ROOT_DIR/deployment" \
-        -f "$ROOT_DIR/deployment/Dockerfile.runners" >/dev/null
+    if ! docker build -q -t spotter-n8n-runners:local "$ROOT_DIR/deployment" \
+        -f "$ROOT_DIR/deployment/Dockerfile.runners"; then
+        die "failed to build spotter-n8n-runners:local — re-run without -q to see the log"
+    fi
     ok "built spotter-n8n-runners:local"
 fi
 
@@ -320,10 +328,11 @@ step "Registering Flowsint custom node types"
 for t in company nessus pingcastle cloudschism; do
     script="$ROOT_DIR/scripts/register_${t}_type.py"
     [[ -f "$script" ]] || { warn "no register_${t}_type.py — skipped"; continue; }
-    if python3 "$script" --apply >/dev/null 2>&1; then
+    if out="$(python3 "$script" --apply 2>&1)"; then
         ok "$t"
     else
         warn "$t registration reported a problem — re-run: python3 $script --apply"
+        [[ -n "$out" ]] && info "$out"
     fi
 done
 
@@ -364,12 +373,13 @@ fi
 step "Installing Open WebUI tools"
 # No --email/--password: the script reads OWUI_ADMIN_* itself, which keeps the
 # password off argv and works on re-runs where only the encrypted tier has it.
-if python3 "$ROOT_DIR/scripts/setup_openwebui.py" --url "$OWUI" >/dev/null 2>&1; then
+if owui_out="$(python3 "$ROOT_DIR/scripts/setup_openwebui.py" --url "$OWUI" 2>&1)"; then
     ok "tools and the spotter model profile installed"
 else
     warn "setup_openwebui.py failed — usually vLLM is still loading its weights."
     warn "  Watch it with: docker logs -f spotter-vllm"
     warn "  Then re-run:   sudo python3 scripts/setup_openwebui.py --url $OWUI"
+    [[ -n "$owui_out" ]] && info "$owui_out"
 fi
 
 # ── 12. verify ───────────────────────────────────────────────────────────────
@@ -389,7 +399,8 @@ echo "  Flowsint    https://graph.spotter.localhost:5443 (same login)"
 echo "  Open WebUI  https://chat.spotter.localhost:5443  (its own account)"
 echo ""
 echo "  Trust Caddy's internal CA to stop the browser warning per hostname:"
-echo "    docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt"
+echo "    sudo ./spotter trust-cert"
+echo "    # or: docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt"
 echo ""
 echo "  Verify:  sudo python3 scripts/smoke_deploy.py --user ${SPOTTER_OP:-<operator>}"
 echo "           sudo scripts/smoke_postinstall.sh"
