@@ -196,7 +196,7 @@ sudo ./spotter trust-cert
 |---|---|
 | 5443 | Caddy TLS front door — everything below is reached through it, by hostname |
 | spotter.localhost:5443 | Operator dashboard |
-| n8n.spotter.localhost:5443 | n8n workflow editor — same login |
+| n8n.spotter.localhost:5443 | n8n workflow editor — SPOTTER portal login, then n8n's own owner login |
 | graph.spotter.localhost:5443 | Flowsint graph UI — same login |
 | chat.spotter.localhost:5443 | Open WebUI chat — **its own** account |
 
@@ -211,7 +211,16 @@ This catches everyone, so it is worth reading once:
 | **SPOTTER portal** — the dashboard, n8n and Flowsint UI all sit behind it | `deployment/auth-data/auth.db` | first visit opens administrator setup if no account exists; later accounts are requested at `/register.html` and approved from the Admin tab, or `scripts/spotter_user.py` |
 | **Flowsint account** — issues the API token | Flowsint's Postgres | Flowsint UI, then `scripts/refresh_flowsint_token.py` |
 | **Open WebUI account** | `webui.db` in a Docker volume | Open WebUI's own Settings → Account |
-| **n8n basic auth** | `N8N_USER` in `.env`; `N8N_PASSWORD` in `secrets/machine.sops.env` | `scripts/spotter_secret.py set N8N_PASSWORD`, recreate `n8n` |
+| **n8n owner account** | n8n's own user DB in the `n8n_data` volume (or `SPOTTER_N8N_DATA` bind) | First open of the editor shows **Set up owner account** — pick an email and a password (≥8 chars, one capital letter, one number). After that you get n8n's normal login. Change the password in n8n Settings. The SPOTTER portal still gates access in front. |
+
+
+n8n 1.0+ removed HTTP basic auth and `N8N_USER_MANAGEMENT_DISABLED`. The
+current image (`n8nio/n8n:2.26.6`) always uses built-in user management, so a
+fresh volume shows **Set up owner account** once. Compose may still set the
+old `N8N_BASIC_AUTH_*` / `N8N_USER_MANAGEMENT_DISABLED` variables and
+`setup-secrets.sh` may still generate `N8N_USER` / `N8N_PASSWORD`; those are
+ignored by this n8n version and do not create or change the owner. Bootstrap
+does not provision the owner for you today.
 
 The dashboard's **Prompt tab has no login of its own.** Its "API key" is a token
 that LLM CONFIG → Connect mints from the Open WebUI account.

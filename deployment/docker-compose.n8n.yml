@@ -44,7 +44,11 @@ services:
       # SPOTTER_SCRIPTS_DIR, give it an absolute path or that trap comes back.
       - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
     environment:
-      # --- n8n auth ---
+      # --- n8n auth (legacy keys; ignored by n8n ≥1.0 / this image) ---
+      # n8n 1.0 removed HTTP basic auth and N8N_USER_MANAGEMENT_DISABLED. A fresh
+      # volume shows "Set up owner account" in the editor; complete that once.
+      # See INSTALL.md §6. These variables are kept so older docs/scripts that
+      # still reference N8N_USER / N8N_PASSWORD do not break compose parsing.
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD}
