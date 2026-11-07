@@ -2530,8 +2530,8 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 
 | Tab | Purpose |
 |---|---|
-| **Objectives** | Campaign goals, scope, and RoE reminders |
-| **Infrastructure** | Egress identity, proxy profile (HTTP / SOCKS5 / **TOR**), managed SSH tunn. Files over 32 MB are chunked to disk; see the limits belowel, and OPSEC User-Agent |
+| **Objectives** | Campaign goals, scope, and RoE reminders, plus the primary target and any **Additional Target Organizations** (name, domains, emails, URLs, technologies, notes) for multi-org campaigns |
+| **Infrastructure** | Egress identity, proxy profile (HTTP / SOCKS5 / **TOR**), managed SSH tunnel, and OPSEC presets for User-Agent and DNS resolvers (Western plus RU/CN options) |
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export |
