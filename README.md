@@ -593,6 +593,14 @@ So the operator's identifiers are now the input, and a match is now a decision:
   identity is the domain label alone (`maket-aero.test` → `maket aero`), which
   matches a job board poorly and returns thematic noise. The card prints *None of
   these came from Objectives* rather than an unexplained blank.
+* **Multiple target organizations.** Objectives has an **Additional Target
+  Organizations** section for broader campaigns that span several related
+  companies. Each card takes a name plus its domains, emails, URLs, technologies
+  and free-text notes. The primary target above is always the first
+  organization; the additional ones are sent alongside the legacy single-org
+  fields, so SPOTTER and the Analysis LLM can map links and relationships
+  between the organizations, their people and their technology stacks. Every
+  existing single-org consumer keeps reading the primary target unchanged.
 
 The same identifiers also widen the **employment gate** below: someone whose
 LinkedIn headline names the target's legal entity rather than its trading name

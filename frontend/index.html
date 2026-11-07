@@ -1074,6 +1074,22 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 .obj-ta:focus { outline: none; border-color: var(--accent); }
 .obj-ta::placeholder { opacity: .35; }
 .obj-save-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+/* ── additional target organizations (multi-org campaigns) ───────── */
+.obj-org {
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 10px 12px; margin-bottom: 10px; background: var(--surface);
+}
+.obj-org-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.obj-org-tag {
+  font-family: var(--mono); font-size: 8px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--dim);
+}
+.obj-org-rm {
+  font-family: var(--mono); font-size: 8px; letter-spacing: .1em; text-transform: uppercase;
+  background: transparent; color: var(--dim); border: 1px solid var(--border);
+  border-radius: 2px; padding: 2px 8px; cursor: pointer;
+}
+.obj-org-rm:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ── infrastructure panel ───────────────────────────────────────── */
 .infra-inline {
@@ -2013,6 +2029,17 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
           </div>
           <span style="font-family:var(--mono);font-size:9px;color:var(--dim);display:block;margin-top:4px;">Forces this domain for Flare searches and the email column in Targets.</span>
         </div>
+
+        <div class="sh" style="margin-top:18px;">Additional Target Organizations</div>
+        <span class="radio-hint" id="obj-orgs-hint">
+          For broader campaigns that span several related organizations. Add one card per
+          organization with its domains, emails, URLs and known technologies &mdash; SPOTTER
+          and the Analysis LLM read the combined list to surface links and relationships
+          between the organizations, their people and their technology stacks. The primary
+          target defined above is always treated as the first organization.
+        </span>
+        <div id="obj-orgs"></div>
+        <button class="btn" type="button" id="obj-add-org" onclick="objAddOrgCard()" style="margin-bottom:6px;">Add organization</button>
 
         <div class="sh" style="margin-top:18px;">Mission Statement, Goals, and Rules of Engagement</div>
         <textarea id="obj-mission" class="obj-ta"
@@ -11623,6 +11650,7 @@ async function importCampaignFile(file) {
         missionStatement: String(o.missionStatement || ''),
         companyEmail:     String(o.companyEmail || ''),
         socialRegions:    objNormaliseRegions(o.socialRegions),
+        organizations:    objNormaliseOrgs(o.organizations),
       },
     };
 
@@ -12444,6 +12472,7 @@ function _toolCampaignContext() {
       company_domain:         _companyDomain() || '',
       mission_statement:      obj.missionStatement || '',
       social_regions:         objNormaliseRegions(obj.socialRegions),
+      organizations:          objAllOrganizations(obj),
     } : null,
     data_inventory: inv.items,
     // What the operator said each upload was — the Context line per ingest,
@@ -13667,11 +13696,17 @@ async function sendChat() {
   };
 
   const obj = ac && ac.objectives ? ac.objectives : null;
+  const _allOrgs = obj ? objAllOrganizations(obj) : [];
+  const orgsBlock = _allOrgs.length > 1 ? `
+
+## Target Organizations
+This is a multi-organization campaign. Look for useful links and relationships between these organizations, their people and their technologies:
+${_allOrgs.map((o, i) => `${i + 1}. ${o.name || '(unnamed)'}${o.primary ? ' (primary target)' : ''}${o.domains ? ' - domains: ' + o.domains : ''}${o.emails ? ' - emails: ' + o.emails : ''}${o.urls ? ' - URLs: ' + o.urls : ''}${o.tech ? ' - tech: ' + o.tech : ''}${o.notes ? ' - notes: ' + o.notes : ''}`).join('\n')}` : '';
   const missionBlock = (obj && obj.missionStatement) ? `
 
 ## Campaign Objectives
 - Target Type: ${obj.targetType || 'Not specified'}
-- Primary Target: ${obj.targetName || 'Not specified'}${obj.additionalIds ? '\n- Additional Identifiers: ' + obj.additionalIds : ''}${obj.companyEmail ? '\n- Company Email Address: ' + obj.companyEmail + ' (domain: ' + (obj.companyEmail.includes('@') ? obj.companyEmail.split('@')[1] : obj.companyEmail) + ')' : ''}${objNormaliseRegions(obj.socialRegions).length ? '\n- Social Enrichment Regions: ' + objNormaliseRegions(obj.socialRegions).map(r => r.toUpperCase()).join(', ') + ' (regional social platforms swept in addition to global ones)' : ''}
+- Primary Target: ${obj.targetName || 'Not specified'}${obj.additionalIds ? '\n- Additional Identifiers: ' + obj.additionalIds : ''}${obj.companyEmail ? '\n- Company Email Address: ' + obj.companyEmail + ' (domain: ' + (obj.companyEmail.includes('@') ? obj.companyEmail.split('@')[1] : obj.companyEmail) + ')' : ''}${objNormaliseRegions(obj.socialRegions).length ? '\n- Social Enrichment Regions: ' + objNormaliseRegions(obj.socialRegions).map(r => r.toUpperCase()).join(', ') + ' (regional social platforms swept in addition to global ones)' : ''}${orgsBlock}
 
 ## Mission Statement, Goals, and Rules of Engagement
 ${obj.missionStatement}
@@ -14341,7 +14376,8 @@ function exportChat(fmt) {
 /* ════════════════════════════════════════════════════════════════
    OBJECTIVES — per-campaign targeting form
    Stored on the campaign object itself: campaign.objectives = {
-     targetType, targetName, additionalIds, missionStatement
+     targetType, targetName, additionalIds, missionStatement,
+     companyEmail, socialRegions, organizations[]
    }
    ════════════════════════════════════════════════════════════════ */
 /* Regional social-media platform families offered on the Objectives tab. These
@@ -14362,6 +14398,7 @@ function objDefaults() {
     missionStatement: '',
     companyEmail:     '',
     socialRegions:    [],
+    organizations:    [],
   };
 }
 
@@ -14378,6 +14415,127 @@ function objNormaliseRegions(v) {
   if (!Array.isArray(v)) return [];
   const seen = new Set(v.map(x => String(x || '').trim().toLowerCase()));
   return OBJ_SM_REGIONS.filter(r => seen.has(r));
+}
+
+/* ════════════════════════════════════════════════════════════════
+   Multiple target organizations.
+   The primary target is the single organization described by the legacy
+   Primary Target / Company Email / Additional Identifiers fields, which are
+   left untouched so every existing single-org consumer keeps working. This
+   array holds ADDITIONAL organizations for broader campaigns that map links
+   and relationships between several orgs, their people and their technology.
+   Stored on the campaign as objectives.organizations = [{ name, domains,
+   emails, urls, tech, notes }]. objAllOrganizations() is the unified list
+   new consumers read: the primary org first, then the additional ones.
+   ════════════════════════════════════════════════════════════════ */
+const OBJ_ORG_FIELDS = ['name', 'domains', 'emails', 'urls', 'tech', 'notes'];
+const OBJ_ORG_MAX = 25;
+
+function objOrgIsEmpty(o) {
+  return !o || OBJ_ORG_FIELDS.every(k => !String(o[k] || '').trim());
+}
+
+/* Normalises an untrusted organizations value (imported bundle, older
+   campaign, hand-edited localStorage) to a clean array of records. Drops
+   all-empty entries and caps the list and each field length. */
+function objNormaliseOrgs(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const raw of v) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rec = {};
+    OBJ_ORG_FIELDS.forEach(k => { rec[k] = String(raw[k] == null ? '' : raw[k]).trim().slice(0, 2000); });
+    if (!objOrgIsEmpty(rec)) out.push(rec);
+    if (out.length >= OBJ_ORG_MAX) break;
+  }
+  return out;
+}
+
+/* The primary organization, synthesised from the legacy single-target
+   fields so the unified list new consumers read starts with it. An
+   individual target contributes no company name — only its employer
+   domain/email, when one was set. */
+function objPrimaryOrgFromLegacy(obj) {
+  obj = obj || {};
+  const email = String(obj.companyEmail || '').trim();
+  const at = email.indexOf('@');
+  const domain = at >= 0 ? email.slice(at + 1).toLowerCase() : '';
+  return {
+    name:    obj.targetType === 'organization' ? String(obj.targetName || '').trim() : '',
+    domains: domain,
+    emails:  email,
+    urls:    '',
+    tech:    '',
+    notes:   String(obj.additionalIds || '').trim(),
+    primary: true,
+  };
+}
+
+/* The unified list every multi-org consumer reads: the primary org first
+   (when it carries anything), then the additional organizations. Workflows
+   that still read a single org use element 0 / the legacy fields. */
+function objAllOrganizations(obj) {
+  obj = obj || {};
+  const out = [];
+  const primary = objPrimaryOrgFromLegacy(obj);
+  if (!objOrgIsEmpty(primary)) out.push(primary);
+  objNormaliseOrgs(obj.organizations).forEach(o => out.push(o));
+  return out;
+}
+
+function objOrgCardHtml(o) {
+  o = o || {};
+  const field = (k, label, ph) =>
+    '<div class="obj-field"><label>' + label + '</label>'
+    + '<input class="fi-sm oo-' + k + '" type="text" style="width:420px;" '
+    + 'placeholder="' + ph + '" value="' + esc(String(o[k] || '')) + '" oninput="objDirty()"></div>';
+  return '<div class="obj-org" data-obj-org>'
+    + '<div class="obj-org-hd"><span class="obj-org-tag">ORGANIZATION</span>'
+    + '<button type="button" class="obj-org-rm" onclick="objRemoveOrgCard(this)">Remove</button></div>'
+    + field('name', 'Name', 'Example Corp')
+    + field('domains', 'Domains', 'example.com \u00b7 subsidiary.example.net')
+    + field('emails', 'Emails', 'info@example.com \u00b7 hr@example.com')
+    + field('urls', 'URLs', 'https://example.com \u00b7 https://careers.example.com')
+    + field('tech', 'Technologies', 'Okta \u00b7 Microsoft 365 \u00b7 Palo Alto')
+    + field('notes', 'Notes', 'Relationship to the primary target, shared vendors, etc.')
+    + '</div>';
+}
+
+function objRenderOrgCards(orgs) {
+  const host = document.getElementById('obj-orgs');
+  if (!host) return;
+  orgs = Array.isArray(orgs) ? orgs : [];
+  host.innerHTML = orgs.map(objOrgCardHtml).join('');
+}
+
+function objReadOrgCards() {
+  const host = document.getElementById('obj-orgs');
+  if (!host) return [];
+  const out = [...host.querySelectorAll('[data-obj-org]')].map(card => {
+    const rec = {};
+    OBJ_ORG_FIELDS.forEach(k => {
+      const el = card.querySelector('.oo-' + k);
+      rec[k] = (el && el.value ? el.value : '').trim();
+    });
+    return rec;
+  });
+  return objNormaliseOrgs(out);
+}
+
+function objAddOrgCard() {
+  const host = document.getElementById('obj-orgs');
+  if (!host) return;
+  if (host.querySelectorAll('[data-obj-org]').length >= OBJ_ORG_MAX) {
+    toast('Organization limit reached (' + OBJ_ORG_MAX + ')', 'inf');
+    return;
+  }
+  host.insertAdjacentHTML('beforeend', objOrgCardHtml({}));
+  objDirty();
+}
+
+function objRemoveOrgCard(btn) {
+  const card = btn.closest('[data-obj-org]');
+  if (card) { card.remove(); objDirty(); }
 }
 
 /* The regions the active campaign wants applied to social enrichment. Every
@@ -14440,6 +14598,7 @@ function loadObjectivesForm() {
     const cb = document.getElementById('obj-sm-' + r);
     if (cb) cb.checked = regions.includes(r);
   });
+  objRenderOrgCards(objNormaliseOrgs(obj.organizations));
   document.getElementById('obj-dirty').style.display = 'none';
 }
 
@@ -14457,6 +14616,7 @@ function saveObjectives() {
     companyEmail:     document.getElementById('obj-company-email').value.trim(),
     missionStatement: document.getElementById('obj-mission').value.trim(),
     socialRegions:    objSocialRegions(),
+    organizations:    objReadOrgCards(),
   };
   if (saveObjectivesToCamp(ac.id, obj)) {
     document.getElementById('obj-dirty').style.display = 'none';
@@ -17767,6 +17927,9 @@ async function runAnalysis() {
       company_email:        obj.companyEmail      || '',
       company_email_domain: _companyDomain()      || '',
       mission_statement:    obj.missionStatement  || '',
+      // Full organization list for broader multi-org campaigns; WF10 reads the
+      // legacy single-org fields above and this array for cross-org links.
+      organizations:        objAllOrganizations(obj),
       // Targets-tab marks live only in this browser, so WF10 can only weigh them
       // if we ship them with the request. Keys are the target row labels.
       operator_tags: {
@@ -18152,6 +18315,7 @@ async function runDomainReconFromObjectives() {
       // Read from the form, not from the stored campaign: this save is a full
       // overwrite of objectives, so a field omitted here is a field erased.
       socialRegions:    objSocialRegions(),
+      organizations:    objReadOrgCards(),
     };
     if (saveObjectivesToCamp(ac.id, obj)) {
       const dirtyEl = document.getElementById('obj-dirty');
@@ -18235,6 +18399,11 @@ async function runDomainRecon(domainOverride, sources) {
            only for an organization target, for the same reason as above. */
         additional_ids: (ac.objectives?.targetType === 'organization'
                           ? (ac.objectives?.additionalIds || '') : ''),
+        /* The full organization list for broader campaigns. The primary org
+           above (company_name / additional_ids / company_email) is element 0;
+           any additional organizations follow, so WF13 can look across them
+           for shared domains, people and technologies. */
+        organizations: objAllOrganizations(ac.objectives || {}),
         sources,
       })),
     });
