@@ -334,16 +334,22 @@ async function main() {
   }
   d.getElementById('infra-ua-preset').value = 'yandex_win';
   w.infraUaChanged();
+  w.infraSave();
+  await sleep(20);
   ok(/YaBrowser/.test(w.withInfraPayload({}).opsec.user_agent),
      'Yandex Browser UA reaches the envelope', JSON.stringify(w.withInfraPayload({}).opsec));
   d.getElementById('infra-dns-preset').value = 'alidns';
   w.infraDnsChanged();
+  w.infraSave();
+  await sleep(20);
   ok(JSON.stringify(w.withInfraPayload({}).opsec.dns_resolvers) === '["223.5.5.5","223.6.6.6"]',
      'AliDNS preset reaches the envelope', JSON.stringify(w.withInfraPayload({}).opsec));
   d.getElementById('infra-ua-preset').value = 'default';
   w.infraUaChanged();
   d.getElementById('infra-dns-preset').value = 'default';
   w.infraDnsChanged();
+  w.infraSave();
+  await sleep(20);
 
   ok(d.getElementById('infra-dns-custom-row').style.display === 'none',
      'custom DNS row starts hidden', d.getElementById('infra-dns-custom-row').style.display);
