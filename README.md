@@ -3003,10 +3003,15 @@ Start returns as soon as the SOCKS port answers, *not* at 100% bootstrap (a list
 accepts connections and then hangs), so the UI polls `/tunnel/tor/status` and reports the bootstrap
 percentage until circuits exist.
 
-**OPSEC User-Agent.** A pinned list of known User-Agents, or your own string. `Workflow default` sends no
-override at all. It ships independently of the proxy toggle — you can standardise the UA without proxying
-anything — and an empty custom value is refused rather than sending a blank header, which is louder than
-any preset.
+**OPSEC User-Agent.** A pinned list of known User-Agents, or your own string. Presets include common
+Western browsers plus regional options (Yandex Browser for RU; 360 / QQBrowser / Sogou / UC for CN).
+`Workflow default` sends no override at all. It ships independently of the proxy toggle — you can
+standardise the UA without proxying anything — and an empty custom value is refused rather than sending
+a blank header, which is louder than any preset.
+
+**OPSEC DNS resolvers.** Same shape: host default, Cloudflare/Google, plus Yandex DNS (RU) and
+AliDNS / DNSPod (CN), each with a DoH variant where published. Custom accepts IPs or `https://…/dns-query`
+URLs. When the proxy is socks5h/Tor, resolution already happens at the proxy and these overrides do not apply.
 
 > **What consumes these.** The egress check uses the proxy and User-Agent end to end. The webhook envelope
 > (`withInfraPayload`) now carries `proxy` — including `proxy.tor` — and `opsec.user_agent` to every

@@ -322,6 +322,29 @@ async function main() {
   section('Step 7b — OPSEC DNS resolvers');
   // Entry state (from Step 7): profile disabled, UA preset = default.
   ok(!!d.getElementById('infra-dns-preset'), 'OPSEC DNS resolver select exists');
+
+  // Regional presets (RU / CN) must stay on the pinned lists.
+  const uaIds = Array.from(d.getElementById('infra-ua-preset').options).map(o => o.value);
+  for (const id of ['yandex_win', 'sogou_win', '360_chrome', 'qqbrowser', 'ucbrowser_cn']) {
+    ok(uaIds.includes(id), `UA preset ${id} is listed`, uaIds.join(','));
+  }
+  const dnsIds = Array.from(d.getElementById('infra-dns-preset').options).map(o => o.value);
+  for (const id of ['yandex', 'yandex_doh', 'alidns', 'alidns_doh', 'dnspod', 'dnspod_doh']) {
+    ok(dnsIds.includes(id), `DNS preset ${id} is listed`, dnsIds.join(','));
+  }
+  d.getElementById('infra-ua-preset').value = 'yandex_win';
+  w.infraUaChanged();
+  ok(/YaBrowser/.test(w.withInfraPayload({}).opsec.user_agent),
+     'Yandex Browser UA reaches the envelope', JSON.stringify(w.withInfraPayload({}).opsec));
+  d.getElementById('infra-dns-preset').value = 'alidns';
+  w.infraDnsChanged();
+  ok(JSON.stringify(w.withInfraPayload({}).opsec.dns_resolvers) === '["223.5.5.5","223.6.6.6"]',
+     'AliDNS preset reaches the envelope', JSON.stringify(w.withInfraPayload({}).opsec));
+  d.getElementById('infra-ua-preset').value = 'default';
+  w.infraUaChanged();
+  d.getElementById('infra-dns-preset').value = 'default';
+  w.infraDnsChanged();
+
   ok(d.getElementById('infra-dns-custom-row').style.display === 'none',
      'custom DNS row starts hidden', d.getElementById('infra-dns-custom-row').style.display);
 
