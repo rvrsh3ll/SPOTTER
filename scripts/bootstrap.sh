@@ -387,6 +387,13 @@ step "Preflight"
 python3 "$ROOT_DIR/scripts/preflight_env_check.py" --env-file "$ENV_FILE" || \
     warn "preflight reported problems — see above"
 
+step "Flowsint preflight (campaign sketch provisioning)"
+if ! "$ROOT_DIR/scripts/flowsint_preflight.sh" --retries 6 --delay 5; then
+    warn "Flowsint preflight FAILED -- new campaigns will report 'sketch provisioning failed'"
+    warn "  until it passes. Fix the items above, then: sudo ./spotter check-flowsint"
+    warn "  and use Retry Provision on any campaign created in the meantime."
+fi
+
 echo ""
 echo "${BOLD}SPOTTER is up.${RESET}"
 echo ""

@@ -1668,6 +1668,11 @@ Then wait one poll cycle and run it again. `last_checkin` **must advance**.
 > account in the order they depend on each other, plus a troubleshooting table
 > keyed by symptom. The sections below document what that bootstrap does, step by
 > step, for when you need to do a piece of it by hand.
+>
+> After install, `sudo ./spotter check-flowsint` verifies everything campaign
+> sketch provisioning needs (Flowsint API, token, Neo4j) from n8n's point of view.
+> If it fails, new campaigns report "sketch provisioning failed" until it is fixed;
+> then use **Retry Provision** in the campaign panel.
 
 
 ### 1. Generate secrets

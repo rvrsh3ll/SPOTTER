@@ -6,6 +6,7 @@
 #   ./spotter status
 #   ./spotter logs [-f] [service]
 #   ./spotter smoke
+#   ./spotter check-flowsint
 #   ./spotter trust-cert
 #   ./spotter bootstrap
 #   ./spotter compose <docker-compose-args...>
@@ -35,6 +36,7 @@ Commands:
   status | ps        Show compose status
   logs [args...]     Tail logs (pass-through to compose logs)
   smoke              Run scripts/smoke_postinstall.sh
+  check-flowsint     Preflight Flowsint/Neo4j as campaign sketch provisioning sees them
   trust-cert         Install Caddy's local CA into the OS trust store
   bootstrap          Run scripts/bootstrap.sh (fresh / resume install)
   compose <args...>  Pass-through to scripts/spotter_compose.sh
@@ -70,6 +72,9 @@ case "$cmd" in
         ;;
     smoke)
         run_root "$ROOT_DIR/scripts/smoke_postinstall.sh" "$@"
+        ;;
+    check-flowsint|doctor)
+        run_root "$ROOT_DIR/scripts/flowsint_preflight.sh" "$@"
         ;;
     trust-cert)
         run_root "$ROOT_DIR/scripts/trust_caddy_cert.sh" "$@"
