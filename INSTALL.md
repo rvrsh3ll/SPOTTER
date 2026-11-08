@@ -293,6 +293,37 @@ sudo python3 scripts/rotate_flowsint_token.py --force
 
 ---
 
+## Flowsint API token lifetime
+
+Flowsint has no API keys, and its login token lasts a hardcoded 60 hours
+(`ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 60` in flowsint-core `core/auth.py`; no env var
+changes it). Flowsint accepts any HS256 token signed with `AUTH_SECRET` whose `sub`
+is an existing account and whose `exp` is in the future (`flowsint-api/app/api/deps.py`).
+SPOTTER already holds `AUTH_SECRET` in its machine tier, so
+`scripts/refresh_flowsint_token.py` now signs its own token, `{"sub": FLOWSINT_ADMIN_EMAIL,
+"exp": now + FLOWSINT_TOKEN_DAYS}` (default **365 days**), checks it live against
+`/api/investigations`, and only then stores it in `FLOWSINT_API_KEY` (encrypted tier).
+If the live check fails it falls back to the password login; `--login` forces that.
+
+```bash
+sudo python3 scripts/refresh_flowsint_token.py           # mint + verify + store
+sudo ./spotter compose up -d --no-deps --force-recreate n8n task-runners open-webui
+sudo ./spotter check-flowsint                             # shows days left
+```
+
+Bootstrap does this automatically. The optional systemd timer still checks every 12h
+but renews only when fewer than 7 days remain (`--renew-days`), i.e. about once a year.
+
+Trade-offs:
+
+* Anyone who obtains the token can act as that Flowsint account until it expires.
+  The only revocation is rotating `AUTH_SECRET`, which also signs out every Flowsint
+  session; mint a new token afterwards. Shorten `FLOWSINT_TOKEN_DAYS` if that matters.
+* This relies on Flowsint's current token validation. When `deployment/flowsint.lock`
+  moves to a new commit, re-check `flowsint-api/app/api/deps.py` and `core/auth.py`
+  (extra claims, revocation lists, or an issued-at check would break self-signed tokens);
+  `sudo ./spotter check-flowsint` catches a rejected token either way.
+
 ## 8. Troubleshooting, by symptom
 
 | What you see | What it is |
@@ -300,7 +331,7 @@ sudo python3 scripts/rotate_flowsint_token.py --force
 | **"Sketch provisioning failed" on a new campaign** (WF16: "could not resolve or create investigation") | n8n cannot list or create Flowsint investigations: the Flowsint API or Neo4j is down, or `FLOWSINT_API_KEY` is missing or expired. Run `sudo ./spotter check-flowsint` (also run automatically at the end of bootstrap). It checks from inside the n8n task-runners container, where WF16 runs, and prints PASS/FAIL with a fix for each item. Once it passes, press **Retry Provision** in the campaign panel; there is no need to recreate the campaign. |
 | **WF16 / n8n logs show `NameResolutionError: Failed to resolve 'flowsint-api'`** | Your stored `FLOWSINT_API_URL` is the old default `http://flowsint-api:5001`. Flowsint names its API container `flowsint-api-prod` (port 5001). Fix it with `sudo python3 scripts/migrate_flowsint_url.py`, which rewrites the value in `.env` (`./spotter up` and bootstrap also do this automatically), then `sudo ./spotter compose up -d --no-deps --force-recreate api n8n task-runners open-webui`. `api` picks up the `flowsint-api` alias, so either name resolves. Confirm with `sudo ./spotter check-flowsint`, then press **Retry Provision**. |
 | **"My campaigns disappeared"**, or the graph reads empty | Usually the Neo4j password. It is applied only when the data volume is first created; changing `NEO4J_PASSWORD` afterwards makes every client send a password the database does not have. The campaign read swallows the auth error and returns an empty list, so it looks like missing data. Check `scripts/spotter_compose.sh ps` for an unhealthy `neo4j`. |
-| **Everything Flowsint-related returns 401 at once**, a few days in | `FLOWSINT_API_KEY` expired. It is a login token, not a permanent key — Flowsint's default lifetime is about 2.5 days. Run `python3 scripts/refresh_flowsint_token.py`, then recreate the three containers. Check it any time with `--show-expiry`. |
+| **Everything Flowsint-related returns 401 at once** | `FLOWSINT_API_KEY` expired. Run `sudo python3 scripts/refresh_flowsint_token.py` (mints a long-lived token, see below), then recreate `n8n task-runners open-webui`. `--show-expiry` reports the date; `sudo ./spotter check-flowsint` shows days left and warns under 14. |
 | **A page loads but a panel shows zeros** | Almost always the sketch, not the data. Every graph query is scoped to the active campaign's sketch, and a wrong or empty sketch id returns clean zeros rather than an error. |
 | **An ingest reports success but nothing appears** | Ingest can fail green. Unparseable input still reports success, and a wrong or empty sketch id returns clean zeros. Verify by counting nodes *and* their labels in the sketch. Oversize and password-protected uploads are rejected, not a green success. |
 | **Upload refused, or the ack names a host command** | The file is over a cap in the Ingest tab limits table in `README.md`. The browser checks before any chunk is sent. A file over 4 GB never starts. A file over 1 GB is warned and not uploaded unless the operator stages it anyway; only then does the ack name the path and the matching `scripts/ingest_*.py` command. Do not raise `N8N_PAYLOAD_SIZE_MAX`. |

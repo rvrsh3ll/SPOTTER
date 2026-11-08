@@ -7,10 +7,11 @@ Requires=docker.service
 Type=oneshot
 User=root
 WorkingDirectory=/home/user/SPOTTER
-# FLOWSINT_ADMIN_PASSWORD must be set in the environment or in a .env file
-# For security, use EnvironmentFile pointing to a root-only file
+# Renews the self-signed token (AUTH_SECRET + FLOWSINT_ADMIN_EMAIL from the
+# encrypted tier) when fewer than 7 days remain; with the 365-day default this
+# fires about once a year. Password login is only the fallback.
 EnvironmentFile=-/etc/spotter/flowsint-admin.env
-ExecStart=/usr/bin/python3 scripts/rotate_flowsint_token.py --warn-hours 24
+ExecStart=/usr/bin/python3 scripts/rotate_flowsint_token.py --renew-days 7
 StandardOutput=journal
 StandardError=journal
 

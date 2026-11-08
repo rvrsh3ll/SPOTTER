@@ -289,10 +289,10 @@ if is_unset FLOWSINT_API_KEY; then
     # Kept for scripts/rotate_flowsint_token.py, which re-mints the token.
     env_set FLOWSINT_ADMIN_EMAIL "$FL_EMAIL"
     env_set FLOWSINT_ADMIN_PASSWORD "$FL_PASS"
-    warn "This token EXPIRES (Flowsint's default is about 2.5 days). When the stack"
-    warn "  starts answering 401 everywhere at once, that is what happened:"
-    warn "  re-run scripts/refresh_flowsint_token.py"
+    info "The login token lasts only 60 hours; it is replaced below by a long-lived one."
     if command -v systemctl >/dev/null 2>&1; then
+        info "The rotation timer checks every 12h but renews only when fewer than 7 days"
+        info "remain, so with the long-lived token it fires about once a year."
         read -r -p "        Enable automatic Flowsint token rotation (systemd timer)? [Y/n] " ans
         if [[ ! "$ans" =~ ^[Nn] ]]; then
             "$ROOT_DIR/scripts/install_flowsint_rotation.sh" \
@@ -302,6 +302,27 @@ if is_unset FLOWSINT_API_KEY; then
 else
     TOKEN="$(secret_value FLOWSINT_API_KEY)"
     ok "FLOWSINT_API_KEY already set"
+fi
+
+# Replace the 60-hour login token with a long-lived one signed with AUTH_SECRET
+# (FLOWSINT_TOKEN_DAYS, default 365). Skipped when the stored token still has
+# more than 30 days; verified live before it is stored.
+step "Long-lived Flowsint token"
+left="$(TOKEN="$TOKEN" ROOTD="$ROOT_DIR" python3 -c '
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["ROOTD"], "scripts"))
+import flowsint_token
+d = flowsint_token.days_left(os.environ.get("TOKEN", ""))
+print(-1 if d is None else int(d))
+')"
+if (( left > 30 )); then
+    ok "current token valid for $left more days"
+elif python3 "$ROOT_DIR/scripts/refresh_flowsint_token.py" --api-url "$FL_API" </dev/null; then
+    TOKEN="$(secret_value FLOWSINT_API_KEY)"
+    ok "long-lived FLOWSINT_API_KEY stored"
+else
+    warn "could not mint a long-lived token; keeping the 60-hour login token."
+    warn "  Retry later: sudo python3 scripts/refresh_flowsint_token.py"
 fi
 
 # ── 7. fallback sketch ───────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 [Unit]
-Description=Rotate Flowsint JWT token every 12 hours
+Description=Check the Flowsint token every 12 hours (renews only near expiry)
 
 [Timer]
 OnBootSec=5min

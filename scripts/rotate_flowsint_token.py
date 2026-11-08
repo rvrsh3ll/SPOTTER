@@ -155,7 +155,9 @@ def main():
     parser = argparse.ArgumentParser(description="Rotate Flowsint API JWT token")
     parser.add_argument("--force", action="store_true", help="Force rotation even if token is valid")
     parser.add_argument("--check", action="store_true", help="Check expiration only (no rotation)")
-    parser.add_argument("--warn-hours", type=int, default=24, help="Warn if token expires within this many hours (default: 24)")
+    parser.add_argument("--warn-hours", type=int, default=None, help="Rotate when fewer than this many hours remain (overrides --renew-days)")
+    parser.add_argument("--renew-days", type=float, default=7, help="Rotate when fewer than this many days remain (default: 7)")
+    parser.add_argument("--login", action="store_true", help="Use password login (60-hour token) instead of a self-signed token")
     parser.add_argument("--api-url", default=os.environ.get("FLOWSINT_API_URL", "http://127.0.0.1:5001"))
     parser.add_argument("--email", default=os.environ.get("FLOWSINT_ADMIN_EMAIL", ""))
     parser.add_argument("--password", default=os.environ.get("FLOWSINT_ADMIN_PASSWORD", ""))
@@ -169,6 +171,8 @@ def main():
 
     args.email = _real(args.email) or _lookup("FLOWSINT_ADMIN_EMAIL")
     args.password = _real(args.password) or _lookup("FLOWSINT_ADMIN_PASSWORD")
+    if args.warn_hours is None:
+        args.warn_hours = int(args.renew_days * 24)
     
     # Get current token
     current_token = get_current_token()
@@ -189,20 +193,30 @@ def main():
             print("✅ No rotation needed")
             sys.exit(0)
     
+    new_token = ""
+    if not args.login:
+        import flowsint_token
+        new_token, why = flowsint_token.self_signed_from_config(args.api_url, None, args.email)
+        if new_token:
+            print(f"✅ Self-signed token minted and verified ({flowsint_token.days_left(new_token):.0f} days)")
+        else:
+            print(f"⚠️  Self-signed token not used: {why}; falling back to password login")
+
     # Check if we have credentials
-    if not args.email or not args.password:
+    if not new_token and (not args.email or not args.password):
         print("❌ FLOWSINT_ADMIN_EMAIL / FLOWSINT_ADMIN_PASSWORD not set (or still CHANGE_ME)")
         print("Re-run scripts/bootstrap.sh, or set them in /etc/spotter/flowsint-admin.env")
         sys.exit(1)
     
     # Mint new token
-    print(f"Minting new token from {args.api_url}...")
-    try:
-        new_token = mint_new_token(args.api_url, args.email, args.password)
-        print(f"✅ New token minted (length: {len(new_token)})")
-    except Exception as e:
-        print(f"❌ Failed to mint token: {e}")
-        sys.exit(1)
+    if not new_token:
+        print(f"Minting new token from {args.api_url}...")
+        try:
+            new_token = mint_new_token(args.api_url, args.email, args.password)
+            print(f"✅ New token minted (length: {len(new_token)})")
+        except Exception as e:
+            print(f"❌ Failed to mint token: {e}")
+            sys.exit(1)
     
     if args.check:
         sys.exit(0)

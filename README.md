@@ -1673,6 +1673,10 @@ Then wait one poll cycle and run it again. `last_checkin` **must advance**.
 > sketch provisioning needs (Flowsint API, token, Neo4j) from n8n's point of view.
 > If it fails, new campaigns report "sketch provisioning failed" until it is fixed;
 > then use **Retry Provision** in the campaign panel.
+>
+> The Flowsint API token is self-signed with `AUTH_SECRET` and lasts
+> `FLOWSINT_TOKEN_DAYS` (default 365); see "Flowsint API token lifetime" in INSTALL.md
+> for how to renew it and the revocation trade-off.
 
 
 ### 1. Generate secrets

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Mint a fresh FLOWSINT_API_KEY and write it into .env.
+Mint a fresh FLOWSINT_API_KEY and store it in SPOTTER's secrets.
+
+Default: a long-lived token signed with AUTH_SECRET (FLOWSINT_TOKEN_DAYS, default
+365 days; see scripts/flowsint_token.py), verified live before it is stored.
+--login: the old password login, which yields Flowsint's 60-hour token.
 
 WHY THIS EXISTS
 
@@ -132,6 +136,11 @@ def main() -> int:
                     help="flowsint-api base URL as reachable FROM THE HOST "
                          "(default: %(default)s — not the in-container name)")
     ap.add_argument("--email", help="Flowsint account email")
+    ap.add_argument("--login", action="store_true",
+                    help="mint by password login (60-hour token) instead of the "
+                         "default long-lived self-signed token")
+    ap.add_argument("--days", type=float, default=None,
+                    help="self-signed lifetime in days (default: FLOWSINT_TOKEN_DAYS, else 365)")
     ap.add_argument("--show-expiry", action="store_true",
                     help="report when the current token expires and exit")
     args = ap.parse_args()
@@ -147,15 +156,33 @@ def main() -> int:
     if current:
         report_expiry(current)
 
-    email = args.email or input("Flowsint account email: ").strip()
-    if not email:
-        print("an email is required", file=sys.stderr)
-        return 1
-    password = getpass.getpass("Flowsint account password: ")
-
-    token = mint(args.api_url, email, password)
+    token = ""
+    if not args.login:
+        import flowsint_token
+        token, why = flowsint_token.self_signed_from_config(args.api_url, args.days, args.email or "")
+        if token:
+            print("self-signed token verified against /api/investigations")
+        else:
+            print(f"self-signed token not used: {why}", file=sys.stderr)
+            print("falling back to password login (60-hour token)", file=sys.stderr)
+    if not token:
+        try:
+            email = args.email or env_value("FLOWSINT_ADMIN_EMAIL") or input("Flowsint account email: ").strip()
+        except EOFError:
+            email = ""
+        if not email:
+            print("an email is required", file=sys.stderr)
+            return 1
+        password = env_value("FLOWSINT_ADMIN_PASSWORD")
+        if not password:
+            try:
+                password = getpass.getpass("Flowsint account password: ")
+            except EOFError:
+                print("no FLOWSINT_ADMIN_PASSWORD stored and no terminal to ask for it", file=sys.stderr)
+                return 1
+        token = mint(args.api_url, email, password)
     env_set("FLOWSINT_API_KEY", token)
-    print(f"\nFLOWSINT_API_KEY updated in {ENV_FILE}")
+    print("\nFLOWSINT_API_KEY updated (encrypted tier if configured)")
     report_expiry(token)
     print("\nThe value is baked into containers at CREATE time, so it does not take")
     print("effect until they are recreated — a restart will NOT do it:")

@@ -31,10 +31,12 @@ NEO4J_CONTAINER="${SPOTTER_NEO4J_CONTAINER:-flowsint-neo4j-prod}"
 DEFAULT_INTERNAL_URL="http://flowsint-api-prod:5001"
 DEFAULT_HOST_URL="http://127.0.0.1:5001"
 
-BOLD=$'\033[1m'; RESET=$'\033[0m'; RED=$'\033[31m'; GREEN=$'\033[32m'
-[[ -t 1 ]] || { BOLD=""; RESET=""; RED=""; GREEN=""; }
+BOLD=$'\033[1m'; RESET=$'\033[0m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
+[[ -t 1 ]] || { BOLD=""; RESET=""; RED=""; GREEN=""; YELLOW=""; }
 FAILS=0
 pass() { echo "  ${GREEN}PASS${RESET} $1"; }
+WARNS=0
+warn() { echo "  ${YELLOW}WARN${RESET} $1"; shift; for h in "$@"; do echo "       fix: $h"; done; WARNS=$((WARNS+1)); }
 fail() { echo "  ${RED}FAIL${RESET} $1"; shift; for h in "$@"; do echo "       fix: $h"; done; FAILS=$((FAILS+1)); }
 
 retry() {
@@ -96,6 +98,13 @@ def call(url, headers, data=None):
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+try:
+    import time
+    _p = (os.environ.get("FLOWSINT_API_KEY") or "").split(".")[1]
+    _exp = json.loads(base64.urlsafe_b64decode(_p + "=" * (-len(_p) % 4))).get("exp")
+    if _exp: out["token_days"] = round((float(_exp) - time.time()) / 86400, 1)
+except Exception:
+    pass
 base = out["url"] or "'"$DEFAULT_INTERNAL_URL"'"
 out["url"] = base
 try:
@@ -178,6 +187,17 @@ else
             fail "FLOWSINT_API_KEY present in $RUNNERS" \
                  "store it: sudo python3 scripts/refresh_flowsint_token.py  (or re-run ./spotter bootstrap)" \
                  "then recreate: ./spotter compose up -d --no-deps --force-recreate n8n task-runners"
+        fi
+        td="$(field "$RESULT" token_days)"
+        if [[ -n "$td" ]]; then
+            renew="sudo python3 scripts/refresh_flowsint_token.py   (then recreate n8n task-runners open-webui)"
+            if awk "BEGIN{exit !($td <= 0)}"; then
+                fail "FLOWSINT_API_KEY expired $(awk "BEGIN{printf \"%.1f\", -($td)}") days ago" "$renew"
+            elif awk "BEGIN{exit !($td < 14)}"; then
+                warn "FLOWSINT_API_KEY expires in $td days" "$renew"
+            else
+                pass "FLOWSINT_API_KEY valid for $td more days"
+            fi
         fi
         st="$(field "$RESULT" inv_status)"
         case "$st" in
