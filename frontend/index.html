@@ -6280,14 +6280,29 @@ function es(id) { clearInterval(SH[id]); const el = document.getElementById(id);
 /* ── toast ── */
 let tc = 0;
 function toast(msg, type='inf') {
-  if (tc >= 2) return; tc++;
+  const isErr = type === 'err';
+  // Info/ok toasts are capped at two on screen so a burst cannot bury the UI.
+  // Errors bypass the cap and linger: a dropped or 3-second error toast is how a
+  // provisioning or sync failure "vanished too fast to read" with nothing the
+  // operator could act on.
+  if (!isErr && tc >= 2) return;
+  tc++;
   const c = document.getElementById('tc');
   const t = document.createElement('div');
   t.className = `toast t${type}`;
   t.textContent = msg;
+  if (isErr) { t.style.cursor = 'pointer'; t.title = 'Click to dismiss'; }
   c.appendChild(t);
   requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('show')));
-  setTimeout(() => { t.classList.remove('show'); setTimeout(() => { t.remove(); tc = Math.max(0,tc-1); }, 200); }, 3000);
+  let gone = false;
+  const dismiss = () => {
+    if (gone) return; gone = true;
+    t.classList.remove('show');
+    setTimeout(() => { t.remove(); tc = Math.max(0, tc - 1); }, 200);
+  };
+  if (isErr) t.addEventListener('click', dismiss);
+  // Errors stay long enough to read and copy; transient info/ok clear quickly.
+  setTimeout(dismiss, isErr ? 12000 : 3000);
 }
 
 /* ── fetch helper — checks status before parsing JSON ── */
@@ -10873,7 +10888,9 @@ async function patchCampaign(id, fields) {
 async function provisionSketch(id) {
   const camp = getCampaigns().find(c => c.id === id);
   if (!camp) return false;
-  patchCampaign(id, { sketchStatus: 'provisioning' });
+  // Await the status write so a sync failure cannot race the next patch, and so
+  // createCampaign's await truly covers "provisioning started" before the call.
+  await patchCampaign(id, { sketchStatus: 'provisioning', sketchError: '' });
   try {
     const data = await fetchJson(apiUrl('create-sketch'), {
       method: 'POST',
@@ -10881,16 +10898,26 @@ async function provisionSketch(id) {
       body: JSON.stringify({ campaign_id: id, campaign_name: camp.name }),
     });
     if (data && data.sketch_id) {
-      patchCampaign(id, { sketchId: data.sketch_id, sketchStatus: 'ready' });
+      await patchCampaign(id, { sketchId: data.sketch_id, sketchStatus: 'ready', sketchError: '' });
       toast('Sketch provisioned for ' + camp.name, 'ok');
       return true;
     }
-    patchCampaign(id, { sketchId: null, sketchStatus: 'failed' });
-    toast('Sketch provisioning failed: ' + ((data && data.error) || 'no sketch id returned'), 'err');
+    // WF16 returns {error, sketch_id:''} on a handled failure (unauthenticated,
+    // quota, Flowsint/Neo4j unreachable). Keep the reason: log it, persist it on
+    // the campaign so the panel can show it, and surface the full text.
+    // The toast the operator glimpsed as "something didn't resolve" is almost
+    // always WF16's "could not resolve or create investigation" — Flowsint API
+    // down / unauthed — which previously vanished after 3 seconds.
+    const reason = (data && data.error) || 'backend returned no sketch id';
+    console.error('[provisionSketch] create-sketch returned no sketch id', { campaign: id, response: data });
+    await patchCampaign(id, { sketchId: null, sketchStatus: 'failed', sketchError: reason });
+    toast('Sketch provisioning failed for ' + camp.name + ': ' + reason, 'err');
     return false;
   } catch (e) {
-    patchCampaign(id, { sketchId: null, sketchStatus: 'failed' });
-    toast('Sketch provisioning failed: ' + e.message, 'err');
+    const reason = (e && e.message) || String(e);
+    console.error('[provisionSketch] create-sketch request failed', e);
+    await patchCampaign(id, { sketchId: null, sketchStatus: 'failed', sketchError: reason });
+    toast('Sketch provisioning failed for ' + camp.name + ': ' + reason, 'err');
     return false;
   }
 }
@@ -11069,11 +11096,12 @@ function renderCampaignPanel() {
     const active = ac && ac.id === c.id;
     const mine   = isCampOwner(c);
     const skState = c.sketchId ? 'ready' : (c.sketchStatus || 'needs-sketch');
+    const skErr   = (!c.sketchId && c.sketchError) ? String(c.sketchError) : '';
     const skBadge = c.sketchId
       ? `<span style="font-family:var(--mono);font-size:9px;color:#3fb950;margin-left:6px;" title="Isolated sketch ${esc(c.sketchId)}">◈ sketch</span>`
-      : `<span style="font-family:var(--mono);font-size:9px;color:#d29922;margin-left:6px;" title="No isolated sketch yet — ingest/analysis land in a shared graph until provisioned">⚠ ${esc(skState)}</span>`;
+      : `<span style="font-family:var(--mono);font-size:9px;color:${skErr ? '#f85149' : '#d29922'};margin-left:6px;" title="${esc(skErr || 'No isolated sketch yet — ingest/analysis land in a shared graph until provisioned')}">⚠ ${esc(skState)}${skErr ? ' — ' + esc(skErr.slice(0, 80)) : ''}</span>`;
     const provBtn = c.sketchId ? ''
-      : `<button class="btn" onclick="provisionSketch('${esc(c.id)}')" title="Create this campaign's dedicated Flowsint sketch">Provision</button>`;
+      : `<button class="btn" onclick="provisionSketch('${esc(c.id)}')" title="${esc(skErr ? 'Retry: ' + skErr : "Create this campaign's dedicated Flowsint sketch")}">${skErr ? 'Retry Provision' : 'Provision'}</button>`;
     // An import that failed after the sketch was created and was kept anyway: say so
     // rather than let a half-populated graph look like a complete campaign.
     const impBadge = c.importIncomplete
