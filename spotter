@@ -59,6 +59,7 @@ shift || true
 
 case "$cmd" in
     up)
+        run_root python3 "$ROOT_DIR/scripts/migrate_flowsint_url.py" || true
         run_root "$COMPOSE" up -d "$@"
         ;;
     down)

@@ -356,7 +356,7 @@ services:
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
       WEBUI_AUTH: "true"
       # --- Flowsint integration (available as env vars inside Tool code) ---
-      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
       # --- Neo4j HTTP API (for Cypher tool) ---

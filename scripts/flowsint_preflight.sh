@@ -28,7 +28,7 @@ done
 
 RUNNERS="${SPOTTER_RUNNERS_CONTAINER:-spotter-n8n-runners}"
 NEO4J_CONTAINER="${SPOTTER_NEO4J_CONTAINER:-flowsint-neo4j-prod}"
-DEFAULT_INTERNAL_URL="http://flowsint-api:5001"
+DEFAULT_INTERNAL_URL="http://flowsint-api-prod:5001"
 DEFAULT_HOST_URL="http://127.0.0.1:5001"
 
 BOLD=$'\033[1m'; RESET=$'\033[0m'; RED=$'\033[31m'; GREEN=$'\033[32m'
@@ -134,6 +134,14 @@ except Exception as e:
 print(json.dumps(out))
 '
 
+dns_candidates() {
+    local nets n
+    nets="$("${DOCKER[@]}" inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$RUNNERS" 2>/dev/null)"
+    for n in $nets; do
+        "${DOCKER[@]}" network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$n" 2>/dev/null
+    done | tr ' ' '\n' | grep -iE 'flowsint.*api' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
 field() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); v=d.get(sys.argv[2], ""); print(v if not isinstance(v,bool) else ("1" if v else ""))' "$1" "$2" 2>/dev/null; }
 
 # WF16's Code node runs under the task runner's venv interpreter (see
@@ -177,9 +185,20 @@ else
             401|403) fail "GET $url/api/investigations -> $st (token rejected or expired)" \
                  "sudo python3 scripts/refresh_flowsint_token.py" \
                  "./spotter compose up -d --no-deps --force-recreate n8n task-runners" ;;
-            "") fail "GET $url/api/investigations unreachable from $RUNNERS: $(field "$RESULT" inv_error)" \
-                 "check FLOWSINT_API_URL (default $DEFAULT_INTERNAL_URL) and that both containers share the flowsint network" \
-                 "./spotter logs api" ;;
+            "")
+                err="$(field "$RESULT" inv_error)"
+                if [[ "$err" =~ [Nn]ame\ or\ service\ not\ known|[Tt]emporary\ failure\ in\ name\ resolution|getaddrinfo|NameResolution|nodename\ nor\ servname|No\ address\ associated ]]; then
+                    host="$(printf "%s" "$url" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+                    cands="$(dns_candidates)"
+                    fail "GET $url/api/investigations: DNS cannot resolve '$host' from $RUNNERS" \
+                         "Flowsint API containers on the shared network: ${cands:-none found}" \
+                         "set FLOWSINT_API_URL=http://${cands%% *}:5001 (sudo python3 scripts/migrate_flowsint_url.py fixes the old default)" \
+                         "then: ./spotter compose up -d --no-deps --force-recreate n8n task-runners open-webui"
+                else
+                    fail "GET $url/api/investigations unreachable from $RUNNERS: $err" \
+                         "check FLOWSINT_API_URL (default $DEFAULT_INTERNAL_URL) and that both containers share the flowsint network" \
+                         "./spotter logs api"
+                fi ;;
             *) fail "GET $url/api/investigations -> HTTP $st" "./spotter logs api   (5xx usually means Postgres/Neo4j behind it is down)" ;;
         esac
         if [[ -n "$(field "$RESULT" client_ok)" ]]; then

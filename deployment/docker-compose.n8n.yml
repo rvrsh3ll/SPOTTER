@@ -8,7 +8,8 @@
 # file FIRST, and deliberately omits --project-directory.
 #
 # The n8n container joins the Flowsint Docker network so it can reach
-# flowsint-api directly at http://flowsint-api:5001 with no extra config.
+# Flowsint's API container (flowsint-api-prod, port 5001) directly with no extra
+# config. docker-compose.flowsint.yml also gives it the alias flowsint-api.
 # The network is declared `external` and owned by Flowsint's prod stack
 # (name: ${FLOWSINT_NETWORK}). Bring up the Flowsint stack (or include its
 # compose file in the same launch) first so the network already exists.
@@ -56,7 +57,7 @@ services:
       # Credential-encryption key pinned in .env (was only inside the volume's config).
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       # --- Flowsint ---
-      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
       # --- Cobalt Strike ---
@@ -327,8 +328,8 @@ services:
       SPOTTER_PROXY_URL: ${SPOTTER_PROXY_URL:-}
       HTTP_PROXY: ${SPOTTER_PROXY_URL:-}
       HTTPS_PROXY: ${SPOTTER_PROXY_URL:-}
-      NO_PROXY: "flowsint-api,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,127.0.0.1,localhost,.flowsint_net"
-      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api:5001}
+      NO_PROXY: "flowsint-api,flowsint-api-prod,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,127.0.0.1,localhost,.flowsint_net"
+      FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
       NEO4J_HTTP_URL: ${NEO4J_HTTP_URL:-http://flowsint-neo4j-prod:7474}

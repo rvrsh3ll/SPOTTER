@@ -48,7 +48,7 @@ from asset_labels import SERVICE_TYPES_LOWER, TECH_TYPES_LOWER
 
 class Tools:
     def __init__(self):
-        self.api_url   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api:5001")
+        self.api_url   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api-prod:5001")
         self.api_key   = os.environ.get("FLOWSINT_API_KEY", "")
         self.sketch_id = os.environ.get("FLOWSINT_SKETCH_ID", "")
         self._engine_instance = None

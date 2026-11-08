@@ -257,6 +257,10 @@ else
 fi
 
 # ── 6. Flowsint account + API token ──────────────────────────────────────────
+step "Flowsint API URL"
+python3 "$ROOT_DIR/scripts/migrate_flowsint_url.py" \
+    || warn "could not migrate FLOWSINT_API_URL -- set it to http://flowsint-api-prod:5001 in .env"
+
 step "Flowsint account and API token"
 FL_API="http://127.0.0.1:5001"
 if is_unset FLOWSINT_API_KEY; then

@@ -4,7 +4,7 @@ flowsint_client.py — Thin REST client for the Flowsint API.
 All SPOTTER scripts and enrichers use this module to talk to Flowsint rather
 than constructing raw HTTP calls individually.
 
-API base   : FLOWSINT_API_URL env var  (default http://flowsint-api:5001)
+API base   : FLOWSINT_API_URL env var  (default http://flowsint-api-prod:5001)
 Auth       : Bearer token via FLOWSINT_API_KEY env var
 Sketch     : FLOWSINT_SKETCH_ID env var — all entities land in this sketch
 
@@ -31,7 +31,7 @@ from urllib3.util.retry import Retry
 
 # ── Configuration (read from environment) ─────────────────────────────────────
 
-API_URL   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api:5001")
+API_URL   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api-prod:5001")
 API_KEY   = os.environ.get("FLOWSINT_API_KEY", "")
 SKETCH_ID = os.environ.get("FLOWSINT_SKETCH_ID", "")
 

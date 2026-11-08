@@ -85,7 +85,7 @@ def _derive_specialty(job_title: Optional[str]) -> Optional[str]:
 
 class Tools:
     def __init__(self):
-        self.api_url   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api:5001")
+        self.api_url   = os.environ.get("FLOWSINT_API_URL", "http://flowsint-api-prod:5001")
         self.api_key   = os.environ.get("FLOWSINT_API_KEY", "")
         self.sketch_id = os.environ.get("FLOWSINT_SKETCH_ID", "")
 

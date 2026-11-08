@@ -204,6 +204,14 @@ services:
 
   # ── Flowsint API — enrichers volume-mount + Maigret + LinkedIn env ─────────
   api:
+    # Upstream names the container flowsint-api-prod and gives it no alias, so
+    # older SPOTTER configs pointing at http://flowsint-api:5001 failed DNS.
+    # The alias keeps both names resolvable on the shared network.
+    networks:
+      flowsint_network:
+        aliases:
+          - flowsint-api
+          - flowsint-api-prod
     environment:
       - MAIGRET_API_URL=http://maigret-api:7050
       - MAIGRET_TIMEOUT=30
