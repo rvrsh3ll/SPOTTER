@@ -86,25 +86,33 @@ fi
 
 # Runs inside the task-runners container, exactly as WF16's Python Code node does.
 PROBE='
-import os, sys, json
+import os, sys, json, base64, urllib.request, urllib.error
 sys.path.insert(0, "/data/scripts")
-out = {"url": os.environ.get("FLOWSINT_API_URL") or "", "key_set": bool(os.environ.get("FLOWSINT_API_KEY"))}
-try:
-    import requests
-except Exception as e:
-    out["fatal"] = "python requests missing: %s" % e
-    print(json.dumps(out)); sys.exit(0)
+out = {"py": sys.executable, "url": os.environ.get("FLOWSINT_API_URL") or "", "key_set": bool(os.environ.get("FLOWSINT_API_KEY"))}
+def call(url, headers, data=None):
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
 base = out["url"] or "'"$DEFAULT_INTERNAL_URL"'"
 out["url"] = base
 try:
-    r = requests.get(base.rstrip("/") + "/api/investigations",
-                     headers={"Authorization": "Bearer " + os.environ.get("FLOWSINT_API_KEY", "")}, timeout=10)
-    out["inv_status"] = r.status_code
-    if r.status_code == 200:
-        try: out["inv_count"] = len(r.json())
+    st, body = call(base.rstrip("/") + "/api/investigations",
+                    {"Authorization": "Bearer " + os.environ.get("FLOWSINT_API_KEY", ""), "Accept": "application/json"})
+    out["inv_status"] = st
+    if st == 200:
+        try: out["inv_count"] = len(json.loads(body))
         except Exception: out["inv_count"] = -1
 except Exception as e:
     out["inv_error"] = type(e).__name__ + ": " + str(e)[:200]
+try:
+    import requests  # noqa: F401
+    out["requests_ok"] = True
+except Exception as e:
+    out["requests_ok"] = False
+    out["requests_error"] = str(e)[:200]
 try:
     import flowsint_client  # noqa: F401
     out["client_ok"] = True
@@ -113,12 +121,13 @@ except Exception as e:
     out["client_error"] = str(e)[:200]
 nurl = os.environ.get("NEO4J_HTTP_URL") or "http://flowsint-neo4j-prod:7474"
 out["neo4j_url"] = nurl
+auth = base64.b64encode(("%s:%s" % (os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", ""))).encode()).decode()
 try:
-    r = requests.post(nurl.rstrip("/") + "/db/neo4j/tx/commit",
-                      json={"statements": [{"statement": "RETURN 1"}]},
-                      auth=(os.environ.get("NEO4J_USER", "neo4j"), os.environ.get("NEO4J_PASSWORD", "")), timeout=10)
-    out["neo4j_status"] = r.status_code
-    try: out["neo4j_errors"] = len(r.json().get("errors") or [])
+    st, body = call(nurl.rstrip("/") + "/db/neo4j/tx/commit",
+                    {"Authorization": "Basic " + auth, "Content-Type": "application/json", "Accept": "application/json"},
+                    json.dumps({"statements": [{"statement": "RETURN 1"}]}).encode())
+    out["neo4j_status"] = st
+    try: out["neo4j_errors"] = len(json.loads(body).get("errors") or [])
     except Exception: out["neo4j_errors"] = -1
 except Exception as e:
     out["neo4j_error"] = type(e).__name__ + ": " + str(e)[:200]
@@ -127,9 +136,14 @@ print(json.dumps(out))
 
 field() { python3 -c 'import json,sys; d=json.loads(sys.argv[1]); v=d.get(sys.argv[2], ""); print(v if not isinstance(v,bool) else ("1" if v else ""))' "$1" "$2" 2>/dev/null; }
 
+# WF16's Code node runs under the task runner's venv interpreter (see
+# deployment/n8n-task-runners.json), not the image's system python3.
+RUNNER_PY="${SPOTTER_RUNNER_PYTHON:-/opt/runners/task-runner-python/.venv/bin/python}"
 RESULT=""
 probe_ok() {
-    RESULT="$("${DOCKER[@]}" exec "$RUNNERS" python3 -c "$PROBE" 2>/dev/null | tail -1)"
+    local py="$RUNNER_PY"
+    "${DOCKER[@]}" exec "$RUNNERS" test -x "$py" 2>/dev/null || py=python3
+    RESULT="$("${DOCKER[@]}" exec "$RUNNERS" "$py" -c "$PROBE" 2>/dev/null | tail -1)"
     [[ -n "$RESULT" && "$(field "$RESULT" inv_status)" == "200" && "$(field "$RESULT" neo4j_status)" == "200" ]]
 }
 
@@ -140,10 +154,15 @@ else
     pass "n8n task-runners container running ($RUNNERS)"
     retry probe_ok
     if [[ -z "$RESULT" ]]; then
-        fail "probe executed inside $RUNNERS" "docker exec $RUNNERS python3 -V   (python3 must exist in the runners image)"
-    elif [[ -n "$(field "$RESULT" fatal)" ]]; then
-        fail "probe executed inside $RUNNERS: $(field "$RESULT" fatal)" "rebuild the runners image: ./spotter compose build task-runners"
+        fail "probe executed inside $RUNNERS" "docker exec $RUNNERS $RUNNER_PY -V   (the runner venv interpreter must exist)"
     else
+        if [[ -n "$(field "$RESULT" requests_ok)" ]]; then
+            pass "python requests available to the task runner ($(field "$RESULT" py))"
+        else
+            fail "python requests available to the task runner ($(field "$RESULT" py)) — flowsint_client needs it, so WF16 fails without it" \
+                 "rebuild the runners image: docker build -t spotter-n8n-runners:local deployment/ -f deployment/Dockerfile.runners" \
+                 "then: ./spotter compose up -d --no-deps --force-recreate task-runners"
+        fi
         url="$(field "$RESULT" url)"
         if [[ -n "$(field "$RESULT" key_set)" ]]; then
             pass "FLOWSINT_API_KEY present in $RUNNERS (value not shown)"
