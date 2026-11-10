@@ -378,7 +378,7 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
     # --- Company-website crawl (workflow 13, `org` source) ---
     "SITE_TAVILY": {
         "type": "int", "default": 0, "lo": 0, "hi": 2,
-        "group": "Organization", "label": "Website crawl backend",
+        "group": "Organization", "label": "Website crawl backend (unused; use Active > Site Clone)",
         "help": "0 = SPOTTER's own crawler: sitemap-first discovery, requests "
                 "leave from the campaign egress, and nothing but the target's "
                 "own domain is ever fetched. 1 = Tavily /map + /extract: Tavily "
@@ -418,7 +418,7 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
     },
     "SITE_MAX_SECONDS": {
         "type": "int", "default": 180, "lo": 10, "hi": 900,
-        "group": "Organization", "label": "Website crawl ceiling (s)",
+        "group": "Organization", "label": "Website crawl ceiling (s) (unused; use Active > Site Clone)",
         "help": "Wall-clock stop for the crawl, whatever the page count. The "
                 "crawl is rate-limited, so a large page budget needs a matching "
                 "ceiling or it stops early and silently.",

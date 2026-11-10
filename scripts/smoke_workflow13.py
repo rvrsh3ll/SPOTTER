@@ -1637,8 +1637,7 @@ def main() -> None:
                 "identical vacancy addresses fold into one office with a count", offices)
     assert_true(_hh_off[0].get("metro") == "Primernaya",
                 "office should keep the metro hint", _hh_off[0])
-    assert_true(any(o["label"] == "Denver, CO" for o in offices),
-                "a website-named office joins the hh.ru list", offices)
+    # Live website crawl no longer feeds offices (Active tab Site Clone does).
 
     # Contacts: the hidden count is the denominator that makes an empty list
     # readable as "withheld" instead of "this employer has no recruiters".
@@ -1747,7 +1746,7 @@ def main() -> None:
                 "every provider records itself, run or not", sorted(provs))
     assert_true(provs["linkedin-serp"]["transport"] == "serpapi",
                 "the SERP transport is named so the card can show it", provs["linkedin-serp"])
-    assert_true(provs["website"]["status"] == "ok", "the website provider ran", provs["website"])
+    assert_true(provs["website"]["status"] == "skipped", "the website provider points at Site Clone", provs["website"])
     assert_true(org.get("org_source") and "serpapi" in org["org_source"],
                 "the derived scalar still exists for cached phase-1 records",
                 org.get("org_source"))
@@ -1760,11 +1759,8 @@ def main() -> None:
     assert_true(tavily_state["ctor"].get("budget_credits") is not None,
                 "Tavily client receives the shared credit ceiling",
                 tavily_state["ctor"])
-    assert_true(site_state["calls"][0].get("proxy_url") == "socks5h://proxy.local:1080",
-                "site crawler receives the campaign proxy", site_state["calls"][0])
-    assert_true(site_state["calls"][0].get("sketch_id") == "smoke-sketch",
-                "the site corpus is namespaced to the campaign's sketch",
-                site_state["calls"][0])
+    assert_true(site_state["calls"] == [],
+                "Domain Recon no longer invokes the live site crawler", site_state["calls"])
 
     # The four linkedin_* keys that had never held a value.
     #
@@ -1783,7 +1779,7 @@ def main() -> None:
     # with the reason it did not qualify.
     names = [p["name"] for p in org.get("org_people") or []]
     held_names = [p["name"] for p in org.get("org_people_unverified") or []]
-    assert_true("Dana Webb" in names and "Sam Ortiz" in names and "Jane Roe" in names,
+    assert_true("Dana Webb" in names and "Sam Ortiz" in names,
                 "evidenced people from both providers land", names)
     assert_true(names.count("Dana Webb") == 1,
                 "a person returned by both providers appears once", names)
@@ -1816,13 +1812,10 @@ def main() -> None:
                 "a blank field is filled in from a later provider", dana)
     assert_true(dana.get("job_title") == "Senior Systems Administrator",
                 "...including the job title the gate scores", dana)
-    # THE REGRESSION. The website merge used to `continue` on a name the SERP had
-    # already returned, so the company's own statement about its own staff was
-    # silently thrown away and Dana was judged on a bare LinkedIn claim.
-    assert_true(dana.get("site_named") is True,
-                "being named on the company's own site survives the merge", dana)
-    assert_true(dana["tier"] == "confirmed" and dana["edge_label"] == "WORKS_FOR",
-                "...and that org-side evidence CONFIRMS employment", dana)
+    # Site-named confirmation used to arrive from the live website crawl.
+    # That crawl moved to the Active tab; LinkedIn/SERP evidence still stands.
+    assert_true(dana.get("tier") in {"confirmed", "reported"},
+                "Dana is still evidenced without the live site crawl", dana)
     sam = [p for p in org["org_people"] if p["name"] == "Sam Ortiz"][0]
     assert_true(sam["tier"] == "reported" and sam["edge_label"] == "CLAIMS_WORKS_FOR",
                 "a profile-only claim is reported, never confirmed", sam)
@@ -1840,17 +1833,17 @@ def main() -> None:
                 "the held count is reported for the card", org.get("org_people_held"))
 
     units = [u["name"] for u in org.get("org_units") or []]
-    assert_true("Example Cloud" in units and "Widget Division" in units,
-                "org units merge across providers", units)
+    assert_true("Example Cloud" in units,
+                "org units from remaining providers still land", units)
     assert_true(any(m["name"] == "Reseller Ltd" for m in org.get("org_mentions") or []),
                 "a company that merely mentions the target stays a mention",
                 org.get("org_mentions"))
-    assert_true(any(v["name"] == "Globex" for v in org.get("org_vendors") or []),
-                "a site-named partner joins the DNS-derived vendors",
-                [v["name"] for v in org.get("org_vendors") or []])
-    assert_true(org.get("org_site", {}).get("pages_refused") == 3,
-                "the count of off-domain URLs the scope lock refused is surfaced",
+    assert_true((org.get("org_site") or {}).get("empty_kind") == "use_active_clone",
+                "org_site points operators at the Active tab Site Clone",
                 org.get("org_site"))
+    assert_true({p["provider"]: p for p in org.get("org_sources") or []}.get("website", {}).get("status") == "skipped",
+                "the website provider is skipped rather than a fake empty crawl",
+                {p["provider"]: p for p in org.get("org_sources") or []}.get("website"))
 
     # ── open roles, and the employer gate on them ────────────────────────────
     # The second vacancy source, and the first that is not region-gated.
@@ -1989,10 +1982,8 @@ def main() -> None:
 
     # Graph: the relational half.
     org_edges = {e["label"] for e in org_graph["edges"]}
-    assert_true("WORKS_FOR" in org_edges, "confirmed people are linked to the company",
-                sorted(org_edges))
     assert_true("CLAIMS_WORKS_FOR" in org_edges,
-                "a self-reported claim gets its own weaker label", sorted(org_edges))
+                "self-reported employment still links people to the company", sorted(org_edges))
     assert_true("HAS_UNIT" in org_edges, "units are linked to the company", sorted(org_edges))
     assert_true("USES_TECH" in org_edges, "named technologies become edges", sorted(org_edges))
     people_nodes = [n for n in org_graph["nodes"] if n["node_type"] == "individual"]
@@ -2012,7 +2003,7 @@ def main() -> None:
                 "a held person is never written as an Individual", sorted(written_names))
     # employment_tier is the marker scripts/prune_org_people.py keys on: edge
     # `data` is dropped by the importer, node properties are not.
-    assert_true(dana_node["properties"].get("employment_tier") == "confirmed",
+    assert_true(dana_node["properties"].get("employment_tier") in {"confirmed", "reported"},
                 "the tier is stamped on the node for later cleanup",
                 dana_node["properties"])
     assert_true(bool(dana_node["properties"].get("employment_evidence")),
@@ -2103,30 +2094,17 @@ def main() -> None:
     assert_true("SERP_API_KEY" in (up["linkedin-serp"]["note"] or ""),
                 "...and the note names the fix", up["linkedin-serp"])
 
-    # ── A crawl that never REACHED the site is not an empty site ─────────────
-    # The 2026-09-21 defect, in the one place it was visible to an operator: the
-    # target silently dropped the campaign's Tor egress, every fetch timed out,
-    # and the provider row said "no match" -- the status that means we looked and
-    # there was nothing there. Six consecutive runs read as completed crawls.
+    # Live full-site crawl left Domain Recon. The website provider now points
+    # at the Active tab regardless of egress, and other org providers still run.
     unreach, _, _ = run_smoke_case(code, org_payload, site_unreachable=True)
     _uw = {p["provider"]: p for p in unreach["org_sources"]}["website"]
-    assert_true(_uw["status"] == "unreachable",
-                "an unreached site is its own status, never 'no_match'", _uw)
-    assert_true("NOT REACHED" in (_uw["note"] or ""),
-                "...and the note says so in the operator's words", _uw)
-    assert_true("socks5h://proxy.local:1080" in (_uw["note"] or ""),
-                "...naming the egress that could not reach it, which is the "
-                "operator's next decision", _uw)
+    assert_true(_uw["status"] == "skipped",
+                "website source is skipped (clone lives in the Active tab)", _uw)
     _us = unreach.get("org_site") or {}
-    assert_true(_us.get("unreachable") is True,
-                "org_site carries the transport failure to the card", _us)
-    assert_true(_us.get("blocked") is False,
-                "a timeout is not a WAF refusal", _us)
-    assert_true(_us.get("empty_kind") == "site_unreachable",
-                "the empty_kind reaches the response", _us)
-    assert_true(_us.get("empty_message") == SITE_UNREACHABLE_MESSAGE,
-                "...with the message the card prints in place of the "
-                "'Crawled the target\'s own site' boilerplate", _us)
+    assert_true(_us.get("empty_kind") == "use_active_clone",
+                "org_site tells the operator to use Site Clone", _us)
+    assert_true("Active tab" in (_us.get("empty_message") or ""),
+                "...and the card message names the Active tab", _us)
     assert_true(unreach.get("org_profile", {}).get("name"),
                 "the other providers still fill the profile",
                 unreach.get("org_profile"))
@@ -2150,7 +2128,7 @@ def main() -> None:
     assert_true(bp["sec-edgar"]["status"] == "ok",
                 "EDGAR still ran despite two siblings failing", bp)
     assert_true(bp["linkedin-serp"]["status"] == "error", "SERP failure recorded", bp)
-    assert_true(bp["website"]["status"] == "error", "site failure recorded", bp)
+    assert_true(bp["website"]["status"] == "skipped", "website source stays skipped (no live crawl to fail)", bp)
     assert_true(bp["hh.ru"]["status"] == "ok",
                 "hh.ru still ran despite both siblings failing", bp)
     assert_true(broken.get("org_profile", {}).get("name"),
@@ -2186,8 +2164,8 @@ def main() -> None:
     # The other two providers are not region-gated, so the card is NOT empty.
     assert_true(_no_ru_provs["linkedin-serp"]["status"] == "ok",
                 "the SERP provider is not region-gated", _no_ru_provs.get("linkedin-serp"))
-    assert_true(_no_ru_provs["website"]["status"] == "ok",
-                "the website provider is not region-gated", _no_ru_provs.get("website"))
+    assert_true(_no_ru_provs["website"]["status"] == "skipped",
+                "the website provider is not region-gated (still points at Site Clone)", _no_ru_provs.get("website"))
     assert_true(no_ru.get("org_profile"),
                 "a profile still comes from the non-region-gated providers",
                 no_ru.get("org_profile"))

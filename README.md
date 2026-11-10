@@ -487,6 +487,34 @@ returns before either stage).
 
 ---
 
+## Active tab — Site Clone
+
+Activities that **touch the target directly** live in the **Active** tab. The first
+feature is **Site Clone**:
+
+1. Pick a URL from the campaign (Objectives org URLs/domains, the company-email
+   domain, Targets assets, or Domain Recon's current domain) or paste one.
+   **Send to Active** / **Clone in Active** buttons on those surfaces fill the form
+   without starting a job — review the caps first.
+2. Set max depth (default 2), connect timeout, overall time, byte and file caps,
+   whether to stay on the same host, whether to follow robots.txt (on by default),
+   which asset types to keep, and how far external assets may wander (default: none).
+3. **Respect OPSEC profile** (on by default) sends the Infrastructure tab's
+   User-Agent and proxy/TOR settings with the job. HTTP proxies are passed to
+   HTTrack; SOCKS5/TOR go through proxychains4 in the clone container.
+4. Start the job. Progress, cancel and retry live in the job list (persisted on the
+   campaign, including export/import). When a job finishes, **Open findings** shows
+   the offline analysis, and the workflow writes Email / Individual / WebAsset /
+   Credential / Technology nodes into the campaign sketch.
+
+The clone runs inside the `spotter-site-clone` container, not on the host. Output
+lands in `data/clones/<campaignId>/<jobId>/`. After a compose update, rebuild that
+image: `./spotter compose up -d --build site-clone-api`.
+
+What it does *not* do yet: OCR of images, JavaScript deobfuscation, or applying
+Infrastructure DNS resolvers unless traffic already goes through the campaign
+proxy (Docker DNS is used otherwise).
+
 ## Organization Intelligence (Live Analysis › Organization)
 
 Everything else on Live Analysis describes the target's *infrastructure* or its
@@ -502,7 +530,7 @@ Run it from **Live Analysis → DOMAIN RECON ▾ → Enrich Organization**, or a
 | Source | Where it comes from | Needs a region? | Needs egress? | Needs a key? |
 |---|---|---|---|---|
 | **Vendors / partners** | The domain's own SPF `include:`, MX, NS and CNAME records, already collected by base recon | no | no | no |
-| **Website crawl** | The target's own site — the only source that works for a private company | no | yes | no |
+| **Website (moved)** | Live full-site crawl was removed from this card. Use **Active → Site Clone** (HTTrack, offline analysis, OPSEC-aware). The org card links there. A single proxied homepage title probe in Domain Recon remains. | no | yes | no |
 | **LinkedIn (via search)** | Google's index of `linkedin.com/company` and `linkedin.com/in`, read through SerpAPI | no | yes | SerpAPI |
 | **LinkedIn (via Tavily)** | The same LinkedIn pages, read through Tavily's semantic index. A *peer* of the SerpAPI provider, not a transport of it: it emits its own row, and when both keys are present **Tavily answers first and SerpAPI fills the gaps** | no | yes | Tavily |
 | **Open roles (Google Jobs)** | Postings the target is advertising, via SerpAPI's `google_jobs` engine, falling back to `site:linkedin.com/jobs/view`. The only vacancy source that is not region-gated | no | yes | SerpAPI |
@@ -2543,7 +2571,8 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Infrastructure** | Egress identity, proxy profile (HTTP / SOCKS5 / **TOR**), managed SSH tunnel, and OPSEC presets for User-Agent and DNS resolvers (Western plus RU/CN options) |
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
-| **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export |
+| **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export. Websites, domains and subdomains can be sent to **Active → Site Clone**. |
+| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy) and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |

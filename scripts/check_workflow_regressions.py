@@ -2326,6 +2326,7 @@ def check_task_runner_env(failures: List[str]) -> None:
                 # certificate-transparency source alongside the inline CertKit
                 # call. Its absence kills the node the same way as the others.
                 "certcreep",
+                "site_clone", "site_clone_analyze", "site_clone_ingest",
                 # Imported directly by WF05 and WF08. A missing entry is a
                 # security violation before line 1; try/except does not save it.
                 "individual_lookup"):

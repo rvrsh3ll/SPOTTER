@@ -54,6 +54,7 @@
         "ENVIRONMENT",
         "DEPLOYMENT_NAME",
         "FLOWSINT_API_URL",
+        "SITE_CLONE_API_URL",
         "FLOWSINT_API_KEY",
         "FLOWSINT_SKETCH_ID",
         "SHARPHOUND_DROP_DIR",
@@ -229,7 +230,7 @@
       ],
       "env-overrides": {
         "N8N_RUNNERS_STDLIB_ALLOW": "*",
-        "N8N_RUNNERS_EXTERNAL_ALLOW": "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,tuoni_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup",
+        "N8N_RUNNERS_EXTERNAL_ALLOW": "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,tuoni_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup,site_clone_ingest,site_clone_analyze,site_clone",
         "N8N_BLOCK_RUNNER_ENV_ACCESS": "false"
       }
     }

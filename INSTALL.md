@@ -324,6 +324,22 @@ Trade-offs:
   (extra claims, revocation lists, or an issued-at check would break self-signed tokens);
   `sudo ./spotter check-flowsint` catches a rejected token either way.
 
+## Active tab / Site Clone
+
+After bootstrap, rebuild the clone worker once if the image is not yet on the host:
+
+```bash
+sudo ./spotter compose up -d --build site-clone-api
+```
+
+Then open **Active** in the dashboard, paste or send a target URL, review the
+caps, and click **Start clone**. Jobs appear in the list. If a job fails with
+`site-clone-api unreachable`, the worker container is not running.
+
+Live website crawling was removed from Domain Recon / Organization enrichment;
+that card now points here. Domain Recon still makes one proxied request for the
+homepage title.
+
 ## 8. Troubleshooting, by symptom
 
 | What you see | What it is |

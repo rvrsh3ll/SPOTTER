@@ -1091,6 +1091,21 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 }
 .obj-org-rm:hover { color: var(--accent); border-color: var(--accent); }
 
+/* ── Active / Site Clone ────────────────────────────────────────── */
+.aclone-opts { display:flex; flex-wrap:wrap; gap:4px 18px; margin-bottom:8px; }
+.aclone-opts .obj-field { margin-bottom:6px; }
+.aclone-toggles { display:flex; flex-wrap:wrap; gap:10px 18px; margin:8px 0 14px; }
+.aclone-job { border:1px solid var(--border); border-radius:3px; padding:8px 12px; margin-bottom:8px; background:var(--surface); }
+.aclone-job-hd { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.aclone-st { font-family:var(--mono); font-size:8px; letter-spacing:.1em; text-transform:uppercase; padding:1px 6px; border:1px solid var(--border); border-radius:2px; }
+.aclone-st-running, .aclone-st-queued { color:var(--data); border-color:var(--data); }
+.aclone-st-done { color:var(--ok, #3fb950); border-color:var(--ok, #3fb950); }
+.aclone-st-failed, .aclone-st-cancelled { color:var(--warn); border-color:var(--warn); }
+.aclone-find-tbl { width:100%; font-size:11px; margin-top:8px; }
+.aclone-find-tbl td, .aclone-find-tbl th { padding:3px 6px; text-align:left; vertical-align:top; border-bottom:1px solid var(--border); }
+.aclone-sev-high, .aclone-sev-critical { color:var(--warn); }
+.aclone-sev-medium { color:var(--data); }
+
 /* ── infrastructure panel ───────────────────────────────────────── */
 .infra-inline {
   display: flex; gap: 10px; flex-wrap: wrap; width: 100%;
@@ -1938,6 +1953,7 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
     <button class="tb on"  id="tb-ingest"     role="tab" aria-selected="true"  onclick="sw('ingest')">Ingest</button>
     <button class="tb"     id="tb-dossier"    role="tab" aria-selected="false" onclick="sw('dossier')">Dossier</button>
     <button class="tb"     id="tb-targets"    role="tab" aria-selected="false" onclick="sw('targets')">Targets</button>
+    <button class="tb"     id="tb-active"     role="tab" aria-selected="false" onclick="sw('active')">Active</button>
     <button class="tb"     id="tb-agents"     role="tab" aria-selected="false" onclick="sw('agents')">Agents</button>
     <button class="tb"     id="tb-web"        role="tab" aria-selected="false" onclick="sw('web')">Web</button>
     <button class="tb"     id="tb-prompt"     role="tab" aria-selected="false" onclick="sw('prompt')">Prompt</button>
@@ -2512,6 +2528,70 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
       <div id="tres" aria-live="polite"></div>
     </section>
 
+    <!-- ── ACTIVE (direct-touch activities) ───────────────────── -->
+    <section class="pnl" id="pnl-active" role="tabpanel">
+      <div class="sh">Active
+        <span style="display:flex;gap:6px;align-items:center;">
+          <span class="sp" id="aclonesp" aria-live="polite"></span>
+        </span>
+      </div>
+      <div id="aclone-nocampaign" class="wbar" style="display:none;">
+        No active campaign — create one in the <strong>Ingest</strong> tab first. Site clones are stored per campaign.
+      </div>
+      <p class="radio-hint" id="aclone-hint">
+        Activities that contact the target directly. <strong>Site Clone</strong> downloads a site
+        with HTTrack (depth, timeouts and size caps), then mines the offline copy for emails,
+        people, forms, JavaScript endpoints, secret-shaped strings, comments, sourcemaps and EXIF.
+        Findings are written to this campaign's sketch. Live website crawling was removed from
+        Domain Recon / Organization enrichment; use this tab instead.
+      </p>
+
+      <div id="aclone-form">
+        <div class="sh" style="margin-top:8px;">Site Clone</div>
+        <div class="obj-field">
+          <label for="aclone-url">Target URL</label>
+          <input id="aclone-url" class="fi-sm" type="text" placeholder="https://example.com"
+            style="width:360px;" list="aclone-url-list">
+          <datalist id="aclone-url-list"></datalist>
+          <button class="btn" type="button" onclick="acloneFillFromCampaign()" title="Load URLs and domains from Objectives, Targets and Web">From campaign</button>
+        </div>
+        <div class="aclone-opts">
+          <div class="obj-field"><label for="aclone-depth">Max depth</label>
+            <input id="aclone-depth" class="fi-sm" type="number" min="0" max="8" value="2" style="width:80px;"></div>
+          <div class="obj-field"><label for="aclone-ctime">Connect timeout (s)</label>
+            <input id="aclone-ctime" class="fi-sm" type="number" min="3" max="120" value="20" style="width:80px;"></div>
+          <div class="obj-field"><label for="aclone-mtime">Max time (s)</label>
+            <input id="aclone-mtime" class="fi-sm" type="number" min="15" max="3600" value="300" style="width:80px;"></div>
+          <div class="obj-field"><label for="aclone-bytes">Max bytes</label>
+            <input id="aclone-bytes" class="fi-sm" type="number" min="1048576" value="104857600" style="width:140px;"></div>
+          <div class="obj-field"><label for="aclone-files">Max files</label>
+            <input id="aclone-files" class="fi-sm" type="number" min="10" max="20000" value="2000" style="width:80px;"></div>
+          <div class="obj-field"><label for="aclone-external">External assets</label>
+            <select id="aclone-external" class="fi-sm" style="width:240px;">
+              <option value="none" selected>None (same host only)</option>
+              <option value="same_registrable">Same registrable domain</option>
+              <option value="all">All (not recommended)</option>
+            </select>
+          </div>
+        </div>
+        <div class="aclone-toggles">
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-samehost" checked> Stay on same host</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-robots" checked> Follow robots.txt</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-images" checked> Images</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-js" checked> JavaScript</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-css" checked> CSS</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-other" checked> Other files (PDF, text…)</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-opsec" checked> Respect OPSEC profile (User-Agent, proxy)</label>
+        </div>
+        <div class="obj-save-row">
+          <button class="btn btn-p" type="button" id="aclone-start" onclick="acloneStart()">Start clone</button>
+          <span style="font-family:var(--mono);font-size:9px;color:var(--dim);">Jobs run in Docker. Keep this tab open to watch progress; they continue on the server if you leave.</span>
+        </div>
+        <div id="aclone-jobs" aria-live="polite"></div>
+        <div id="aclone-findings"></div>
+      </div>
+    </section>
+
     <!-- ── AGENTS ────────────────────────────────────────────── -->
     <section class="pnl" id="pnl-agents" role="tabpanel">
       <div class="sh">
@@ -2691,6 +2771,8 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
               <div class="act-item" onclick="runDomainRecon(null,['buckets'])">Enrich Cloud Buckets</div>
             </div>
           </div>
+          <button class="btn" type="button" id="dr-clone-active" onclick="acloneSendFromDomainRecon()"
+            title="Open the Active tab to clone this domain with HTTrack">Clone in Active</button>
           <span class="sp" id="drsp" aria-live="polite"></span>
         <span id="dr-export"></span>
         </span>
@@ -6221,13 +6303,14 @@ async function adminApply() {
 
 /* ── tabs ── */
 function sw(name) {
-  ['objectives','infra','ingest','dossier','targets','agents','web','prompt','analysis','tech','admin'].forEach(t => {
+  ['objectives','infra','ingest','dossier','targets','active','agents','web','prompt','analysis','tech','admin'].forEach(t => {
     document.getElementById('tb-'+t).classList.toggle('on', t===name);
     document.getElementById('tb-'+t).setAttribute('aria-selected', t===name ? 'true' : 'false');
     document.getElementById('pnl-'+t).classList.toggle('on', t===name);
   });
   if (name === 'infra')      { infraLoadForm(); infraLoadKeys().catch(() => {}); infraApplyKeyAdminGate(); infraRefreshEgress(true).catch(() => {}); }
   if (name === 'targets')    loadTargets();
+  if (name === 'active')     acloneLoad();
   if (name === 'agents')     loadAgents();
   if (name === 'web')        loadWeb();
   if (name === 'ingest')     { renderCampaignPanel(); renderIngestLog(); updateEnrichSection(); }
@@ -8380,6 +8463,8 @@ function renderAssetTable(list, cid) {
         <div class="act-item" onclick="unmarkOutOfScope()">Clear OoS</div>
         <div class="act-item" onclick="markFalsePositive()" title="A result the operator judged wrong — hide it from every view, the export, the Prompt tab and the analysis">Mark False Positive (FP)</div>
         <div class="act-item" onclick="unmarkFalsePositive()">Clear FP</div>
+        <hr class="act-sep">
+        <div class="act-item" onclick="acloneSendSelectedAssets()" title="Open the Active tab to clone the selected website, domain or subdomain">Clone in Active</div>
       </div>
     </div>
   </div>
@@ -11198,7 +11283,7 @@ async function createCampaign() {
   // ingested data never mixes with another campaign's graph.
   const nc = { id, name, created: new Date().toISOString(), sketchId: null, sketchStatus: 'provisioning',
                owner: currentUsername() || undefined, sharedWith: [],
-               objectives: objDefaults() };
+               objectives: objDefaults(), activeJobs: [] };
   camps.push(nc);
   saveCampaigns(camps);
 
@@ -11553,7 +11638,7 @@ async function exportCampaign(id) {
       t: 'manifest', format: 'spotter-campaign', version: CAMP_BUNDLE_VERSION,
       exported_at: new Date().toISOString(),
       source: { instance: meta.instance || getBu(), sketch_id: camp.sketchId },
-      campaign: { id: camp.id, name: camp.name, created: camp.created, objectives: camp.objectives || {} },
+      campaign: { id: camp.id, name: camp.name, created: camp.created, objectives: camp.objectives || {}, activeJobs: acloneNormaliseJobs(camp.activeJobs) },
       counts: want, node_types: meta.node_types || [], custom_types: meta.custom_types || [],
     });
 
@@ -11680,6 +11765,7 @@ async function importCampaignFile(file) {
         socialRegions:    objNormaliseRegions(o.socialRegions),
         organizations:    objNormaliseOrgs(o.organizations),
       },
+      activeJobs: acloneNormaliseJobs(src.activeJobs),
     };
 
     // Collide against the SHARED registry, not just the local cache: WF18 upserts
@@ -14526,6 +14612,7 @@ function objOrgCardHtml(o) {
     + field('urls', 'URLs', 'https://example.com \u00b7 https://careers.example.com')
     + field('tech', 'Technologies', 'Okta \u00b7 Microsoft 365 \u00b7 Palo Alto')
     + field('notes', 'Notes', 'Relationship to the primary target, shared vendors, etc.')
+    + '<div class="obj-save-row"><button type="button" class="btn" onclick="acloneSendFromOrgCard(this)">Send URLs to Active</button></div>'
     + '</div>';
 }
 
@@ -14581,6 +14668,399 @@ function socialEnrichBody(body) {
   const regions = activeSocialRegions();
   return withInfraPayload(regions.length ? { ...body, social_regions: regions } : { ...body });
 }
+
+/* ── Active tab / Site Clone ─────────────────────────────────────── */
+const ACLONE_CLONEABLE = new Set(['WEBSITE','DOMAIN','SUBDOMAIN']);
+
+function acloneDefaults() {
+  return {
+    maxDepth: 2, connectTimeout: 20, maxTime: 300,
+    maxBytes: 104857600, maxFiles: 2000,
+    sameHost: true, robots: true,
+    includeImages: true, includeJs: true, includeCss: true, includeOther: true,
+    external: 'none', respectOpsec: true,
+  };
+}
+
+function acloneNormaliseJobs(jobs) {
+  if (!Array.isArray(jobs)) return [];
+  return jobs.slice(0, 50).map(j => {
+    if (!j || typeof j !== 'object') return null;
+    return {
+      id: String(j.id || j.job_id || ''),
+      url: String(j.url || '').slice(0, 2048),
+      status: String(j.status || 'queued'),
+      error: String(j.error || ''),
+      created: String(j.created || j.started_at || ''),
+      finished: String(j.finished || j.finished_at || ''),
+      files: Number(j.files || 0),
+      bytes: Number(j.bytes || 0),
+      elapsed: Number(j.elapsed || j.elapsed_seconds || 0),
+      options: (j.options && typeof j.options === 'object') ? j.options : acloneDefaults(),
+      summary: (j.summary && typeof j.summary === 'object') ? j.summary : {},
+      finding_count: Number(j.finding_count || 0),
+      high_or_critical: Number(j.high_or_critical || 0),
+      findings: Array.isArray(j.findings) ? j.findings.slice(0, 400) : [],
+      ingested: j.ingested && typeof j.ingested === 'object' ? j.ingested : null,
+      progress: (j.progress && typeof j.progress === 'object') ? j.progress : {},
+    };
+  }).filter(j => j && j.id);
+}
+
+function acloneGetJobs() {
+  const ac = getActiveCamp();
+  return acloneNormaliseJobs(ac && ac.activeJobs);
+}
+
+function acloneSaveJobs(jobs) {
+  const ac = getActiveCamp();
+  if (!ac) return;
+  const camps = getCampaigns();
+  const idx = camps.findIndex(c => c.id === ac.id);
+  const list = acloneNormaliseJobs(jobs);
+  ac.activeJobs = list;
+  setActiveCamp(ac);
+  if (idx >= 0) { camps[idx].activeJobs = list; saveCampaigns(camps); }
+}
+
+function acloneReadOptions() {
+  const d = acloneDefaults();
+  const num = (id, fallback, lo, hi) => {
+    const el = document.getElementById(id);
+    let n = parseInt(el && el.value, 10);
+    if (!Number.isFinite(n)) n = fallback;
+    return Math.max(lo, Math.min(hi, n));
+  };
+  const chk = (id, fallback) => {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  };
+  return {
+    maxDepth: num('aclone-depth', d.maxDepth, 0, 8),
+    connectTimeout: num('aclone-ctime', d.connectTimeout, 3, 120),
+    maxTime: num('aclone-mtime', d.maxTime, 15, 3600),
+    maxBytes: num('aclone-bytes', d.maxBytes, 1048576, 2147483647),
+    maxFiles: num('aclone-files', d.maxFiles, 10, 20000),
+    sameHost: chk('aclone-samehost', true),
+    robots: chk('aclone-robots', true),
+    includeImages: chk('aclone-images', true),
+    includeJs: chk('aclone-js', true),
+    includeCss: chk('aclone-css', true),
+    includeOther: chk('aclone-other', true),
+    external: (document.getElementById('aclone-external')?.value || 'none'),
+    respectOpsec: chk('aclone-opsec', true),
+  };
+}
+
+function acloneWriteOptions(o) {
+  o = o || acloneDefaults();
+  const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const setc = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  setv('aclone-depth', o.maxDepth); setv('aclone-ctime', o.connectTimeout);
+  setv('aclone-mtime', o.maxTime); setv('aclone-bytes', o.maxBytes);
+  setv('aclone-files', o.maxFiles); setv('aclone-external', o.external || 'none');
+  setc('aclone-samehost', o.sameHost); setc('aclone-robots', o.robots);
+  setc('aclone-images', o.includeImages); setc('aclone-js', o.includeJs);
+  setc('aclone-css', o.includeCss); setc('aclone-other', o.includeOther);
+  setc('aclone-opsec', o.respectOpsec !== false);
+}
+
+function acloneLooksLikeUrl(s) {
+  s = String(s || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^[\w.-]+\.[A-Za-z]{2,}(\/.*)?$/.test(s) && !s.includes('@')) return 'https://' + s.replace(/^www\./i,'');
+  return '';
+}
+
+function acloneCandidateUrls() {
+  const out = [];
+  const add = (u) => { const n = acloneLooksLikeUrl(u); if (n && !out.includes(n)) out.push(n); };
+  const ac = getActiveCamp();
+  const obj = (ac && ac.objectives) || objDefaults();
+  (typeof objAllOrganizations === 'function' ? objAllOrganizations(obj) : []).forEach(org => {
+    String(org.urls || '').split(/[\s,;]+/).forEach(add);
+    String(org.domains || '').split(/[\s,;]+/).forEach(add);
+  });
+  add(obj.companyEmail && obj.companyEmail.includes('@') ? obj.companyEmail.split('@')[1] : '');
+  String(obj.additionalIds || '').split(/[\s,;]+/).forEach(add);
+  add(obj.targetName);
+  try {
+    const assets = (typeof getTargetsCache === 'function' ? null : null);
+  } catch {}
+  try {
+    const rows = Object.values(_assetRowsById || {});
+    rows.forEach(r => {
+      if (r && ACLONE_CLONEABLE.has(String(r.type || '').toUpperCase())) {
+        add(r.detail || r.url || r.name || r.fqdn);
+      }
+    });
+  } catch {}
+  try {
+    const web = (typeof getWebCache === 'function') ? getWebCache() : null;
+  } catch {}
+  return out;
+}
+
+function acloneFillFromCampaign() {
+  const urls = acloneCandidateUrls();
+  const dl = document.getElementById('aclone-url-list');
+  if (dl) dl.innerHTML = urls.map(u => '<option value="' + esc(u) + '">').join('');
+  const inp = document.getElementById('aclone-url');
+  if (inp && !inp.value.trim() && urls[0]) inp.value = urls[0];
+  if (!urls.length) toast('No URLs or domains found in Objectives, Targets or the form', 'inf');
+}
+
+function acloneSend(url, source) {
+  const ac = getActiveCamp();
+  if (!ac) { toast('Create a campaign first', 'err'); return; }
+  const n = acloneLooksLikeUrl(url);
+  if (!n) { toast('That does not look like a URL or domain', 'err'); return; }
+  ac._aclonePending = n;
+  setActiveCamp(ac);
+  sw('active');
+  const inp = document.getElementById('aclone-url');
+  if (inp) inp.value = n;
+  toast('Ready to clone in Active — review options and start' + (source ? ' (' + source + ')' : ''), 'ok');
+}
+
+function acloneSendFromOrgCard(btn) {
+  const card = btn.closest('[data-obj-org]');
+  const urls = ((card && card.querySelector('.oo-urls')?.value) || '') + ' ' +
+               ((card && card.querySelector('.oo-domains')?.value) || '');
+  const first = urls.split(/[\s,;]+/).map(acloneLooksLikeUrl).find(Boolean);
+  if (!first) { toast('Add a URL or domain on this organization first', 'err'); return; }
+  acloneSend(first, 'Objectives');
+}
+
+function acloneSendFromDomainRecon() {
+  const badge = document.getElementById('dr-domain-badge');
+  const domain = (badge && badge.textContent.trim()) || (typeof _companyDomain === 'function' && _companyDomain()) || '';
+  if (!domain) { toast('No domain to clone — run Domain Recon or set Objectives first', 'err'); return; }
+  acloneSend(domain, 'Domain Recon');
+}
+
+function acloneSendSelectedAssets() {
+  const cbs = [...document.querySelectorAll('#pnl-targets .trow-cb:checked')];
+  const urls = [];
+  cbs.forEach(cb => {
+    const row = cb.closest('tr');
+    const id = row && row.dataset.aid;
+    const rec = (id && _assetRowsById[id]) || null;
+    const typ = String((rec && rec.type) || '').toUpperCase();
+    const raw = (rec && (rec.detail || rec.url || rec.name || rec.fqdn)) || cb.dataset.label || '';
+    if (ACLONE_CLONEABLE.has(typ) || acloneLooksLikeUrl(raw)) {
+      const n = acloneLooksLikeUrl(raw);
+      if (n) urls.push(n);
+    }
+  });
+  if (!urls.length) { toast('Select a website, domain or subdomain first', 'err'); return; }
+  acloneSend(urls[0], 'Targets');
+}
+
+let _acloneTimer = null;
+function acloneLoad() {
+  const ac = getActiveCamp();
+  const nocamp = document.getElementById('aclone-nocampaign');
+  const form = document.getElementById('aclone-form');
+  if (!ac) {
+    if (nocamp) nocamp.style.display = 'block';
+    if (form) form.style.display = 'none';
+    return;
+  }
+  if (nocamp) nocamp.style.display = 'none';
+  if (form) form.style.display = 'block';
+  if (!document.getElementById('aclone-depth').dataset.seeded) {
+    acloneWriteOptions(acloneDefaults());
+    document.getElementById('aclone-depth').dataset.seeded = '1';
+  }
+  const inp = document.getElementById('aclone-url');
+  if (inp && ac._aclonePending) { inp.value = ac._aclonePending; delete ac._aclonePending; setActiveCamp(ac); }
+  acloneFillFromCampaign();
+  acloneRender();
+  const running = acloneGetJobs().some(j => j.status === 'queued' || j.status === 'running');
+  if (running) acloneStartPoll();
+}
+
+function acloneRender() {
+  const host = document.getElementById('aclone-jobs');
+  if (!host) return;
+  const jobs = acloneGetJobs().slice().reverse();
+  if (!jobs.length) {
+    host.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:12px;">No clone jobs yet for this campaign.</div>';
+    document.getElementById('aclone-findings').innerHTML = '';
+    return;
+  }
+  host.innerHTML = jobs.map(j => {
+    const prog = j.progress || {};
+    const meta = [
+      j.files ? (j.files + ' files') : '',
+      j.bytes ? (Math.round(j.bytes/1024) + ' KB') : '',
+      j.elapsed ? (j.elapsed + 's') : '',
+      j.finding_count ? (j.finding_count + ' findings') : '',
+    ].filter(Boolean).join(' · ');
+    const actions = [];
+    if (j.status === 'queued' || j.status === 'running')
+      actions.push('<button class="btn" type="button" onclick="acloneCancel(\'' + esc(j.id) + '\')">Cancel</button>');
+    if (j.status === 'failed' || j.status === 'cancelled')
+      actions.push('<button class="btn" type="button" onclick="acloneRetry(\'' + esc(j.id) + '\')">Retry</button>');
+    if (j.status === 'done')
+      actions.push('<button class="btn" type="button" onclick="acloneShowFindings(\'' + esc(j.id) + '\')">Open findings</button>');
+    return '<div class="aclone-job" data-job="' + esc(j.id) + '">'
+      + '<div class="aclone-job-hd">'
+      + '<span class="aclone-st aclone-st-' + esc(j.status) + '">' + esc(j.status) + '</span>'
+      + '<span style="word-break:break-all;">' + esc(j.url) + '</span>'
+      + '<span style="font-family:var(--mono);font-size:9px;color:var(--dim);">' + esc(meta || (prog.files ? ('in progress · ' + prog.files + ' files') : '')) + '</span>'
+      + actions.join('')
+      + '</div>'
+      + (j.error ? '<div style="color:var(--warn);font-size:10px;margin-top:4px;">' + esc(j.error) + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function acloneShowFindings(id) {
+  const job = acloneGetJobs().find(j => j.id === id);
+  const el = document.getElementById('aclone-findings');
+  if (!el || !job) return;
+  const rows = (job.findings || []);
+  const counts = job.summary || {};
+  const head = Object.keys(counts).map(k => k + ': ' + counts[k]).join(' · ');
+  const ingest = job.ingested && job.ingested.ok
+    ? ('Written to sketch: ' + (job.ingested.written || 0) + ' nodes'
+       + (job.ingested.emails ? ', ' + job.ingested.emails + ' emails' : '')
+       + (job.ingested.credentials ? ', ' + job.ingested.credentials + ' credentials' : ''))
+    : (job.ingested && job.ingested.error ? ('Ingest: ' + job.ingested.error) : '');
+  el.innerHTML = '<div class="sh" style="margin-top:14px;">Findings · ' + esc(job.url) + '</div>'
+    + '<div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:8px;">'
+    + esc(head) + (ingest ? '<br>' + esc(ingest) : '') + '</div>'
+    + (rows.length
+      ? '<div class="tw"><table class="dt aclone-find-tbl"><thead><tr><th>Category</th><th>Severity</th><th>Value</th><th>Source</th></tr></thead><tbody>'
+        + rows.map(f => '<tr><td>' + esc(f.category || '') + '</td><td class="aclone-sev-' + esc(f.severity || '') + '">'
+          + esc(f.severity || '') + '</td><td style="word-break:break-all;">' + esc(String(f.value || '').slice(0, 300))
+          + '</td><td>' + esc(f.source_path || '') + '</td></tr>').join('')
+        + '</tbody></table></div>'
+      : '<div style="color:var(--dim);font-size:11px;">No findings recorded.</div>');
+}
+
+function acloneNewId() {
+  return 'sc-' + Date.now().toString(16) + '-' + Math.random().toString(16).slice(2, 10);
+}
+
+async function acloneStart(urlOverride, optionsOverride) {
+  const ac = getActiveCamp();
+  if (!ac) { toast('Create a campaign first', 'err'); return; }
+  if (!ac.sketchId) { toast('Wait for sketch provisioning to finish, then retry', 'err'); return; }
+  const url = acloneLooksLikeUrl(urlOverride || document.getElementById('aclone-url')?.value || '');
+  if (!url) { toast('Enter a URL or domain to clone', 'err'); return; }
+  const options = optionsOverride || acloneReadOptions();
+  const job = {
+    id: acloneNewId(), url, status: 'queued', created: new Date().toISOString(),
+    options, findings: [], summary: {},
+  };
+  acloneSaveJobs(acloneGetJobs().concat([job]));
+  acloneRender();
+  const body = withInfraPayload({
+    action: 'start', url, options, job_id: job.id,
+    campaign_id: ac.id, sketch_id: ac.sketchId || '',
+  });
+  if (!options.respectOpsec) {
+    delete body.opsec; delete body.proxy;
+  }
+  const btn = document.getElementById('aclone-start');
+  if (btn) btn.disabled = true;
+  ss('aclonesp');
+  try {
+    const data = await fetchJson(apiUrl('site-clone'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!data || data.ok === false) {
+      aclonePatch(job.id, { status: 'failed', error: (data && data.error) || 'clone start failed' });
+      toast((data && data.error) || 'Clone start failed', 'err');
+    } else {
+      aclonePatch(job.id, { status: data.status || 'queued', id: data.job_id || job.id });
+      toast('Site clone queued for ' + url, 'ok');
+      acloneStartPoll();
+    }
+  } catch (e) {
+    aclonePatch(job.id, { status: 'failed', error: e.message || 'request failed' });
+    toast('Clone start failed: ' + (e.message || e), 'err');
+  } finally {
+    es('aclonesp');
+    if (btn) btn.disabled = false;
+    acloneRender();
+  }
+}
+
+function aclonePatch(id, fields) {
+  const jobs = acloneGetJobs();
+  const i = jobs.findIndex(j => j.id === id);
+  if (i < 0) return;
+  Object.assign(jobs[i], fields);
+  if (fields.id && fields.id !== id) jobs[i].id = fields.id;
+  acloneSaveJobs(jobs);
+}
+
+async function acloneRefreshOne(job) {
+  const ac = getActiveCamp();
+  if (!ac) return job;
+  try {
+    const data = await fetchJson(apiUrl('site-clone'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(withInfraPayload({
+        action: 'status', job_id: job.id, campaign_id: ac.id, sketch_id: ac.sketchId || '',
+      })),
+    });
+    if (!data || data.ok === false) return job;
+    const analysis = data.analysis || {};
+    aclonePatch(job.id, {
+      status: data.status || job.status,
+      error: data.error || '',
+      files: data.files || 0,
+      bytes: data.bytes || 0,
+      elapsed: data.elapsed_seconds || 0,
+      progress: data.progress || {},
+      finished: data.finished_at || job.finished,
+      finding_count: analysis.finding_count || 0,
+      high_or_critical: analysis.high_or_critical || 0,
+      summary: analysis.summary || {},
+      findings: analysis.findings || job.findings,
+      ingested: data.ingested || job.ingested,
+    });
+  } catch {}
+  return acloneGetJobs().find(j => j.id === job.id) || job;
+}
+
+function acloneStartPoll() {
+  if (_acloneTimer) return;
+  _acloneTimer = setInterval(async () => {
+    const running = acloneGetJobs().filter(j => j.status === 'queued' || j.status === 'running');
+    if (!running.length) { clearInterval(_acloneTimer); _acloneTimer = null; acloneRender(); return; }
+    for (const j of running) await acloneRefreshOne(j);
+    acloneRender();
+  }, 2500);
+}
+
+async function acloneCancel(id) {
+  try {
+    await fetchJson(apiUrl('site-clone'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'cancel', job_id: id }),
+    });
+  } catch {}
+  aclonePatch(id, { status: 'cancelled', error: 'cancelled' });
+  acloneRender();
+}
+
+function acloneRetry(id) {
+  const job = acloneGetJobs().find(j => j.id === id);
+  if (!job) return;
+  const inp = document.getElementById('aclone-url');
+  if (inp) inp.value = job.url;
+  if (job.options) acloneWriteOptions(job.options);
+  acloneStart(job.url, job.options);
+}
+
 
 function getObjectives(campId) {
   const camps = getCampaigns();
@@ -20799,7 +21279,15 @@ function renderDomainRecon(data) {
             ? 'var(--warn)' : 'var(--dim)'};">${
           esc(orgSite.empty_message || `The crawl fetched no pages (${_siteKind}).`)}</div>`
       : '';
-    const siteHtml = siteRan ? `<div class="dr-card">
+    const _cloneCta = (_siteKind === 'use_active_clone' || orgSite.backend_label === 'active-tab');
+    const siteHtml = _cloneCta ? `<div class="dr-card">
+      <div class="dr-card-title">Website Intelligence</div>
+      <div style="font-size:9px;line-height:1.6;color:var(--dim);max-width:720px;">${
+        esc(orgSite.empty_message || 'Live website crawling moved to the Active tab (Site Clone).')}</div>
+      <div class="obj-save-row" style="margin-top:8px;">
+        <button class="btn btn-p" type="button" onclick="acloneSendFromDomainRecon()">Open Active · Site Clone</button>
+      </div>
+    </div>` : siteRan ? `<div class="dr-card">
       <div class="dr-card-title">Website Intelligence${_cardExpBtns('exportDrCard', 'org_site')}</div>
       ${_orgRow('Pages crawled', esc(String(orgSite.pages_crawled ?? 0)))}
       ${_orgRow('Indexed chunks', esc(String(orgSite.chunks_indexed ?? 0)))}

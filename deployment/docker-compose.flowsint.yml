@@ -126,6 +126,32 @@ services:
       retries: 3
       start_period: 20s
 
+
+  # ── Site Clone (HTTrack + offline analyzer) ──────────────────────────────
+  # Backs the Active tab. Long-running clones live here so they do not block
+  # n8n task-runners. Output: ${SPOTTER_HOME}/data/clones/<campaign>/<job>/.
+  site-clone-api:
+    build:
+      context: ${SPOTTER_HOME}/site-clone-api
+    container_name: spotter-site-clone
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    environment:
+      - SPOTTER_SCRIPTS_DIR=/data/scripts
+      - SITE_CLONE_DATA=/data/clones
+      - SITE_CLONE_PORT=7052
+    volumes:
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+      - ${SPOTTER_HOME}/data/clones:/data/clones
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:7052/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   # ── Egress control-plane sidecar ──────────────────────────────────────────
   # Backs the Infrastructure tab: a single managed SSH SOCKS tunnel, a single
   # managed Tor client with per-country entry/exit selection, and the

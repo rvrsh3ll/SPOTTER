@@ -1,0 +1,93 @@
+{
+  "name": "32 - Site Clone",
+  "connections": {
+    "Site Clone Webhook": {
+      "main": [
+        [
+          {
+            "node": "Run Site Clone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Site Clone": {
+      "main": [
+        [
+          {
+            "node": "Return Site Clone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e7f8a9b0-0032-0032-0032-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/site-clone {action: start|status|cancel, url, options, campaign_id, job_id, sketch_id, opsec, proxy}. Starts an HTTrack clone in the site-clone-api container, polls status, and on completion writes findings into the campaign sketch."
+  },
+  "id": "spotter-workflow-32",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "OSINT"
+    }
+  ],
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "site-clone",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e7f8a9b0-0032-0032-0032-000000000001",
+      "name": "Site Clone Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "site-clone"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json, urllib.request, urllib.error\nsys.path.insert(0, \"/data/scripts\")\n\nitem = _items[0].get(\"json\", {}) if _items else {}\nbody = item.get(\"body\", item) if isinstance(item.get(\"body\"), dict) else item\nif not isinstance(body, dict):\n    body = {}\n\naction = str(body.get(\"action\") or \"start\").lower()\napi = os.environ.get(\"SITE_CLONE_API_URL\") or \"http://site-clone-api:7052\"\napi = api.rstrip(\"/\")\n\ndef _http(method, path, payload=None, timeout=30):\n    data = None if payload is None else json.dumps(payload).encode()\n    req = urllib.request.Request(api + path, data=data, method=method,\n                                 headers={\"Content-Type\": \"application/json\", \"Accept\": \"application/json\"})\n    try:\n        with urllib.request.urlopen(req, timeout=timeout) as r:\n            return r.status, json.loads(r.read().decode() or \"{}\")\n    except urllib.error.HTTPError as e:\n        try:\n            err = json.loads(e.read().decode() or \"{}\")\n        except Exception:\n            err = {\"error\": \"HTTP %s\" % e.code}\n        return e.code, err\n    except Exception as e:\n        return 0, {\"ok\": False, \"error\": \"site-clone-api unreachable: %s\" % type(e).__name__}\n\nif action in (\"start\", \"clone\"):\n    payload = {\n        \"url\": body.get(\"url\") or \"\",\n        \"campaign_id\": body.get(\"campaign_id\") or \"\",\n        \"job_id\": body.get(\"job_id\") or \"\",\n        \"options\": body.get(\"options\") or body,\n        \"opsec\": body.get(\"opsec\") or {},\n        \"proxy\": body.get(\"proxy\") or {},\n    }\n    code, data = _http(\"POST\", \"/clone\", payload)\n    if not data.get(\"ok\") and not data.get(\"job_id\"):\n        return [{\"json\": {\"ok\": False, \"error\": data.get(\"error\") or \"clone start failed\", \"http\": code}}]\n    return [{\"json\": {\"ok\": True, **{k: data[k] for k in data if k != \"ok\"}}}]\n\njob_id = str(body.get(\"job_id\") or \"\")\nif action == \"cancel\":\n    if not job_id:\n        return [{\"json\": {\"ok\": False, \"error\": \"job_id required\"}}]\n    code, data = _http(\"POST\", \"/jobs/%s/cancel\" % job_id, {})\n    return [{\"json\": {\"ok\": bool(data.get(\"ok\")), **data, \"http\": code}}]\n\nif action == \"status\":\n    if not job_id:\n        return [{\"json\": {\"ok\": False, \"error\": \"job_id required\"}}]\n    code, data = _http(\"GET\", \"/jobs/%s\" % job_id)\n    if code == 404:\n        return [{\"json\": {\"ok\": False, \"error\": \"unknown job\"}}]\n    # When the clone has finished, push findings into the campaign sketch once.\n    if data.get(\"status\") == \"done\" and not data.get(\"ingested\"):\n        sketch = str(body.get(\"sketch_id\") or \"\")\n        analysis = (data.get(\"analysis\") or {})\n        if sketch and analysis.get(\"ok\"):\n            try:\n                import site_clone_ingest\n                ingested = site_clone_ingest.ingest_findings(\n                    analysis, sketch,\n                    campaign_id=str(body.get(\"campaign_id\") or data.get(\"campaign_id\") or \"\"),\n                    job_id=job_id,\n                )\n                data[\"ingested\"] = ingested\n                try:\n                    _http(\"POST\", \"/jobs/%s/ingested\" % job_id, ingested)\n                except Exception:\n                    pass\n            except Exception as e:\n                data[\"ingested\"] = {\"ok\": False, \"error\": type(e).__name__ + \": \" + str(e)[:200]}\n    return [{\"json\": {\"ok\": True, **{k: data[k] for k in data if k != \"ok\"}}}]\n\nreturn [{\"json\": {\"ok\": False, \"error\": \"unknown action\"}}]\n"
+      },
+      "id": "e7f8a9b0-0032-0032-0032-000000000002",
+      "name": "Run Site Clone",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}"
+      },
+      "id": "e7f8a9b0-0032-0032-0032-000000000003",
+      "name": "Return Site Clone",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ]
+}
