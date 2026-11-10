@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from site_clone_analyze import analyze_tree
+from site_clone_analyze import analyze_clone_outputs
+from site_clone_deobfuscate import deobfuscate_tree
 
 DEFAULTS = {
     "max_depth": 2,
@@ -47,6 +48,8 @@ DEFAULTS = {
     "include_other": True,
     "external": "none",  # none | same_registrable | all
     "respect_opsec": True,
+    "deobfuscate": True,
+    "deobf_timeout": 180,
 }
 
 ALLOWED_SCHEMES = {"http", "https"}
@@ -112,6 +115,10 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
         "include_other": ("includeOther", "include_other"),
         "external": ("external",),
         "respect_opsec": ("respectOpsec", "respect_opsec"),
+        "deobfuscate": ("deobfuscate", "deobfuscateJs", "deobfuscate_js",
+                        "deobfuscateJavascript"),
+        "deobf_timeout": ("deobfTimeout", "deobfuscateTimeout", "deobf_timeout",
+                          "deobfuscate_timeout"),
     }
     for key, names in aliases.items():
         for n in names:
@@ -125,8 +132,10 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
     o["max_files"] = _int(o["max_files"], 2000, 10, 20000)
     o["same_host"] = _bool(o["same_host"], True)
     o["robots"] = _bool(o["robots"], True)
-    for k in ("include_images", "include_js", "include_css", "include_other", "respect_opsec"):
+    for k in ("include_images", "include_js", "include_css", "include_other",
+              "respect_opsec", "deobfuscate"):
         o[k] = _bool(o[k], True)
+    o["deobf_timeout"] = _int(o["deobf_timeout"], 180, 15, 1800)
     ext = str(o.get("external") or "none").lower().replace("-", "_")
     if ext not in {"none", "same_registrable", "all"}:
         ext = "none"
@@ -252,6 +261,44 @@ def count_tree_files(root: Path) -> tuple[int, int]:
     return n, b
 
 
+
+def _analyze_job(
+    url: str,
+    job_dir: Path,
+    mirror: Path,
+    options: dict[str, Any],
+    progress_cb: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    """Run optional JS deobfuscation, then analyze the raw and recovered trees."""
+    warnings: list[str] = []
+    deobf_dir = job_dir / "deobf"
+    deobf_meta: dict[str, Any] = {
+        "ok": True, "enabled": bool(options.get("deobfuscate")),
+        "available": False, "tool": "webcrack", "version": "",
+        "warnings": [],
+    }
+    if options.get("deobfuscate"):
+        deobf_meta = deobfuscate_tree(mirror, deobf_dir, options, progress_cb=progress_cb)
+        warnings.extend(deobf_meta.get("warnings") or [])
+    elif deobf_dir.exists():
+        # A previous run may have left files; do not reuse them if the
+        # operator turned deobfuscation off for this job.
+        deobf_dir = None  # type: ignore[assignment]
+    report = analyze_clone_outputs(
+        mirror,
+        deobf_dir if options.get("deobfuscate") and deobf_dir and deobf_dir.is_dir() else None,
+        url,
+        deobf_meta if options.get("deobfuscate") else None,
+    )
+    report["deobfuscation"] = {k: deobf_meta.get(k) for k in (
+        "ok", "enabled", "available", "tool", "version", "pinned",
+        "files_considered", "files_deobfuscated", "files_unpacked",
+        "sourcemaps_applied", "skipped", "timed_out", "isolated_network",
+    ) if k in deobf_meta or k in {"ok", "enabled", "available", "tool", "version"}}
+    report["warnings"] = warnings
+    return report, deobf_meta, warnings
+
+
 def run_clone(
     url: str,
     job_dir: str | Path,
@@ -294,8 +341,13 @@ def run_clone(
     if not httrack and not wrapper:
         # Still analyze if a tree was pre-populated (unit tests, retries).
         if any(mirror.iterdir()) if mirror.exists() else False:
-            report = analyze_tree(mirror, url)
-            return {"ok": True, "url": url, "skipped_httrack": True, "analysis": report}
+            report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
+            return {
+                "ok": True, "url": url, "skipped_httrack": True,
+                "analysis": report, "deobfuscation": report.get("deobfuscation") or deobf_meta,
+                "warnings": warnings,
+                "options": {k: options[k] for k in DEFAULTS},
+            }
         return {"ok": False, "error": "httrack is not installed in this container", "url": url}
 
     cmd = wrapper + argv
@@ -357,7 +409,7 @@ def run_clone(
             pass
 
     files, nbytes = count_tree_files(mirror)
-    report = analyze_tree(mirror, url)
+    report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
     return {
         "ok": report.get("ok", False) and files > 0,
         "url": url,
@@ -368,6 +420,8 @@ def run_clone(
         "bytes": nbytes,
         "elapsed_seconds": round(time.time() - started, 1),
         "analysis": report,
+        "deobfuscation": report.get("deobfuscation") or deobf_meta,
+        "warnings": warnings,
         "error": (None if files > 0 else
                   ("clone timed out or hit a cap" if timed_out else
                    "HTTrack fetched no files")),

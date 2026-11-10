@@ -186,7 +186,8 @@ def _walk_jsonld_people(obj: Any) -> Iterable[dict[str, str]]:
 
 
 def _finding(category: str, severity: str, usefulness: str, value: str,
-             evidence: str, source_path: str, **extra: Any) -> dict[str, Any]:
+             evidence: str, source_path: str, tags: dict[str, Any] | None = None,
+             **extra: Any) -> dict[str, Any]:
     rec = {
         "category": category,
         "severity": severity,
@@ -196,23 +197,29 @@ def _finding(category: str, severity: str, usefulness: str, value: str,
         "source_path": source_path,
     }
     rec.update(extra)
+    if tags:
+        prefix = str(tags.get("source_prefix") or "")
+        rec.update({k: v for k, v in tags.items() if k != "source_prefix" and v != ""})
+        if prefix:
+            rec["source_path"] = prefix.rstrip("/") + "/" + rec["source_path"]
     rec["evidence"] = scrub(rec.get("evidence") or "")[:MAX_EVIDENCE]
     if rec.get("category") != "js_secret":
         rec["value"] = scrub(str(rec.get("value") or ""))[:MAX_EVIDENCE]
     return rec
 
 
-def _collect_secrets(text: str, source_path: str, findings: list[dict[str, Any]]) -> None:
+def _collect_secrets(text: str, source_path: str, findings: list[dict[str, Any]],
+                     tags: dict[str, Any] | None = None) -> None:
     for m in SECRET_RE.finditer(text):
         raw = next(g for g in m.groups() if g)
         findings.append(_finding(
             "js_secret", "high", "high", redact(raw),
             snippet(text, m.start()).replace(raw, redact(raw)),
-            source_path, secret_kind="credential_pattern",
-        ))
+            source_path, secret_kind="credential_pattern", tags=tags))
 
 
-def parse_html(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
+def parse_html(path: Path, root: Path, findings: list[dict[str, Any]],
+               tags: dict[str, Any] | None = None) -> None:
     rel = _safe_rel(root, path)
     text = _read_text(path)
     p = _PageParser()
@@ -221,61 +228,60 @@ def parse_html(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
     except Exception:
         pass
     for email, ev in p.emails:
-        findings.append(_finding("email", "medium", "high", email.lower(), ev, rel))
+        findings.append(_finding("email", "medium", "high", email.lower(), ev, rel, tags=tags))
     for phone, ev in p.phones:
-        findings.append(_finding("phone", "low", "medium", re.sub(r"\s+", " ", phone), ev, rel))
+        findings.append(_finding("phone", "low", "medium", re.sub(r"\s+", " ", phone), ev, rel, tags=tags))
     for c in p.comments:
-        findings.append(_finding("html_comment", "info", "medium", c[:200], c, rel))
+        findings.append(_finding("html_comment", "info", "medium", c[:200], c, rel, tags=tags))
     for name, val in p.hidden:
         findings.append(_finding(
             "hidden_field", "low", "medium", name,
-            "hidden %s=%s" % (name, redact(val) if len(val) > 8 else val), rel,
-        ))
+            "hidden %s=%s" % (name, redact(val) if len(val) > 8 else val), rel, tags=tags))
     for name, content in p.metas:
         sev = "low" if name.lower() in {"generator", "author", "description"} else "info"
         findings.append(_finding("meta", sev, "medium" if sev == "low" else "low",
-                                 "%s=%s" % (name, content[:160]), content[:200], rel))
+                                 "%s=%s" % (name, content[:160]), content[:200], rel, tags=tags))
     for form in p.forms:
         findings.append(_finding(
             "form", "info", "medium",
             "%s %s" % (form.get("method") or "get", form.get("action") or ""),
-            "fields: " + ", ".join(form.get("fields") or [])[:200], rel,
-        ))
+            "fields: " + ", ".join(form.get("fields") or [])[:200], rel, tags=tags))
     for href in p.links:
         if href.startswith("#") or href.lower().startswith("javascript:"):
             continue
-        findings.append(_finding("link", "info", "low", href, href, rel))
+        findings.append(_finding("link", "info", "low", href, href, rel, tags=tags))
     for person in (item for blob in p.json_ld for item in _walk_jsonld_people(blob)):
         if person.get("name"):
             findings.append(_finding(
                 "name", "medium", "high", person["name"],
                 json.dumps({k: v for k, v in person.items() if v}, sort_keys=True)[:200],
-                rel, email=person.get("email") or "", role=person.get("jobTitle") or "",
-            ))
+                rel, email=person.get("email") or "", role=person.get("jobTitle") or "", tags=tags))
         if person.get("email"):
             findings.append(_finding("email", "medium", "high", person["email"].lower(),
-                                     person["name"], rel))
-    _collect_secrets(text, rel, findings)
+                                     person["name"], rel, tags=tags))
+    _collect_secrets(text, rel, findings, tags)
 
 
-def parse_js(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
+def parse_js(path: Path, root: Path, findings: list[dict[str, Any]],
+             tags: dict[str, Any] | None = None) -> None:
     rel = _safe_rel(root, path)
     text = _read_text(path)
     for m in JS_ENDPOINT_RE.finditer(text):
         url = next(g for g in m.groups() if g)
-        findings.append(_finding("js_endpoint", "medium", "high", url, snippet(text, m.start()), rel))
+        findings.append(_finding("js_endpoint", "medium", "high", url, snippet(text, m.start()), rel, tags=tags))
     for m in SOURCEMAP_RE.finditer(text):
-        findings.append(_finding("sourcemap", "medium", "high", m.group(1), m.group(0)[:200], rel))
+        findings.append(_finding("sourcemap", "medium", "high", m.group(1), m.group(0)[:200], rel, tags=tags))
     for m in COMMENT_RE.finditer(text):
         c = m.group(0).strip()
         if len(c) > 8:
-            findings.append(_finding("js_comment", "info", "low", c[:200], snippet(text, m.start()), rel))
-    _collect_secrets(text, rel, findings)
+            findings.append(_finding("js_comment", "info", "low", c[:200], snippet(text, m.start()), rel, tags=tags))
+    _collect_secrets(text, rel, findings, tags)
     for m in EMAIL_RE.finditer(text):
-        findings.append(_finding("email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel))
+        findings.append(_finding("email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel, tags=tags))
 
 
-def parse_textish(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
+def parse_textish(path: Path, root: Path, findings: list[dict[str, Any]],
+                  tags: dict[str, Any] | None = None) -> None:
     rel = _safe_rel(root, path)
     raw = path.read_bytes()[:MAX_FILE_BYTES]
     text = raw.decode("utf-8", errors="replace")
@@ -285,12 +291,12 @@ def parse_textish(path: Path, root: Path, findings: list[dict[str, Any]]) -> Non
         if isinstance(text, bytes):
             text = text.decode("ascii", errors="replace")
     for m in EMAIL_RE.finditer(text):
-        findings.append(_finding("email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel))
+        findings.append(_finding("email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel, tags=tags))
     for m in PHONE_RE.finditer(text):
-        findings.append(_finding("phone", "low", "medium", m.group(0), snippet(text, m.start()), rel))
-    _collect_secrets(text, rel, findings)
+        findings.append(_finding("phone", "low", "medium", m.group(0), snippet(text, m.start()), rel, tags=tags))
+    _collect_secrets(text, rel, findings, tags)
     if path.suffix.lower() in {".txt", ".md", ".csv"} and text.strip():
-        findings.append(_finding("document", "info", "low", path.name, snippet(text, 0, 200), rel))
+        findings.append(_finding("document", "info", "low", path.name, snippet(text, 0, 200), rel, tags=tags))
 
 
 def _exif_ascii(blob: bytes) -> dict[str, str]:
@@ -317,7 +323,8 @@ def _exif_ascii(blob: bytes) -> dict[str, str]:
     return out
 
 
-def parse_image(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
+def parse_image(path: Path, root: Path, findings: list[dict[str, Any]],
+                tags: dict[str, Any] | None = None) -> None:
     rel = _safe_rel(root, path)
     try:
         info = _exif_ascii(path.read_bytes()[:64 * 1024])
@@ -329,20 +336,48 @@ def parse_image(path: Path, root: Path, findings: list[dict[str, Any]]) -> None:
     sev = "medium" if info.get("gps_present") else "low"
     findings.append(_finding("exif", sev, "medium" if sev == "medium" else "low",
                              value, json.dumps(info)[:200], rel,
-                             gps=bool(info.get("gps_present"))))
+                             gps=bool(info.get("gps_present")), tags=tags))
 
 
-def analyze_tree(root: str | Path, start_url: str = "") -> dict[str, Any]:
+
+def _tags_for(deobfuscated: bool, deobfuscator: str, deobfuscator_version: str,
+              source_prefix: str) -> dict[str, Any]:
+    tags: dict[str, Any] = {}
+    if deobfuscated:
+        tags["deobfuscated"] = True
+        if deobfuscator:
+            tags["deobfuscator"] = deobfuscator
+        if deobfuscator_version:
+            tags["deobfuscator_version"] = deobfuscator_version
+    if source_prefix:
+        tags["source_prefix"] = source_prefix
+    return tags
+
+
+def analyze_tree(
+    root: str | Path,
+    start_url: str = "",
+    *,
+    deobfuscated: bool = False,
+    deobfuscator: str = "",
+    deobfuscator_version: str = "",
+    source_prefix: str = "",
+    skip_dirs: set[str] | None = None,
+) -> dict[str, Any]:
     root_p = Path(root)
     findings: list[dict[str, Any]] = []
     files_scanned = 0
+    tags = _tags_for(deobfuscated, deobfuscator, deobfuscator_version, source_prefix)
+    skip = set(SKIP_DIR_NAMES)
+    if skip_dirs:
+        skip |= set(skip_dirs)
     if not root_p.is_dir():
         return {"ok": False, "error": "clone tree not found", "findings": [], "summary": {}}
 
     for dirpath, dirnames, filenames in os.walk(root_p):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
         for name in filenames:
-            if name.startswith(".") or name in {"hts-log.txt", "hts-cache.ndx", "hts-cache.dat"}:
+            if name.startswith(".") or name in {"hts-log.txt", "hts-cache.ndx", "hts-cache.dat", "manifest.json"}:
                 continue
             path = Path(dirpath) / name
             if not path.is_file():
@@ -357,22 +392,22 @@ def analyze_tree(root: str | Path, start_url: str = "") -> dict[str, Any]:
             files_scanned += 1
             try:
                 if ext in HTML_EXTS:
-                    parse_html(path, root_p, findings)
+                    parse_html(path, root_p, findings, tags)
                 elif ext in JS_EXTS:
-                    parse_js(path, root_p, findings)
+                    parse_js(path, root_p, findings, tags)
                 elif ext in IMG_EXTS:
-                    parse_image(path, root_p, findings)
+                    parse_image(path, root_p, findings, tags)
                 elif ext in DOC_EXTS or ext in CSS_EXTS:
-                    parse_textish(path, root_p, findings)
+                    parse_textish(path, root_p, findings, tags)
             except Exception as e:
                 findings.append(_finding("document", "info", "low", path.name,
-                                         "parse error: %s" % type(e).__name__, _safe_rel(root_p, path)))
+                                         "parse error: %s" % type(e).__name__,
+                                         _safe_rel(root_p, path), tags=tags))
             if len(findings) >= MAX_FINDINGS:
                 break
         if len(findings) >= MAX_FINDINGS:
             break
 
-    # Dedup by (category, normalised value, path)
     seen: set[tuple[str, str, str]] = set()
     unique: list[dict[str, Any]] = []
     for f in findings:
@@ -397,6 +432,89 @@ def analyze_tree(root: str | Path, start_url: str = "") -> dict[str, Any]:
         "findings": unique,
         "truncated": len(findings) >= MAX_FINDINGS,
     }
+
+
+def _rank_finding(f: dict[str, Any]) -> int:
+    if f.get("deobfuscator") == "sourcemap":
+        return 2
+    if f.get("deobfuscated"):
+        return 1
+    return 0
+
+
+def merge_reports(*reports: dict[str, Any], start_url: str = "") -> dict[str, Any]:
+    """Combine analyzer reports, preferring recovered sources for the same value."""
+    findings: list[dict[str, Any]] = []
+    files_scanned = 0
+    truncated = False
+    url = start_url
+    root = ""
+    by: dict[tuple[str, str], int] = {}
+    for report in reports:
+        if not report:
+            continue
+        if not url:
+            url = str(report.get("start_url") or "")
+        if not root:
+            root = str(report.get("root") or "")
+        files_scanned += int(report.get("files_scanned") or 0)
+        truncated = truncated or bool(report.get("truncated"))
+        for f in report.get("findings") or []:
+            key = (str(f.get("category") or ""), str(f.get("value") or "").lower())
+            if key in by:
+                i = by[key]
+                if _rank_finding(f) > _rank_finding(findings[i]):
+                    findings[i] = f
+                continue
+            if len(findings) >= MAX_FINDINGS:
+                truncated = True
+                break
+            by[key] = len(findings)
+            findings.append(f)
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["category"]] = counts.get(f["category"], 0) + 1
+    high = sum(1 for f in findings if f.get("severity") in {"high", "critical"})
+    return {
+        "ok": True,
+        "start_url": url,
+        "root": root,
+        "files_scanned": files_scanned,
+        "finding_count": len(findings),
+        "high_or_critical": high,
+        "summary": counts,
+        "findings": findings,
+        "truncated": truncated,
+    }
+
+
+def analyze_clone_outputs(
+    mirror: str | Path,
+    deobf_dir: str | Path | None,
+    start_url: str = "",
+    deobf_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Analyze the raw mirror plus any recovered or deobfuscated tree."""
+    raw = analyze_tree(mirror, start_url)
+    extras: list[dict[str, Any]] = []
+    dest = Path(deobf_dir) if deobf_dir else None
+    meta = deobf_meta or {}
+    version = str(meta.get("version") or meta.get("pinned") or "")
+    if dest and dest.is_dir():
+        sm = dest / "sourcemaps"
+        if sm.is_dir():
+            extras.append(analyze_tree(
+                sm, start_url, deobfuscated=True, deobfuscator="sourcemap",
+                source_prefix="deobf/sourcemaps",
+            ))
+        extras.append(analyze_tree(
+            dest, start_url, deobfuscated=True, deobfuscator="webcrack",
+            deobfuscator_version=version, source_prefix="deobf",
+            skip_dirs={"sourcemaps", ".work"},
+        ))
+    report = merge_reports(raw, *extras, start_url=start_url)
+    report["root"] = str(Path(mirror))
+    return report
 
 
 def main() -> int:

@@ -58,6 +58,8 @@ def _public(job: dict[str, Any]) -> dict[str, Any]:
         "files": job.get("files"),
         "bytes": job.get("bytes"),
         "elapsed_seconds": job.get("elapsed_seconds"),
+        "warnings": list(job.get("warnings") or [])[:40],
+        "deobfuscation": job.get("deobfuscation") or None,
         "ingested": job.get("ingested") or _load_ingested(job) or None,
         "analysis": {
             "ok": analysis.get("ok"),
@@ -127,6 +129,8 @@ def _run_job(job_id: str) -> None:
             "elapsed_seconds": result.get("elapsed_seconds"),
             "analysis": result.get("analysis"),
             "timed_out": result.get("timed_out"),
+            "warnings": result.get("warnings") or [],
+            "deobfuscation": result.get("deobfuscation") or {},
         })
         if job.get("cancel"):
             job["status"] = "cancelled"
@@ -186,7 +190,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path == "/health":
-            self._send(200, {"ok": True})
+            info = {"ok": True}
+            try:
+                from site_clone_deobfuscate import tool_status
+                info["webcrack"] = tool_status()
+            except Exception as e:
+                info["webcrack"] = {"available": False, "error": type(e).__name__}
+            self._send(200, info)
             return
         m = re.match(r"^/jobs/([A-Za-z0-9._-]+)$", path)
         if m:

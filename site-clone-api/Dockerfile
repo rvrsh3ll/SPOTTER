@@ -1,7 +1,22 @@
+# Node 22 is required by webcrack's isolated-vm addon (odd Node releases break it).
+# Compile tools live only in the builder; the final image keeps the runtime.
+FROM node:22-bookworm-slim AS webcrack
+
+ENV NODE_ENV=production \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && npm install -g webcrack@2.16.0 \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/* /root/.npm /tmp/*
+
 FROM debian:bookworm-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    NODE_ENV=production
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -9,7 +24,11 @@ RUN apt-get update \
         proxychains4 \
         python3 \
         ca-certificates \
+        libstdc++6 \
+        util-linux \
  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=webcrack /usr/local /usr/local
 
 WORKDIR /app
 COPY app.py /app/app.py

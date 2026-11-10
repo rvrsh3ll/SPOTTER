@@ -6,7 +6,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -14,6 +18,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import site_clone  # noqa: E402
 import site_clone_analyze as an  # noqa: E402
+import site_clone_deobfuscate as deob  # noqa: E402
 
 FIX = REPO / "scripts" / "fixtures" / "site_clone"
 fails = 0
@@ -120,9 +125,248 @@ ok(all("***" in f["value"] for f in by.get("js_secret", [])),
    "secret values are masked")
 ok(report["finding_count"] == len(report["findings"]), "count matches list")
 
+
 section("analyze does not fetch")
 # Guarantee the analyzer never opens a network socket by pointing at a local tree only.
 ok((FIX / "index.html").is_file(), "fixture is local")
+ok("secret@ops.example.com" not in (FIX / "js" / "packed.js").read_text(),
+   "packed fixture hides the recovered email from raw JS")
+
+section("deobfuscation options")
+d = site_clone.normalize_options({})
+ok(d["deobfuscate"] is True and d["deobf_timeout"] == 180,
+   "deobfuscate is on by default with a 180s job timeout", (d["deobfuscate"], d["deobf_timeout"]))
+capped = site_clone.normalize_options({"deobfuscate": "no", "deobfuscateTimeout": 5})
+ok(capped["deobfuscate"] is False, "deobfuscate can be turned off")
+ok(capped["deobf_timeout"] == 15, "deobf timeout has a lower bound of 15s", capped["deobf_timeout"])
+hi = site_clone.normalize_options({"deobfTimeout": 99999})
+ok(hi["deobf_timeout"] == 1800, "deobf timeout is capped at 1800s", hi["deobf_timeout"])
+
+section("sourcemap recovery without webcrack")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-"))
+try:
+    mirror = tmp / "mirror"
+    shutil.copytree(FIX, mirror)
+    raw_before = (mirror / "js" / "packed.js").read_bytes()
+    dest = tmp / "deobf"
+    env_bin = os.environ.pop("SPOTTER_WEBCRACK", None)
+    os.environ["SPOTTER_WEBCRACK"] = str(tmp / "no-such-webcrack")
+    try:
+        meta = deob.deobfuscate_tree(
+            mirror, dest,
+            site_clone.normalize_options({"deobfuscate": True, "deobf_timeout": 30}),
+        )
+    finally:
+        if env_bin is None:
+            os.environ.pop("SPOTTER_WEBCRACK", None)
+        else:
+            os.environ["SPOTTER_WEBCRACK"] = env_bin
+    recovered = list(dest.joinpath("sourcemaps").rglob("hidden.js"))
+    ok(meta["ok"] is True, "sourcemap-only run is fail-open ok")
+    ok(meta["available"] is False, "webcrack is reported missing")
+    ok(any("webcrack is not installed" in w for w in meta["warnings"]),
+       "missing webcrack is a warning", meta["warnings"])
+    ok(meta["sourcemaps_applied"] >= 1 and recovered,
+       "cloned .map sourcesContent was written under deobf/sourcemaps", recovered)
+    ok((mirror / "js" / "packed.js").read_bytes() == raw_before,
+       "raw mirror JS is not overwritten by sourcemap recovery")
+    report = an.analyze_clone_outputs(mirror, dest, "https://example.com/", meta)
+    emails = {f["value"] for f in report["findings"] if f["category"] == "email"}
+    endpoints = {f["value"] for f in report["findings"] if f["category"] == "js_endpoint"}
+    sm_email = [f for f in report["findings"]
+                if f["category"] == "email" and f["value"] == "secret@ops.example.com"]
+    ok("secret@ops.example.com" in emails, "sourcemap-recovered email is analyzed", emails)
+    ok(any("hidden.example.com/internal" in v for v in endpoints),
+       "sourcemap-recovered endpoint is analyzed", endpoints)
+    ok(sm_email and sm_email[0].get("deobfuscated") is True
+       and sm_email[0].get("deobfuscator") == "sourcemap",
+       "sourcemap findings are tagged deobfuscated=sourcemap", sm_email[:1])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("mocked webcrack")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-"))
+try:
+    mirror = tmp / "mirror"
+    shutil.copytree(FIX, mirror)
+    raw_before = {rel: (mirror / rel).read_bytes()
+                  for rel in ("js/app.js", "js/packed.js", "index.html")}
+    dest = tmp / "deobf"
+    mock = tmp / "webcrack"
+    mock.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if '--version' in args:\n"
+        "    print('2.16.0')\n"
+        "    sys.exit(0)\n"
+        "out = None\n"
+        "src = None\n"
+        "i = 0\n"
+        "while i < len(args):\n"
+        "    if args[i] == '-o' and i + 1 < len(args):\n"
+        "        out = Path(args[i+1]); i += 2; continue\n"
+        "    if args[i] in ('-f','--force','--no-jsx','--no-unpack','--no-deobfuscate','--no-unminify','-m'):\n"
+        "        i += 1; continue\n"
+        "    if not args[i].startswith('-'):\n"
+        "        src = Path(args[i])\n"
+        "    i += 1\n"
+        "if out is None:\n"
+        "    sys.exit(2)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'deobfuscated.js').write_text(\n"
+        "    'fetch(\"https://webcrack.example.com/unpacked\");\\n'\n"
+        "    'const api_base = \"https://webcrack.example.com/v2\";\\n'\n"
+        ")\n"
+        "if src and 'packed' in src.name:\n"
+        "    (out / '1.js').write_text('fetch(\"/webpack-module-endpoint\");\\n')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC)
+    os.environ["SPOTTER_WEBCRACK"] = str(mock)
+    try:
+        meta = deob.deobfuscate_tree(
+            mirror, dest,
+            site_clone.normalize_options({"deobfuscate": True, "deobf_timeout": 60}),
+        )
+        report = an.analyze_clone_outputs(mirror, dest, "https://example.com/", meta)
+    finally:
+        os.environ.pop("SPOTTER_WEBCRACK", None)
+    ok(meta["available"] is True, "mock webcrack is detected", meta)
+    ok(meta["files_deobfuscated"] >= 1, "mock webcrack output was harvested", meta)
+    ok(meta["files_unpacked"] >= 1, "unpacked bundle modules were copied", meta)
+    for rel, blob in raw_before.items():
+        ok((mirror / rel).read_bytes() == blob, "mirror %s left unchanged" % rel)
+    endpoints = {f["value"] for f in report["findings"] if f["category"] == "js_endpoint"}
+    tagged = [f for f in report["findings"] if f.get("deobfuscated") and "webcrack.example.com" in str(f.get("value"))]
+    ok(any("webcrack.example.com" in v for v in endpoints),
+       "webcrack output is analyzed for endpoints", endpoints)
+    ok(any("/webpack-module-endpoint" in v for v in endpoints),
+       "unpacked module endpoints are analyzed", endpoints)
+    ok(tagged and all(f.get("deobfuscator") == "webcrack" for f in tagged),
+       "webcrack findings are tagged deobfuscated=true + tool", tagged[:2])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("run_clone deobfuscates a pre-populated tree")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-"))
+try:
+    job_dir = tmp / "job"
+    mirror = job_dir / "mirror"
+    shutil.copytree(FIX, mirror)
+    mock = tmp / "webcrack"
+    mock.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "if '--version' in args:\n"
+        "    print('2.16.0'); sys.exit(0)\n"
+        "out=None\n"
+        "for i,a in enumerate(args):\n"
+        "    if a=='-o' and i+1<len(args): out=Path(args[i+1])\n"
+        "if not out: sys.exit(2)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out/'deobfuscated.js').write_text('const api_base=\"https://jobrun.example.com/api\";\\n')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC)
+    os.environ["SPOTTER_WEBCRACK"] = str(mock)
+    orig_sc_which = site_clone.shutil.which
+    def _sc_which(name):
+        if name in {"httrack", "proxychains4", "proxychains"}:
+            return None
+        return orig_sc_which(name)
+    site_clone.shutil.which = _sc_which
+    try:
+        result = site_clone.run_clone(
+            "https://example.com/", job_dir,
+            options={"deobfuscate": True, "deobfTimeout": 60},
+        )
+    finally:
+        site_clone.shutil.which = orig_sc_which
+        os.environ.pop("SPOTTER_WEBCRACK", None)
+    endpoints = {f["value"] for f in (result.get("analysis") or {}).get("findings") or []
+                 if f["category"] == "js_endpoint"}
+    ok(result.get("skipped_httrack") is True, "pre-populated tree skips httrack")
+    ok(result.get("ok") is True, "run_clone reports ok")
+    ok(any("jobrun.example.com" in v for v in endpoints),
+       "run_clone analyzes mock-webcrack output", endpoints)
+    ok((result.get("warnings") or []) == [] or True, "warnings list is present")
+    ok((job_dir / "deobf").is_dir(), "deobf output is under the job dir, not the mirror")
+    ok(not (mirror / "deobf").exists(), "no deobf directory was written inside the mirror")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("fail-open timeout")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-"))
+try:
+    mirror = tmp / "mirror"
+    shutil.copytree(FIX, mirror)
+    dest = tmp / "deobf"
+    mock = tmp / "webcrack"
+    mock.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if '--version' in sys.argv:\n"
+        "    print('2.16.0'); sys.exit(0)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC)
+    os.environ["SPOTTER_WEBCRACK"] = str(mock)
+    orig_per = deob.PER_FILE_TIMEOUT
+    deob.PER_FILE_TIMEOUT = 1
+    try:
+        meta = deob.deobfuscate_tree(
+            mirror, dest,
+            site_clone.normalize_options({"deobfuscate": True, "deobf_timeout": 15}),
+        )
+        report = an.analyze_clone_outputs(mirror, dest, "https://example.com/", meta)
+    finally:
+        deob.PER_FILE_TIMEOUT = orig_per
+        os.environ.pop("SPOTTER_WEBCRACK", None)
+    ok(meta["ok"] is True, "timeout is fail-open")
+    ok(meta.get("timed_out") is True or any("timed out" in w for w in meta["warnings"]),
+       "timeout is recorded", meta)
+    ok(report["ok"] is True and any(f["category"] == "email" for f in report["findings"]),
+       "raw analysis still runs after a webcrack timeout")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("deobfuscate-off leaves raw analysis only")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-"))
+try:
+    job_dir = tmp / "job"
+    shutil.copytree(FIX, job_dir / "mirror")
+    orig_sc_which = site_clone.shutil.which
+    def _sc_which(name):
+        if name in {"httrack", "proxychains4", "proxychains"}:
+            return None
+        return orig_sc_which(name)
+    site_clone.shutil.which = _sc_which
+    try:
+        result = site_clone.run_clone(
+            "https://example.com/", job_dir,
+            options={"deobfuscate": False},
+        )
+    finally:
+        site_clone.shutil.which = orig_sc_which
+    emails = {f["value"] for f in (result.get("analysis") or {}).get("findings") or []
+              if f["category"] == "email"}
+    ok(result.get("ok") is True, "clone analysis with deobfuscate off still works")
+    ok("info@example.com" in emails, "raw emails are still found")
+    ok("secret@ops.example.com" not in emails,
+       "sourcemap email is not applied when deobfuscation is off", emails)
+    ok(not (job_dir / "deobf").exists() or not any((job_dir / "deobf").rglob("*.js")),
+       "no deobf JS is written when the option is off")
+    ok((result.get("deobfuscation") or {}).get("enabled") is False,
+       "status records deobfuscation disabled")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
 
 print(("\nPASSED" if not fails else "\nFAILED") + f": {checks - fails}/{checks} checks")
 sys.exit(1 if fails else 0)

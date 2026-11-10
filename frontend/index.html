@@ -2540,10 +2540,11 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
       </div>
       <p class="radio-hint" id="aclone-hint">
         Activities that contact the target directly. <strong>Site Clone</strong> downloads a site
-        with HTTrack (depth, timeouts and size caps), then mines the offline copy for emails,
-        people, forms, JavaScript endpoints, secret-shaped strings, comments, sourcemaps and EXIF.
-        Findings are written to this campaign's sketch. Live website crawling was removed from
-        Domain Recon / Organization enrichment; use this tab instead.
+        with HTTrack (depth, timeouts and size caps), optionally deobfuscates JavaScript with
+        webcrack (and recovered sourcemaps when a cloned <code>.map</code> is present), then mines
+        the offline copy for emails, people, forms, JavaScript endpoints, secret-shaped strings,
+        comments, sourcemaps and EXIF. Findings are written to this campaign's sketch. Live
+        website crawling was removed from Domain Recon / Organization enrichment; use this tab instead.
       </p>
 
       <div id="aclone-form">
@@ -2566,6 +2567,9 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
             <input id="aclone-bytes" class="fi-sm" type="number" min="1048576" value="104857600" style="width:140px;"></div>
           <div class="obj-field"><label for="aclone-files">Max files</label>
             <input id="aclone-files" class="fi-sm" type="number" min="10" max="20000" value="2000" style="width:80px;"></div>
+          <div class="obj-field"><label for="aclone-deobf-timeout">JS deobfuscation timeout (s)</label>
+            <input id="aclone-deobf-timeout" class="fi-sm" type="number" min="15" max="1800" value="180" style="width:80px;"
+              title="Budget for the whole JavaScript deobfuscation step after the clone finishes"></div>
           <div class="obj-field"><label for="aclone-external">External assets</label>
             <select id="aclone-external" class="fi-sm" style="width:240px;">
               <option value="none" selected>None (same host only)</option>
@@ -2582,6 +2586,7 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-css" checked> CSS</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-other" checked> Other files (PDF, text…)</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-opsec" checked> Respect OPSEC profile (User-Agent, proxy)</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-deobf" checked> Deobfuscate JavaScript</label>
         </div>
         <div class="obj-save-row">
           <button class="btn btn-p" type="button" id="aclone-start" onclick="acloneStart()">Start clone</button>
@@ -14679,6 +14684,7 @@ function acloneDefaults() {
     sameHost: true, robots: true,
     includeImages: true, includeJs: true, includeCss: true, includeOther: true,
     external: 'none', respectOpsec: true,
+    deobfuscate: true, deobfuscateTimeout: 180,
   };
 }
 
@@ -14703,6 +14709,8 @@ function acloneNormaliseJobs(jobs) {
       findings: Array.isArray(j.findings) ? j.findings.slice(0, 400) : [],
       ingested: j.ingested && typeof j.ingested === 'object' ? j.ingested : null,
       progress: (j.progress && typeof j.progress === 'object') ? j.progress : {},
+      warnings: Array.isArray(j.warnings) ? j.warnings.map(w => String(w).slice(0, 300)).slice(0, 40) : [],
+      deobfuscation: (j.deobfuscation && typeof j.deobfuscation === 'object') ? j.deobfuscation : null,
     };
   }).filter(j => j && j.id);
 }
@@ -14749,6 +14757,8 @@ function acloneReadOptions() {
     includeOther: chk('aclone-other', true),
     external: (document.getElementById('aclone-external')?.value || 'none'),
     respectOpsec: chk('aclone-opsec', true),
+    deobfuscate: chk('aclone-deobf', true),
+    deobfuscateTimeout: num('aclone-deobf-timeout', d.deobfuscateTimeout, 15, 1800),
   };
 }
 
@@ -14763,6 +14773,8 @@ function acloneWriteOptions(o) {
   setc('aclone-images', o.includeImages); setc('aclone-js', o.includeJs);
   setc('aclone-css', o.includeCss); setc('aclone-other', o.includeOther);
   setc('aclone-opsec', o.respectOpsec !== false);
+  setc('aclone-deobf', o.deobfuscate !== false);
+  setv('aclone-deobf-timeout', o.deobfuscateTimeout != null ? o.deobfuscateTimeout : 180);
 }
 
 function acloneLooksLikeUrl(s) {
@@ -14914,6 +14926,9 @@ function acloneRender() {
       + actions.join('')
       + '</div>'
       + (j.error ? '<div style="color:var(--warn);font-size:10px;margin-top:4px;">' + esc(j.error) + '</div>' : '')
+      + ((j.warnings && j.warnings.length)
+        ? '<div style="color:var(--warn);font-size:10px;margin-top:4px;">' + esc(j.warnings.join(' · ')) + '</div>'
+        : '')
       + '</div>';
   }).join('');
 }
@@ -14930,14 +14945,29 @@ function acloneShowFindings(id) {
        + (job.ingested.emails ? ', ' + job.ingested.emails + ' emails' : '')
        + (job.ingested.credentials ? ', ' + job.ingested.credentials + ' credentials' : ''))
     : (job.ingested && job.ingested.error ? ('Ingest: ' + job.ingested.error) : '');
+  const deob = job.deobfuscation || {};
+  const deobLine = deob.enabled === false
+    ? 'JavaScript deobfuscation was turned off for this job'
+    : (deob.files_deobfuscated || deob.sourcemaps_applied
+      ? ('Deobfuscation: ' + (deob.files_deobfuscated || 0) + ' file(s) via ' + (deob.tool || 'webcrack')
+         + (deob.version ? ' ' + deob.version : '')
+         + (deob.sourcemaps_applied ? ', ' + deob.sourcemaps_applied + ' sourcemap(s)' : ''))
+      : '');
+  const warnLine = (job.warnings && job.warnings.length) ? job.warnings.join(' · ') : '';
   el.innerHTML = '<div class="sh" style="margin-top:14px;">Findings · ' + esc(job.url) + '</div>'
     + '<div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:8px;">'
-    + esc(head) + (ingest ? '<br>' + esc(ingest) : '') + '</div>'
+    + esc(head)
+    + (ingest ? '<br>' + esc(ingest) : '')
+    + (deobLine ? '<br>' + esc(deobLine) : '')
+    + (warnLine ? '<br>' + esc(warnLine) : '')
+    + '</div>'
     + (rows.length
       ? '<div class="tw"><table class="dt aclone-find-tbl"><thead><tr><th>Category</th><th>Severity</th><th>Value</th><th>Source</th></tr></thead><tbody>'
         + rows.map(f => '<tr><td>' + esc(f.category || '') + '</td><td class="aclone-sev-' + esc(f.severity || '') + '">'
           + esc(f.severity || '') + '</td><td style="word-break:break-all;">' + esc(String(f.value || '').slice(0, 300))
-          + '</td><td>' + esc(f.source_path || '') + '</td></tr>').join('')
+          + '</td><td>' + esc(f.source_path || '')
+          + (f.deobfuscated ? ' <span title="' + esc(f.deobfuscator || 'webcrack') + '">· deobf</span>' : '')
+          + '</td></tr>').join('')
         + '</tbody></table></div>'
       : '<div style="color:var(--dim);font-size:11px;">No findings recorded.</div>');
 }
@@ -15026,6 +15056,8 @@ async function acloneRefreshOne(job) {
       summary: analysis.summary || {},
       findings: analysis.findings || job.findings,
       ingested: data.ingested || job.ingested,
+      warnings: data.warnings || job.warnings || [],
+      deobfuscation: data.deobfuscation || job.deobfuscation || null,
     });
   } catch {}
   return acloneGetJobs().find(j => j.id === job.id) || job;

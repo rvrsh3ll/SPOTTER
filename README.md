@@ -499,6 +499,8 @@ feature is **Site Clone**:
 2. Set max depth (default 2), connect timeout, overall time, byte and file caps,
    whether to stay on the same host, whether to follow robots.txt (on by default),
    which asset types to keep, and how far external assets may wander (default: none).
+   **Deobfuscate JavaScript** is on by default, with a separate job timeout
+   (default 180s) for the post-clone step.
 3. **Respect OPSEC profile** (on by default) sends the Infrastructure tab's
    User-Agent and proxy/TOR settings with the job. HTTP proxies are passed to
    HTTrack; SOCKS5/TOR go through proxychains4 in the clone container.
@@ -508,12 +510,25 @@ feature is **Site Clone**:
    Credential / Technology nodes into the campaign sketch.
 
 The clone runs inside the `spotter-site-clone` container, not on the host. Output
-lands in `data/clones/<campaignId>/<jobId>/`. After a compose update, rebuild that
+lands in `data/clones/<campaignId>/<jobId>/`. The raw HTTrack tree is
+`mirror/`; recovered JavaScript is written next to it under `deobf/` and is
+never used to overwrite the mirror. After a compose update, rebuild that
 image: `./spotter compose up -d --build site-clone-api`.
 
-What it does *not* do yet: OCR of images, JavaScript deobfuscation, or applying
-Infrastructure DNS resolvers unless traffic already goes through the campaign
-proxy (Docker DNS is used otherwise).
+After HTTrack finishes, Site Clone (when the option is on) recovers any cloned
+`.map` files that embed `sourcesContent`, then runs [webcrack](https://github.com/j4k0xb/webcrack)
+2.16.0 on `.js` / `.mjs` / `.cjs` files (2 MB and job file caps). Webpack and
+Browserify bundles are unpacked into `deobf/`. Each webcrack invocation has a
+hard timeout, a Node heap cap, an address-space cap, and a network-less namespace
+when the container allows `unshare --net`. If webcrack is missing, times out or
+crashes, the job still finishes and the raw tree is analyzed; a warning is
+recorded on the job. Findings from recovered sources are tagged
+`deobfuscated=true` with the tool and version. Secret-shaped values are still
+redacted the same way as the rest of the analyzer.
+
+What it does *not* do yet: OCR of images, or applying Infrastructure DNS
+resolvers unless traffic already goes through the campaign proxy (Docker DNS is
+used otherwise).
 
 ## Organization Intelligence (Live Analysis › Organization)
 
@@ -2572,7 +2587,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export. Websites, domains and subdomains can be sent to **Active → Site Clone**. |
-| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy) and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
+| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |

@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "file": "packed.js",
+  "sources": ["src/hidden.js"],
+  "sourcesContent": ["fetch(\"https://hidden.example.com/internal\");\nconst contact = \"secret@ops.example.com\";\n"]
+}
