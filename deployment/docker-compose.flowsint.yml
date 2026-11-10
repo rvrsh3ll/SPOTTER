@@ -144,6 +144,13 @@ services:
     volumes:
       - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
       - ${SPOTTER_HOME}/data/clones:/data/clones
+    # Per-job resolv.conf is applied with `unshare --user --map-root-user --mount`
+    # plus a bind mount, so concurrent clones do not share /etc/resolv.conf and
+    # SYS_ADMIN is not added. docker-default AppArmor denies mount(2); this
+    # service is unconfined for that bind only. Binding 127.0.0.N:53 for a DoH
+    # stub uses Docker's default NET_BIND_SERVICE capability.
+    security_opt:
+      - apparmor:unconfined
     healthcheck:
       test: ["CMD", "python3", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:7052/health')"]

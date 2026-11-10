@@ -31,7 +31,7 @@
   "versionId": "e7f8a9b0-0032-0032-0032-ffffffffffff",
   "meta": {
     "templateCredsSetupCompleted": false,
-    "notes": "POST /webhook/site-clone {action: start|status|cancel, url, options, campaign_id, job_id, sketch_id, opsec, proxy}. Starts an HTTrack clone in the site-clone-api container (options include deobfuscate / deobfuscateTimeout, forwarded as-is), polls status, and on completion writes findings into the campaign sketch."
+    "notes": "POST /webhook/site-clone {action: start|status|cancel, url, options, campaign_id, job_id, sketch_id, opsec, proxy}. Starts an HTTrack clone in the site-clone-api container (options include deobfuscate / deobfuscateTimeout / allowDockerDns, forwarded as-is). The sidecar flattens the frontend proxy envelope and applies OPSEC DNS (proxychains proxy_dns, per-job resolv.conf / DoH stub, fail-closed). Polls status (including the dns label) and on completion writes findings into the campaign sketch."
   },
   "id": "spotter-workflow-32",
   "tags": [

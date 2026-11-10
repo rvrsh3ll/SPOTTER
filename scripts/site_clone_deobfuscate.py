@@ -142,7 +142,18 @@ def deobfuscate_tree(
 
     isolated, isolate_cmd = _network_isolation_prefix()
     result["isolated_network"] = isolated
+    require_iso = bool(options.get("require_isolated_network"))
     if not isolated:
+        if require_iso:
+            warnings.append(
+                "OPSEC DNS: webcrack was not run because a network-less namespace "
+                "(unshare --net) is unavailable. Refusing to deobfuscate with the "
+                "container network."
+            )
+            result["ok"] = False
+            result["skipped"] += len(js_files)
+            _write_manifest(dest_p, result)
+            return result
         warnings.append(
             "network isolation for webcrack is unavailable; deobfuscation ran with the container network"
         )
@@ -163,6 +174,7 @@ def deobfuscate_tree(
             work.mkdir(parents=True, exist_ok=True)
             ok, unpacked, err, used_isolation = _run_webcrack(
                 path, work, status["cmd"], per_file, isolate_cmd,
+                require_isolated=require_iso,
             )
             if used_isolation:
                 result["isolated_network"] = True
@@ -436,14 +448,20 @@ def _network_isolation_prefix() -> tuple[bool, list[str]]:
     unshare = shutil.which("unshare")
     if not unshare:
         return False, []
-    # Probe: a network-less namespace that can still exec /bin/true.
-    probe = [unshare, "--net", "--", "/bin/true"]
-    try:
-        r = subprocess.run(probe, capture_output=True, timeout=3)
-        if r.returncode == 0:
-            return True, [unshare, "--net", "--"]
-    except Exception:
-        pass
+    # Prefer a user namespace plus --net so this works without CAP_SYS_ADMIN
+    # (plain `unshare --net` needs SYS_ADMIN in the current user ns).
+    candidates = [
+        [unshare, "--user", "--map-root-user", "--net", "--"],
+        [unshare, "--net", "--"],
+    ]
+    for prefix in candidates:
+        probe = prefix + ["/bin/true"]
+        try:
+            r = subprocess.run(probe, capture_output=True, timeout=3)
+            if r.returncode == 0:
+                return True, prefix
+        except Exception:
+            continue
     return False, []
 
 
@@ -461,6 +479,7 @@ def _run_webcrack(
     cmd: list[str],
     timeout: int,
     isolate_prefix: list[str],
+    require_isolated: bool = False,
 ) -> tuple[bool, int, str, bool]:
     """Run webcrack -o out_dir. Returns (ok, unpacked_hint, error, used_isolation)."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -470,7 +489,10 @@ def _run_webcrack(
     prefixes: list[list[str]] = []
     if isolate_prefix:
         prefixes.append(isolate_prefix)
-    prefixes.append([])  # fail open without unshare
+    if not require_isolated:
+        prefixes.append([])  # fail open without unshare when OPSEC is off
+    if not prefixes:
+        return False, 0, "network isolation for webcrack is unavailable", False
     last_err = ""
     for prefix in prefixes:
         try:

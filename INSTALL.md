@@ -336,6 +336,22 @@ Then open **Active** in the dashboard, paste or send a target URL, review the
 caps, and click **Start clone**. Jobs appear in the list. If a job fails with
 `site-clone-api unreachable`, the worker container is not running.
 
+OPSEC DNS uses a user+mount namespace to bind-mount a per-job `resolv.conf`
+(no `SYS_ADMIN`). The clone service is started with `apparmor:unconfined`
+because docker-default AppArmor denies `mount(2)`. To confirm lookups are not
+leaking through Docker DNS: with Respect OPSEC on, no proxy, and an
+Infrastructure resolver selected, start a clone and check the job card shows
+`DNS: <resolver>` (for example `DNS: 77.88.8.8`). Optionally:
+
+```bash
+sudo tcpdump -n -i docker0 udp port 53 or tcp port 53
+```
+
+while the clone runs — the *target* hostname should not appear. If a job fails
+with "mount namespace not permitted", the host may have user namespaces
+disabled; either enable them or check **Allow Docker DNS (leaks lookups)** as
+an explicit override.
+
 Live website crawling was removed from Domain Recon / Organization enrichment;
 that card now points here. Domain Recon still makes one proxied request for the
 homepage title.

@@ -27,6 +27,11 @@ RUN apt-get update \
         libstdc++6 \
         util-linux \
  && rm -rf /var/lib/apt/lists/*
+# util-linux provides unshare (per-job resolv.conf via a user+mount namespace,
+# and a network-less namespace for webcrack). DoH uses the in-tree Python stub
+# (scripts/site_clone_dns_stub.py): Debian bookworm has no maintained
+# lightweight DoH package (no cloudflared, no AdGuard dnsproxy, no doh-client).
+# No SYS_ADMIN is required; see docker-compose.flowsint.yml for AppArmor.
 
 COPY --from=webcrack /usr/local /usr/local
 

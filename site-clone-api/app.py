@@ -60,6 +60,7 @@ def _public(job: dict[str, Any]) -> dict[str, Any]:
         "elapsed_seconds": job.get("elapsed_seconds"),
         "warnings": list(job.get("warnings") or [])[:40],
         "deobfuscation": job.get("deobfuscation") or None,
+        "dns": job.get("dns") or None,
         "ingested": job.get("ingested") or _load_ingested(job) or None,
         "analysis": {
             "ok": analysis.get("ok"),
@@ -108,6 +109,9 @@ def _run_job(job_id: str) -> None:
 
     def progress_cb(p: dict[str, Any]) -> None:
         job["progress"] = p
+        if p.get("dns"):
+            job["dns"] = p["dns"]
+            _save(job)
         if job.get("cancel"):
             raise KeyboardInterrupt("cancelled")
 
@@ -131,6 +135,7 @@ def _run_job(job_id: str) -> None:
             "timed_out": result.get("timed_out"),
             "warnings": result.get("warnings") or [],
             "deobfuscation": result.get("deobfuscation") or {},
+            "dns": result.get("dns") or job.get("dns") or {},
         })
         if job.get("cancel"):
             job["status"] = "cancelled"
@@ -196,6 +201,11 @@ class Handler(BaseHTTPRequestHandler):
                 info["webcrack"] = tool_status()
             except Exception as e:
                 info["webcrack"] = {"available": False, "error": type(e).__name__}
+            try:
+                from site_clone_dns import capabilities
+                info["dns"] = capabilities()
+            except Exception as e:
+                info["dns"] = {"error": type(e).__name__}
             self._send(200, info)
             return
         m = re.match(r"^/jobs/([A-Za-z0-9._-]+)$", path)

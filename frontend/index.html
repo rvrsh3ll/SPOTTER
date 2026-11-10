@@ -2543,8 +2543,12 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
         with HTTrack (depth, timeouts and size caps), optionally deobfuscates JavaScript with
         webcrack (and recovered sourcemaps when a cloned <code>.map</code> is present), then mines
         the offline copy for emails, people, forms, JavaScript endpoints, secret-shaped strings,
-        comments, sourcemaps and EXIF. Findings are written to this campaign's sketch. Live
-        website crawling was removed from Domain Recon / Organization enrichment; use this tab instead.
+        comments, sourcemaps and EXIF. Findings are written to this campaign's sketch.
+        When <strong>Respect OPSEC profile</strong> is on, name lookups go through the
+        campaign proxy (SOCKS5/TOR/HTTP via proxychains) or the Infrastructure DNS
+        resolvers — never Docker's default resolver — unless you check
+        <strong>Allow Docker DNS (leaks lookups)</strong>. Live website crawling was
+        removed from Domain Recon / Organization enrichment; use this tab instead.
       </p>
 
       <div id="aclone-form">
@@ -2585,7 +2589,8 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-js" checked> JavaScript</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-css" checked> CSS</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-other" checked> Other files (PDF, text…)</label>
-          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-opsec" checked> Respect OPSEC profile (User-Agent, proxy)</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-opsec" checked> Respect OPSEC profile (User-Agent, proxy, DNS)</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-docker-dns"> Allow Docker DNS (leaks lookups)</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-deobf" checked> Deobfuscate JavaScript</label>
         </div>
         <div class="obj-save-row">
@@ -14683,7 +14688,7 @@ function acloneDefaults() {
     maxBytes: 104857600, maxFiles: 2000,
     sameHost: true, robots: true,
     includeImages: true, includeJs: true, includeCss: true, includeOther: true,
-    external: 'none', respectOpsec: true,
+    external: 'none', respectOpsec: true, allowDockerDns: false,
     deobfuscate: true, deobfuscateTimeout: 180,
   };
 }
@@ -14711,6 +14716,7 @@ function acloneNormaliseJobs(jobs) {
       progress: (j.progress && typeof j.progress === 'object') ? j.progress : {},
       warnings: Array.isArray(j.warnings) ? j.warnings.map(w => String(w).slice(0, 300)).slice(0, 40) : [],
       deobfuscation: (j.deobfuscation && typeof j.deobfuscation === 'object') ? j.deobfuscation : null,
+      dns: (j.dns && typeof j.dns === 'object') ? j.dns : null,
     };
   }).filter(j => j && j.id);
 }
@@ -14757,6 +14763,7 @@ function acloneReadOptions() {
     includeOther: chk('aclone-other', true),
     external: (document.getElementById('aclone-external')?.value || 'none'),
     respectOpsec: chk('aclone-opsec', true),
+    allowDockerDns: chk('aclone-docker-dns', false),
     deobfuscate: chk('aclone-deobf', true),
     deobfuscateTimeout: num('aclone-deobf-timeout', d.deobfuscateTimeout, 15, 1800),
   };
@@ -14773,6 +14780,7 @@ function acloneWriteOptions(o) {
   setc('aclone-images', o.includeImages); setc('aclone-js', o.includeJs);
   setc('aclone-css', o.includeCss); setc('aclone-other', o.includeOther);
   setc('aclone-opsec', o.respectOpsec !== false);
+  setc('aclone-docker-dns', !!o.allowDockerDns);
   setc('aclone-deobf', o.deobfuscate !== false);
   setv('aclone-deobf-timeout', o.deobfuscateTimeout != null ? o.deobfuscateTimeout : 180);
 }
@@ -14905,11 +14913,13 @@ function acloneRender() {
   }
   host.innerHTML = jobs.map(j => {
     const prog = j.progress || {};
+    const dnsLab = (j.dns && j.dns.label) ? ('DNS: ' + j.dns.label) : '';
     const meta = [
       j.files ? (j.files + ' files') : '',
       j.bytes ? (Math.round(j.bytes/1024) + ' KB') : '',
       j.elapsed ? (j.elapsed + 's') : '',
       j.finding_count ? (j.finding_count + ' findings') : '',
+      dnsLab,
     ].filter(Boolean).join(' · ');
     const actions = [];
     if (j.status === 'queued' || j.status === 'running')
@@ -15058,6 +15068,7 @@ async function acloneRefreshOne(job) {
       ingested: data.ingested || job.ingested,
       warnings: data.warnings || job.warnings || [],
       deobfuscation: data.deobfuscation || job.deobfuscation || null,
+      dns: data.dns || job.dns || null,
     });
   } catch {}
   return acloneGetJobs().find(j => j.id === job.id) || job;

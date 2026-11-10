@@ -502,8 +502,10 @@ feature is **Site Clone**:
    **Deobfuscate JavaScript** is on by default, with a separate job timeout
    (default 180s) for the post-clone step.
 3. **Respect OPSEC profile** (on by default) sends the Infrastructure tab's
-   User-Agent and proxy/TOR settings with the job. HTTP proxies are passed to
-   HTTrack; SOCKS5/TOR go through proxychains4 in the clone container.
+   User-Agent, proxy/TOR settings and DNS resolvers with the job. Name lookups
+   are fail-closed: the job will not start if they would fall through to Docker
+   DNS, unless you check **Allow Docker DNS (leaks lookups)** (off by default).
+   See the DNS table below.
 4. Start the job. Progress, cancel and retry live in the job list (persisted on the
    campaign, including export/import). When a job finishes, **Open findings** shows
    the offline analysis, and the workflow writes Email / Individual / WebAsset /
@@ -526,9 +528,42 @@ recorded on the job. Findings from recovered sources are tagged
 `deobfuscated=true` with the tool and version. Secret-shaped values are still
 redacted the same way as the rest of the analyzer.
 
-What it does *not* do yet: OCR of images, or applying Infrastructure DNS
-resolvers unless traffic already goes through the campaign proxy (Docker DNS is
-used otherwise).
+**DNS behaviour** when Respect OPSEC is on (Debian bookworm HTTrack 3.49.4
+does not do HTTP CONNECT for HTTPS, so Site Clone does not use HTTrack `-P`
+under OPSEC):
+
+| Proxy mode | Where origin DNS resolves | Job card |
+|---|---|---|
+| SOCKS5 | At the SOCKS proxy, via proxychains4 `proxy_dns` (socks5h semantics). The proxy hostname itself may use Docker DNS (usually a compose service name). | `DNS: via SOCKS5` |
+| TOR | At the Tor client, same proxychains4 path. | `DNS: via TOR` |
+| SSH tunnel (Use Tunnel as SOCKS Proxy) | Same as SOCKS5; OpenSSH `-D` is a SOCKS dynamic forward and resolves domain requests on the remote SSH host. | `DNS: via SOCKS5` |
+| HTTP proxy | At the HTTP proxy, via proxychains4 (`http` + `proxy_dns`, CONNECT carries the hostname). Not HTTrack `-P`. | `DNS: via HTTP proxy` |
+| No proxy, Infrastructure resolvers set (plain IPs) | Those resolvers, via a per-job bind-mounted `resolv.conf` in a user+mount namespace (the container-global file is unchanged). | `DNS: 77.88.8.8` |
+| No proxy, DoH-only (or mixed) resolvers | In-tree Python stub on `127.0.0.N:53` doing RFC 8484 / JSON DoH (and UDP/DoT upstreams), pointed at by the per-job `resolv.conf`. | `DNS: DoH (dns.google)` |
+| No proxy, no resolvers, override off | Job is refused with a clear error. | — |
+| Allow Docker DNS (leaks lookups) | Docker embedded DNS (`127.0.0.11`). | `DNS: Docker (override)` |
+| Respect OPSEC off | Historical behaviour: Docker DNS; HTTP may use HTTrack `-P` (HTTPS still resolved locally on 3.49.4). | (no DNS label) |
+
+The frontend proxy envelope (`http_url` / `socks` + `socks_url`) is flattened
+in the clone sidecar so proxychains actually attaches. webcrack is still run
+in a network-less namespace; under OPSEC, if that isolation is unavailable,
+JavaScript deobfuscation is skipped rather than run with the container network.
+
+What it does *not* do yet: OCR of images.
+
+To verify OPSEC DNS on the host after rebuilding `site-clone-api`: start a
+clone with Respect OPSEC on, no
+proxy, and an Infrastructure resolver such as Yandex `77.88.8.8`. The job card
+should show `DNS: 77.88.8.8`. Optionally confirm nothing leaks to Docker's
+embedded DNS:
+
+```bash
+# Identify the docker bridge, then watch for port 53 to the engine resolver
+# while a clone runs. There should be no queries for the *target* hostname
+# (service names like ssh-tunnel-api may still resolve there).
+ip -o -4 addr show | awk '/docker|br-/ {print}'
+sudo tcpdump -n -i docker0 udp port 53 or tcp port 53
+```
 
 ## Organization Intelligence (Live Analysis › Organization)
 
@@ -2587,7 +2622,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export. Websites, domains and subdomains can be sent to **Active → Site Clone**. |
-| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
+| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy/DNS — fail-closed so lookups do not use Docker DNS), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |

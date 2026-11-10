@@ -14,9 +14,12 @@ HTTrack flags used (see httrack --help):
   -M N            max mirror size in bytes
   -#N             max number of files (when supported)
   -F UA           User-Agent
-  -P host:port    HTTP proxy
+  -P host:port    HTTP proxy (OPSEC off only; bookworm HTTrack 3.49.4
+                  leaks HTTPS DNS/connect with -P, so OPSEC uses proxychains4)
   -%f             keep original filenames
-SOCKS/TOR proxies are applied via proxychains4 when that binary is present.
+SOCKS/TOR and OPSEC HTTP proxies are applied via proxychains4 with proxy_dns.
+OPSEC DNS routing (per-job resolv.conf, DoH stub, fail-closed policy) lives in
+site_clone_dns.py; see that module's docstring for the per-mode table.
 """
 from __future__ import annotations
 
@@ -33,6 +36,15 @@ from urllib.parse import urlparse
 
 from site_clone_analyze import analyze_clone_outputs
 from site_clone_deobfuscate import deobfuscate_tree
+from site_clone_dns import (
+    normalize_proxy,
+    plan_job_dns,
+    preflight_resolve,
+    public_dns,
+    start_stub,
+    stop_stub,
+    write_proxychains_conf,
+)
 
 DEFAULTS = {
     "max_depth": 2,
@@ -48,6 +60,7 @@ DEFAULTS = {
     "include_other": True,
     "external": "none",  # none | same_registrable | all
     "respect_opsec": True,
+    "allow_docker_dns": False,
     "deobfuscate": True,
     "deobf_timeout": 180,
 }
@@ -115,6 +128,8 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
         "include_other": ("includeOther", "include_other"),
         "external": ("external",),
         "respect_opsec": ("respectOpsec", "respect_opsec"),
+        "allow_docker_dns": ("allowDockerDns", "allow_docker_dns",
+                             "allowDockerDNS"),
         "deobfuscate": ("deobfuscate", "deobfuscateJs", "deobfuscate_js",
                         "deobfuscateJavascript"),
         "deobf_timeout": ("deobfTimeout", "deobfuscateTimeout", "deobf_timeout",
@@ -135,6 +150,7 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
     for k in ("include_images", "include_js", "include_css", "include_other",
               "respect_opsec", "deobfuscate"):
         o[k] = _bool(o[k], True)
+    o["allow_docker_dns"] = _bool(o["allow_docker_dns"], False)
     o["deobf_timeout"] = _int(o["deobf_timeout"], 180, 15, 1800)
     ext = str(o.get("external") or "none").lower().replace("-", "_")
     if ext not in {"none", "same_registrable", "all"}:
@@ -213,33 +229,15 @@ def build_httrack_argv(url: str, out_dir: Path, options: dict[str, Any],
 
 
 def _socks_proxy(proxy: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not proxy:
-        return None
-    typ = str(proxy.get("type") or "").lower()
-    if typ in {"socks5", "socks5h", "socks", "tor"} and proxy.get("host"):
-        return proxy
+    """Back-compat helper: flatten then keep SOCKS/TOR only."""
+    flat = normalize_proxy(proxy)
+    if flat and flat["type"] in {"socks5", "tor"}:
+        return flat
     return None
 
 
 def _write_proxychains_conf(job_dir: Path, proxy: dict[str, Any]) -> Path:
-    path = job_dir / "proxychains.conf"
-    typ = str(proxy.get("type") or "socks5").lower()
-    # tor and socks5h both go through SOCKS5; remote DNS is the proxychains default
-    # when proxy_dns is set.
-    kind = "socks5"
-    if typ in {"http", "https"}:
-        kind = "http"
-    port = int(proxy.get("port") or (9050 if typ == "tor" else 1080))
-    user = str(proxy.get("username") or "")
-    pw = str(proxy.get("password") or "")
-    extra = (" %s %s" % (user, pw)) if user else ""
-    path.write_text(
-        "strict_chain\nproxy_dns\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n"
-        "[ProxyList]\n%s %s %s%s\n" % (kind, proxy["host"], port, extra),
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
-    return path
+    return write_proxychains_conf(job_dir, normalize_proxy(proxy) or proxy)
 
 
 def count_tree_files(root: Path) -> tuple[int, int]:
@@ -278,7 +276,11 @@ def _analyze_job(
         "warnings": [],
     }
     if options.get("deobfuscate"):
-        deobf_meta = deobfuscate_tree(mirror, deobf_dir, options, progress_cb=progress_cb)
+        deobf_opts = dict(options)
+        # Under OPSEC, webcrack must not have the container network. Isolation
+        # is required; if unshare is denied the step is skipped (fail-closed).
+        deobf_opts["require_isolated_network"] = bool(options.get("respect_opsec"))
+        deobf_meta = deobfuscate_tree(mirror, deobf_dir, deobf_opts, progress_cb=progress_cb)
         warnings.extend(deobf_meta.get("warnings") or [])
     elif deobf_dir.exists():
         # A previous run may have left files; do not reuse them if the
@@ -318,29 +320,13 @@ def run_clone(
     ua = ""
     if options["respect_opsec"] and opsec:
         ua = str(opsec.get("user_agent") or "")
-        # dns_resolvers are recorded; a SOCKS/HTTP proxy (when set) is what
-        # actually carries DNS. Per-job resolv.conf is not applied here.
-    argv = build_httrack_argv(url, mirror, options, user_agent=ua, proxy=proxy)
-
-    wrapper: list[str] = []
-    socks = _socks_proxy(proxy) if options["respect_opsec"] else None
-    if socks:
-        pc = shutil.which("proxychains4") or shutil.which("proxychains")
-        if pc:
-            conf = _write_proxychains_conf(job_dir, socks)
-            wrapper = [pc, "-f", str(conf), "-q"]
-        else:
-            return {
-                "ok": False,
-                "error": "SOCKS/TOR proxy is set but proxychains4 is not installed in the clone container",
-                "url": url,
-                "options": options,
-            }
 
     httrack = shutil.which("httrack")
-    if not httrack and not wrapper:
+    pre_populated = mirror.exists() and any(mirror.iterdir())
+    if not httrack:
         # Still analyze if a tree was pre-populated (unit tests, retries).
-        if any(mirror.iterdir()) if mirror.exists() else False:
+        # No live lookups happen, so the OPSEC DNS policy is not applied.
+        if pre_populated:
             report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
             return {
                 "ok": True, "url": url, "skipped_httrack": True,
@@ -350,79 +336,144 @@ def run_clone(
             }
         return {"ok": False, "error": "httrack is not installed in this container", "url": url}
 
-    cmd = wrapper + argv
+    plan = plan_job_dns(url, job_dir, options, opsec, proxy)
+    dns = public_dns(plan)
+    if progress_cb:
+        try:
+            progress_cb({"stage": "dns", "dns": dns})
+        except Exception:
+            pass
+    if not plan.get("ok"):
+        return {
+            "ok": False,
+            "error": plan.get("error") or "OPSEC DNS cannot be routed",
+            "url": url,
+            "options": {k: options[k] for k in DEFAULTS},
+            "dns": dns,
+        }
+
+    # Under OPSEC, HTTP proxies go through proxychains (proxy_dns), not HTTrack
+    # -P: bookworm's HTTrack 3.49.4 still resolves and dials HTTPS origins itself.
+    argv_proxy = plan.get("proxy") if plan.get("use_httrack_p") else None
+    argv = build_httrack_argv(url, mirror, options, user_agent=ua, proxy=argv_proxy)
+
     env = os.environ.copy()
     env.pop("HTTP_PROXY", None)
     env.pop("HTTPS_PROXY", None)
     env.pop("ALL_PROXY", None)
+    env.pop("http_proxy", None)
+    env.pop("https_proxy", None)
+    env.pop("all_proxy", None)
     # Don't leak proxy credentials into the child environment beyond proxychains conf.
+
+    stub_proc = None
     started = time.time()
     try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(job_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=env, start_new_session=True,
-        )
-    except FileNotFoundError:
-        return {"ok": False, "error": "httrack is not installed in this container", "url": url}
+        if plan.get("stub"):
+            try:
+                stub_proc = start_stub(plan["stub"], user_agent=ua)
+            except RuntimeError as e:
+                err = (
+                    "OPSEC DNS cannot be routed: the local DoH/DNS stub failed to start "
+                    "(%s). Enable Allow Docker DNS (leaks lookups) or fix the "
+                    "configured resolvers."
+                ) % (str(e)[:200],)
+                dns = public_dns(plan, preflight_ok=False, preflight_error=str(e)[:240])
+                return {
+                    "ok": False, "error": err, "url": url,
+                    "options": {k: options[k] for k in DEFAULTS},
+                    "dns": dns,
+                }
 
-    output_chunks: list[bytes] = []
-    timed_out = False
-    try:
-        deadline = started + options["max_time"] + 15
-        while True:
-            if proc.poll() is not None:
-                rest = proc.stdout.read() if proc.stdout else b""
-                if rest:
-                    output_chunks.append(rest)
-                break
-            if time.time() > deadline:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    time.sleep(2)
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
-                break
-            line = proc.stdout.readline() if proc.stdout else b""
-            if line:
-                output_chunks.append(line)
-            files, nbytes = count_tree_files(mirror)
-            if progress_cb:
-                try:
-                    progress_cb({"files": files, "bytes": nbytes, "elapsed": int(time.time() - started)})
-                except Exception:
-                    pass
-            if files > options["max_files"] or nbytes > options["max_bytes"]:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    proc.kill()
-                break
-            if not line:
-                time.sleep(0.4)
-    finally:
+        ok_pf, answers, pf_err = preflight_resolve(plan.get("host") or "", plan.get("prefix") or [], env=env)
+        dns = public_dns(plan, answers=answers, preflight_ok=ok_pf, preflight_error=pf_err)
+        if progress_cb:
+            try:
+                progress_cb({"stage": "dns", "dns": dns, "files": 0, "bytes": 0,
+                             "elapsed": int(time.time() - started)})
+            except Exception:
+                pass
+
+        cmd = list(plan.get("prefix") or []) + argv
         try:
-            log_path.write_bytes(b"".join(output_chunks)[-200_000:])
-        except OSError:
-            pass
+            proc = subprocess.Popen(
+                cmd, cwd=str(job_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env, start_new_session=True,
+            )
+        except FileNotFoundError:
+            return {
+                "ok": False, "error": "httrack is not installed in this container",
+                "url": url, "dns": dns,
+            }
 
-    files, nbytes = count_tree_files(mirror)
-    report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
-    return {
-        "ok": report.get("ok", False) and files > 0,
-        "url": url,
-        "options": {k: options[k] for k in DEFAULTS},
-        "exit_code": proc.returncode,
-        "timed_out": timed_out,
-        "files": files,
-        "bytes": nbytes,
-        "elapsed_seconds": round(time.time() - started, 1),
-        "analysis": report,
-        "deobfuscation": report.get("deobfuscation") or deobf_meta,
-        "warnings": warnings,
-        "error": (None if files > 0 else
-                  ("clone timed out or hit a cap" if timed_out else
-                   "HTTrack fetched no files")),
-    }
+        output_chunks: list[bytes] = []
+        timed_out = False
+        try:
+            deadline = started + options["max_time"] + 15
+            while True:
+                if proc.poll() is not None:
+                    rest = proc.stdout.read() if proc.stdout else b""
+                    if rest:
+                        output_chunks.append(rest)
+                    break
+                if time.time() > deadline:
+                    timed_out = True
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        time.sleep(2)
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except OSError:
+                        proc.kill()
+                    break
+                line = proc.stdout.readline() if proc.stdout else b""
+                if line:
+                    output_chunks.append(line)
+                files, nbytes = count_tree_files(mirror)
+                if progress_cb:
+                    try:
+                        progress_cb({
+                            "files": files, "bytes": nbytes,
+                            "elapsed": int(time.time() - started),
+                            "dns": dns,
+                        })
+                    except Exception:
+                        pass
+                if files > options["max_files"] or nbytes > options["max_bytes"]:
+                    timed_out = True
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except OSError:
+                        proc.kill()
+                    break
+                if not line:
+                    time.sleep(0.4)
+        finally:
+            try:
+                log_path.write_bytes(b"".join(output_chunks)[-200_000:])
+            except OSError:
+                pass
+
+        files, nbytes = count_tree_files(mirror)
+        report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
+        if pf_err:
+            warnings = list(warnings or []) + ["DNS preflight: " + pf_err]
+        return {
+            "ok": report.get("ok", False) and files > 0,
+            "url": url,
+            "options": {k: options[k] for k in DEFAULTS},
+            "exit_code": proc.returncode,
+            "timed_out": timed_out,
+            "files": files,
+            "bytes": nbytes,
+            "elapsed_seconds": round(time.time() - started, 1),
+            "analysis": report,
+            "deobfuscation": report.get("deobfuscation") or deobf_meta,
+            "warnings": warnings,
+            "dns": dns,
+            "error": (None if files > 0 else
+                      ("clone timed out or hit a cap" if timed_out else
+                       "HTTrack fetched no files")),
+        }
+    finally:
+        if stub_proc is not None:
+            stop_stub(stub_proc, plan.get("stub"))

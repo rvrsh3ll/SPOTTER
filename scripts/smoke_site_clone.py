@@ -368,5 +368,223 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
+
+section("OPSEC DNS options")
+d = site_clone.normalize_options({})
+ok(d["allow_docker_dns"] is False and d["respect_opsec"] is True,
+   "allow_docker_dns is off by default, respect_opsec is on",
+   (d["allow_docker_dns"], d["respect_opsec"]))
+on = site_clone.normalize_options({"allowDockerDns": True})
+ok(on["allow_docker_dns"] is True, "allowDockerDns camelCase is accepted")
+off = site_clone.normalize_options({"allow_docker_dns": "no"})
+ok(off["allow_docker_dns"] is False, "allow_docker_dns=no is false")
+
+section("proxy envelope flattening")
+import site_clone_dns as dns
+http = dns.normalize_proxy({"type": "http", "http_url": "http://alice:secret@10.9.8.7:3128"})
+ok(http == {"type": "http", "host": "10.9.8.7", "port": 3128,
+            "username": "alice", "password": "secret"},
+   "flattens {type,http_url} with userinfo", http)
+socks = dns.normalize_proxy({
+    "type": "socks5",
+    "socks": {"host": "ssh-tunnel-api", "port": 1080, "username": "", "password": ""},
+    "socks_url": "socks5h://ssh-tunnel-api:1080",
+})
+ok(socks and socks["host"] == "ssh-tunnel-api" and socks["port"] == 1080
+   and socks["type"] == "socks5", "flattens {type,socks,socks_url}", socks)
+tor = dns.normalize_proxy({
+    "type": "tor", "socks_url": "socks5h://ssh-tunnel-api:9050",
+    "socks": {"host": "ssh-tunnel-api", "port": 9050},
+})
+ok(tor and tor["type"] == "tor" and tor["port"] == 9050, "flattens TOR envelope", tor)
+flat = dns.normalize_proxy({"type": "http", "host": "127.0.0.1", "port": 8888})
+ok(flat and flat["host"] == "127.0.0.1" and flat["port"] == 8888,
+   "already-flat HTTP proxy is unchanged", flat)
+ok(dns.normalize_proxy({"type": "none"}) is None, "type none is no proxy")
+ok(dns.normalize_proxy({"type": "http"}) is None, "HTTP without url/host is no proxy")
+ok(dns.normalize_proxy({}) is None, "empty proxy is None")
+
+section("DNS plan / config generation per mode")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-dns-"))
+try:
+    opts = site_clone.normalize_options({"respectOpsec": True})
+    # HTTP proxy under OPSEC: proxychains http + proxy_dns, no -P
+    p_http = dns.plan_job_dns(
+        "https://example.com/", tmp / "http", opts, {},
+        {"type": "http", "http_url": "http://10.0.0.9:8080"},
+        mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+    )
+    conf_http = Path(p_http["proxychains_conf"]).read_text()
+    ok(p_http["ok"] and p_http["use_proxychains"] and not p_http["use_httrack_p"],
+       "OPSEC HTTP proxy uses proxychains, not HTTrack -P", p_http)
+    ok("proxy_dns" in conf_http and "strict_chain" in conf_http
+       and "http 10.0.0.9 8080" in conf_http,
+       "HTTP proxychains conf has proxy_dns and the flattened hop", conf_http)
+    ok(p_http["label"] == "via HTTP proxy" and p_http["prefix"][0] == "/usr/bin/proxychains4",
+       "HTTP plan label and prefix", (p_http["label"], p_http["prefix"]))
+
+    p_socks = dns.plan_job_dns(
+        "https://example.com/", tmp / "socks", opts, {},
+        {"type": "socks5", "socks": {"host": "1.2.3.4", "port": 1080},
+         "socks_url": "socks5h://1.2.3.4:1080"},
+        mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+    )
+    conf_socks = Path(p_socks["proxychains_conf"]).read_text()
+    ok(p_socks["label"] == "via SOCKS5" and "socks5 1.2.3.4 1080" in conf_socks
+       and "proxy_dns" in conf_socks,
+       "SOCKS5 plan uses proxy_dns and flattened host", conf_socks)
+
+    p_tor = dns.plan_job_dns(
+        "https://example.com/", tmp / "tor", opts, {},
+        {"type": "tor", "socks_url": "socks5h://ssh-tunnel-api:9050"},
+        mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+    )
+    ok(p_tor["label"] == "via TOR"
+       and "socks5 ssh-tunnel-api 9050" in Path(p_tor["proxychains_conf"]).read_text(),
+       "TOR plan label and conf", p_tor)
+
+    # No proxy + plain IPs
+    p_ip = dns.plan_job_dns(
+        "https://target.example/", tmp / "ips", opts,
+        {"dns_resolvers": ["77.88.8.8", "77.88.8.1"]}, {},
+        mount_ok=True, proxychains_bin=False,
+    )
+    text_ip = Path(p_ip["resolv_conf"]).read_text()
+    ok(p_ip["ok"] and p_ip["via"] == "resolver" and p_ip["label"] == "77.88.8.8, 77.88.8.1",
+       "plain IP resolvers produce a resolver label", p_ip)
+    ok("nameserver 77.88.8.8" in text_ip and "nameserver 77.88.8.1" in text_ip
+       and "127.0.0.11" not in text_ip,
+       "resolv.conf lists only the chosen IPs, not Docker DNS", text_ip)
+    ok(p_ip["prefix"] and "unshare" in p_ip["prefix"][0] and "--mount" in p_ip["prefix"],
+       "plain IP plan wraps with unshare --mount", p_ip["prefix"])
+    ok(p_ip["stub"] is None, "plain IPs on port 53 do not start a stub")
+
+    # DoH-only
+    p_doh = dns.plan_job_dns(
+        "https://target.example/", tmp / "doh", opts,
+        {"dns_resolvers": ["https://dns.google/resolve"]}, {},
+        mount_ok=True,
+    )
+    text_doh = Path(p_doh["resolv_conf"]).read_text()
+    ok(p_doh["ok"] and p_doh["stub"] and p_doh["label"].startswith("DoH ("),
+       "DoH-only plan starts a stub and labels DoH", p_doh)
+    ok(p_doh["stub"]["bind"].startswith("127.0.0.") and p_doh["stub"]["port"] == 53
+       and p_doh["stub"]["servers"] == ["https://dns.google/resolve"],
+       "DoH stub bind and upstream", p_doh["stub"])
+    ok("nameserver " + p_doh["stub"]["bind"] in text_doh
+       and "127.0.0.11" not in text_doh,
+       "DoH resolv.conf points at the stub loopback only", text_doh)
+
+    # OPSEC off: no wrap, HTTP may use -P
+    p_off = dns.plan_job_dns(
+        "https://example.com/", tmp / "off",
+        site_clone.normalize_options({"respectOpsec": False}),
+        {"dns_resolvers": ["1.1.1.1"]},
+        {"type": "http", "http_url": "http://10.0.0.9:8080"},
+        mount_ok=False, proxychains_bin=False,
+    )
+    ok(p_off["ok"] and p_off["use_httrack_p"] and not p_off["use_proxychains"]
+       and p_off["label"] == "",
+       "OPSEC off keeps HTTrack -P and does not fail-closed", p_off)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("fail-closed DNS paths")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-dns-fail-"))
+try:
+    opts = site_clone.normalize_options({"respectOpsec": True})
+    p_none = dns.plan_job_dns(
+        "https://example.com/", tmp / "none", opts, {}, {},
+        mount_ok=True, proxychains_bin=False,
+    )
+    ok(p_none["ok"] is False and "no DNS resolvers" in (p_none["error"] or "")
+       and "Allow Docker DNS" in (p_none["error"] or ""),
+       "no proxy and no resolvers is fail-closed", p_none["error"])
+
+    p_missing_pc = dns.plan_job_dns(
+        "https://example.com/", tmp / "nopc", opts, {},
+        {"type": "tor", "socks_url": "socks5h://ssh-tunnel-api:9050"},
+        mount_ok=True, proxychains_bin=False,
+    )
+    ok(p_missing_pc["ok"] is False and "proxychains4" in (p_missing_pc["error"] or ""),
+       "OPSEC proxy without proxychains is fail-closed", p_missing_pc["error"])
+
+    p_mount = dns.plan_job_dns(
+        "https://example.com/", tmp / "nmount", opts,
+        {"dns_resolvers": ["77.88.8.8"]}, {},
+        mount_ok=False, proxychains_bin=False,
+    )
+    ok(p_mount["ok"] is False and "mount namespace" in (p_mount["error"] or ""),
+       "resolver path without a mount namespace is fail-closed", p_mount["error"])
+
+    p_ov = dns.plan_job_dns(
+        "https://example.com/", tmp / "ov",
+        site_clone.normalize_options({"respectOpsec": True, "allowDockerDns": True}),
+        {}, {},
+        mount_ok=False, proxychains_bin=False,
+    )
+    ok(p_ov["ok"] is True and p_ov["label"] == "Docker (override)",
+       "Allow Docker DNS override is accepted", p_ov)
+
+    # run_clone refuses before starting httrack
+    fake_ht = tmp / "httrack"
+    fake_ht.write_text("#!/bin/sh\necho should-not-run\nexit 0\n")
+    fake_ht.chmod(fake_ht.stat().st_mode | stat.S_IEXEC)
+    orig_which = site_clone.shutil.which
+    def _which(name):
+        if name == "httrack":
+            return str(fake_ht)
+        if name in {"proxychains4", "proxychains"}:
+            return None
+        return orig_which(name)
+    site_clone.shutil.which = _which
+    try:
+        result = site_clone.run_clone(
+            "https://example.com/", tmp / "job-refused",
+            options={"respectOpsec": True, "deobfuscate": False},
+        )
+    finally:
+        site_clone.shutil.which = orig_which
+    ok(result.get("ok") is False and "no DNS resolvers" in (result.get("error") or ""),
+       "run_clone fail-closes when OPSEC is on and DNS cannot be routed",
+       result.get("error"))
+    ok((result.get("dns") or {}).get("via") in {"none", ""},
+       "failed job still records a dns object", result.get("dns"))
+
+    site_clone.shutil.which = _which
+    try:
+        result_ov = site_clone.run_clone(
+            "https://example.com/", tmp / "job-ov",
+            options={"respectOpsec": True, "allowDockerDns": True, "deobfuscate": False,
+                     "maxTime": 15},
+        )
+    finally:
+        site_clone.shutil.which = orig_which
+    # Override lets planning pass; fake httrack may run and fetch nothing — that
+    # is not a fail-closed refusal.
+    ok("no DNS resolvers" not in (result_ov.get("error") or ""),
+       "override does not take the fail-closed path", result_ov.get("error"))
+    ok((result_ov.get("dns") or {}).get("label") == "Docker (override)",
+       "run_clone records Docker (override) on the job", result_ov.get("dns"))
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("DNS stub helpers (no network)")
+import site_clone_dns_stub as stub
+qname = "example.com"
+# Build a tiny A query.
+qid = b"\x12\x34"
+flags = b"\x01\x00"
+header = qid + flags + b"\x00\x01\x00\x00\x00\x00\x00\x00"
+query = header + stub.encode_name(qname) + b"\x00\x01\x00\x01"
+parsed = stub.parse_question(query)
+ok(parsed == (qname, 1), "parse_question reads an A query", parsed)
+payload = {"Status": 0, "Answer": [{"name": "example.com", "type": 1, "TTL": 30, "data": "93.184.216.34"}]}
+wire = stub._json_to_dns(query, qname, 1, payload)
+ok(wire and b"\x5d\xb8\xd8\x22" in wire, "JSON DoH answer encodes 93.184.216.34", wire)
+ok("dns.google/dns-query" in stub._doh_wire_url("https://dns.google/resolve"),
+   "Google /resolve is rewritten to /dns-query")
+
+
 print(("\nPASSED" if not fails else "\nFAILED") + f": {checks - fails}/{checks} checks")
 sys.exit(1 if fails else 0)

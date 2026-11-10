@@ -68,6 +68,9 @@ ok(d.getElementById('aclone-robots').checked, 'form follow-robots is checked');
 ok(d.getElementById('aclone-opsec').checked, 'form respect-OPSEC is checked');
 ok(d.getElementById('aclone-deobf') && d.getElementById('aclone-deobf').checked,
    'form Deobfuscate JavaScript is checked');
+ok(d.getElementById('aclone-docker-dns') && !d.getElementById('aclone-docker-dns').checked,
+   'form Allow Docker DNS (leaks lookups) is present and unchecked');
+ok(def.allowDockerDns === false, 'defaults.allowDockerDns is false');
 ok(d.getElementById('aclone-deobf-timeout') && d.getElementById('aclone-deobf-timeout').value === '180',
    'form deobfuscation timeout default is 180s', d.getElementById('aclone-deobf-timeout') && d.getElementById('aclone-deobf-timeout').value);
 
@@ -80,6 +83,12 @@ ok(read.robots === false && read.includeImages === false && read.external === 's
    'toggles and external mode survive a write/read', JSON.stringify(read));
 ok(read.deobfuscate === false && read.deobfuscateTimeout === 90,
    'deobfuscate toggle and timeout survive a write/read', JSON.stringify(read));
+w.acloneWriteOptions({ ...def, allowDockerDns: true });
+ok(w.acloneReadOptions().allowDockerDns === true,
+   'allowDockerDns survives a write/read');
+w.acloneWriteOptions(def);
+ok(!d.getElementById('aclone-docker-dns').checked,
+   'writing defaults clears the Docker DNS override');
 
 section('send to Active');
 setupCampaign({
@@ -124,6 +133,39 @@ ok(normed.length === 1 && !('secret' in normed[0]) && !('junk' in normed[0]),
    'normaliser drops unknown fields', JSON.stringify(normed[0]));
 ok(normed[0].warnings && normed[0].warnings[0] === 'webcrack skipped' && normed[0].deobfuscation.tool === 'webcrack',
    'normaliser keeps warnings and deobfuscation status', JSON.stringify(normed[0]));
+
+section('DNS label on the job card');
+setupCampaign();
+w.sw('active');
+w.acloneSaveJobs([{
+  id: 'sc-dns-tor', url: 'https://example.com', status: 'running',
+  dns: { label: 'via TOR', via: 'tor', resolver: 'TOR ssh-tunnel-api:9050' },
+}]);
+w.acloneRender();
+const cardTor = d.querySelector('.aclone-job[data-job="sc-dns-tor"]');
+ok(cardTor && /DNS:\s*via TOR/.test(cardTor.textContent || ''),
+   'job card renders DNS: via TOR', cardTor && cardTor.textContent);
+w.acloneSaveJobs([{
+  id: 'sc-dns-ip', url: 'https://example.com', status: 'done',
+  dns: { label: '77.88.8.8', via: 'resolver', resolver: '77.88.8.8' },
+}]);
+w.acloneRender();
+const cardIp = d.querySelector('.aclone-job[data-job="sc-dns-ip"]');
+ok(cardIp && /DNS:\s*77\.88\.8\.8/.test(cardIp.textContent || ''),
+   'job card renders DNS: 77.88.8.8', cardIp && cardIp.textContent);
+w.acloneSaveJobs([{
+  id: 'sc-dns-ov', url: 'https://example.com', status: 'queued',
+  dns: { label: 'Docker (override)', via: 'docker_override' },
+}]);
+w.acloneRender();
+const cardOv = d.querySelector('.aclone-job[data-job="sc-dns-ov"]');
+ok(cardOv && /DNS:\s*Docker \(override\)/.test(cardOv.textContent || ''),
+   'job card renders DNS: Docker (override)', cardOv && cardOv.textContent);
+const normDns = w.acloneNormaliseJobs([
+  { id: 'x', url: 'https://a.test', status: 'queued', dns: { label: 'via SOCKS5', via: 'socks5' }, leak: 1 },
+]);
+ok(normDns[0].dns && normDns[0].dns.label === 'via SOCKS5' && !('leak' in normDns[0]),
+   'normaliser keeps dns and still drops unknown fields', JSON.stringify(normDns[0]));
 
 section('candidate URLs from multi-org objectives');
 setupCampaign({
