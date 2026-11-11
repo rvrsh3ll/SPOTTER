@@ -788,5 +788,144 @@ ok("leftover-ocr@example.com" not in off_vals,
 shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+section("recovered source snippets")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-src-"))
+try:
+    job = tmp / "camp" / "job-1"
+    src = job / "deobf" / "js" / "app.js"
+    src.parent.mkdir(parents=True)
+    secret = "sk_live_SOURCETESTVALUE99"
+    src.write_text(
+        "\n".join([
+            "const preamble = 1;",
+            "const api_base = 'https://api.example.com/v1';",
+            "const other = 2;",
+            "const stripe_key = '%s';" % secret,
+            "const tail = 3;",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (job / "ocr" / "example.com").mkdir(parents=True)
+    (job / "ocr" / "example.com" / "banner.png.txt").write_text(
+        "Contact ocr-findme@example.com\n", encoding="utf-8")
+
+    window = an.source_snippet(job, "deobf/js/app.js", line=2, context=1)
+    ok(window["ok"] is True, "snippet from deobf/ is readable", window)
+    ok(window["focus_line"] == 2 and window["start_line"] == 1,
+       "snippet is windowed around the requested line", window)
+    ok("api.example.com/v1" in window["text"] and "const tail" not in window["text"],
+       "surrounding lines are included and the window is bounded", window["text"])
+    scrubbed = an.source_snippet(job, "deobf/js/app.js", line=4, context=1)
+    ok(scrubbed["ok"] and secret not in scrubbed["text"] and "***" in scrubbed["text"],
+       "secret-shaped strings are scrubbed in the snippet", scrubbed.get("text"))
+
+    ocr = an.source_snippet(job, "ocr/example.com/banner.png.txt", evidence="ocr-findme@example.com")
+    ok(ocr["ok"] and "ocr-findme@example.com" in ocr["text"],
+       "OCR text is readable by evidence", ocr)
+
+    ok(an.resolve_job_source(job, "../deobf/js/app.js") is None,
+       "parent-directory path is rejected")
+    ok(an.resolve_job_source(job, "/etc/passwd") is None, "absolute path is rejected")
+    ok(an.source_snippet(job, "status.json")["ok"] is False,
+       "files outside deobf/ocr/mirror are rejected")
+    (job / "deobf" / "escape").symlink_to("/etc/passwd")
+    ok(an.resolve_job_source(job, "deobf/escape") is None,
+       "symlinks are rejected")
+
+    # Analyzer records a line number on JS endpoints.
+    findings = []
+    an.parse_js(src, job / "deobf", findings)
+    ep = [f for f in findings if f["category"] == "js_endpoint"]
+    ok(ep and ep[0].get("source_line") == 2,
+       "js_endpoint findings carry source_line", ep[:1])
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("ingest JS endpoints into the sketch")
+import site_clone_ingest as ing  # noqa: E402
+
+class _FakeFC:
+    def __init__(self, existing=None):
+        self.nodes = []
+        self.edges = []
+        self.existing = list(existing or [])
+        self._n = 0
+
+    def add_node(self, label, node_type, properties=None, sketch_id=""):
+        self._n += 1
+        nid = "n%d" % self._n
+        rec = {"id": nid, "nodeLabel": label, "nodeType": node_type,
+               "nodeProperties": dict(properties or {})}
+        self.nodes.append(rec)
+        return rec
+
+    def create_edge(self, src, tgt, typ, sketch_id=""):
+        self.edges.append((src, tgt, typ))
+
+    def get_nodes_by_type(self, labels, sketch_id=None, properties=None):
+        return list(self.existing)
+
+fake = _FakeFC(existing=[{
+    "id": "apex-1", "nodeLabel": "example.com (web)", "nodeType": "WebAsset",
+    "nodeProperties": {"url": "https://example.com/", "fqdn": "example.com",
+                       "source": "domain-recon"},
+}])
+orig_fc = ing.fc
+ing.fc = fake
+try:
+    report = {
+        "ok": True,
+        "start_url": "https://www.example.com/",
+        "files_scanned": 3,
+        "finding_count": 3,
+        "summary": {"js_endpoint": 3},
+        "findings": [
+            {"category": "js_endpoint", "value": "https://api.example.com/v1/users",
+             "source_path": "deobf/js/app.js", "deobfuscated": True,
+             "deobfuscator": "webcrack"},
+            {"category": "js_endpoint", "value": "/internal/admin",
+             "source_path": "deobf/js/app.js", "deobfuscated": True},
+            {"category": "js_endpoint", "value": "https://hooks.slack.com/services/x",
+             "source_path": "deobf/js/app.js", "deobfuscated": True},
+        ],
+    }
+    result = ing.ingest_findings(report, "sk-1", campaign_id="camp-1", job_id="job-1")
+finally:
+    ing.fc = orig_fc
+
+ok(result.get("ok") is True and result.get("endpoints") == 3,
+   "three endpoint WebAssets are written", result)
+labels = {n["nodeLabel"]: n for n in fake.nodes}
+ok(any("(clone)" in n["nodeLabel"] for n in fake.nodes),
+   "cloned site WebAsset is still created")
+same = [n for n in fake.nodes if n["nodeProperties"].get("fqdn") == "api.example.com"]
+rel = [n for n in fake.nodes if n["nodeProperties"].get("path") == "/internal/admin"]
+ext = [n for n in fake.nodes if n["nodeProperties"].get("fqdn") == "hooks.slack.com"]
+ok(same and same[0]["nodeProperties"].get("same_site") is True
+   and same[0]["nodeProperties"].get("deobfuscated") is True
+   and same[0]["nodeProperties"].get("source") == "site-clone"
+   and same[0]["nodeProperties"].get("provenance") == "site_clone",
+   "same-registrable API host is tagged site-clone + deobfuscated", same[:1])
+ok(rel and rel[0]["nodeProperties"].get("url", "").endswith("/internal/admin")
+   and rel[0]["nodeProperties"].get("same_site") is True,
+   "relative API path is resolved against the cloned site", rel[:1])
+ok(ext and ext[0]["nodeProperties"].get("external") is True
+   and ext[0]["nodeProperties"].get("deobfuscated") is True,
+   "external endpoint is a separate WebAsset with provenance", ext[:1])
+site_id = next(n["id"] for n in fake.nodes if "(clone)" in n["nodeLabel"])
+same_id = same[0]["id"]
+ext_id = ext[0]["id"]
+ok((same_id, site_id, "FOUND_ON") in fake.edges
+   and (same_id, "apex-1", "FOUND_ON") in fake.edges,
+   "same-site endpoint is linked to the clone and the org apex WebAsset",
+   fake.edges)
+ok((ext_id, site_id, "FOUND_ON") in fake.edges
+   and (ext_id, "apex-1", "FOUND_ON") not in fake.edges,
+   "external endpoint is not linked to the org apex", fake.edges)
+ok(ing._normalize_endpoint("javascript:alert(1)", "https://example.com/") == "",
+   "javascript: endpoints are not ingested")
+
+
 print(("\nPASSED" if not fails else "\nFAILED") + f": {checks - fails}/{checks} checks")
 sys.exit(1 if fails else 0)

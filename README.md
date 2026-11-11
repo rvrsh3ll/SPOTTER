@@ -544,6 +544,17 @@ If Tesseract is missing or a file fails, the job still finishes
 (fail-open) and a warning is recorded. The sidecar ships Debian
 `tesseract-ocr`, `tesseract-ocr-eng`, and `poppler-utils`.
 
+Open findings on a finished job can **View source** for a finding that
+came from deobfuscated JavaScript, a sourcemap, or OCR: a read-only
+window of the recovered file (path under `deobf/` / `ocr/`, surrounding
+lines, secret-shaped strings scrubbed). The snippet is rendered as text
+and is never executed in the browser. JS-discovered API URLs and paths
+are written to the campaign sketch as WebAsset nodes. Endpoints on the
+same registrable domain as the cloned site are also linked to any
+existing org apex WebAsset (`{domain} (web)`); third-party hosts stay
+as separate WebAssets with provenance `site-clone` and
+`deobfuscated=true` when the hit came from recovered JavaScript.
+
 **DNS behaviour** when Respect OPSEC is on (Debian bookworm HTTrack 3.49.4
 does not do HTTP CONNECT for HTTPS, so Site Clone does not use HTTrack `-P`
 under OPSEC):

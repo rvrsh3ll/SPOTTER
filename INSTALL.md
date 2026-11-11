@@ -338,10 +338,12 @@ caps, and click **Start clone**. Jobs appear in the list. If a job fails with
 clone (and optional JS deobfuscation), Tesseract OCRs images in the
 sidecar when **OCR images** is on; findings are tagged `ocr=true` and the
 text under `ocr/` is indexed with the rest of the tree. Rebuild
-`site-clone-api` to pick up the Tesseract packages. A finished clone is
-also indexed into the Prompt tab's company-site corpus (the task-runners
-container now mounts `data/clones` read-only). Redeploy Open WebUI tools
-so the *Ask the Company Website* hint names Site Clone:
+`site-clone-api` to pick up the Tesseract packages and the read-only
+source-snippet route used by **View source** in Open findings. Refresh
+workflow 32 so `action=source` and JS-endpoint ingest are live. A
+finished clone is also indexed into the Prompt tab's company-site corpus
+(the task-runners container now mounts `data/clones` read-only). Redeploy
+Open WebUI tools so the *Ask the Company Website* hint names Site Clone:
 
 ```bash
 sudo python3 scripts/setup_openwebui.py

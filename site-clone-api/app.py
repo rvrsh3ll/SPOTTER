@@ -3,6 +3,7 @@
 
 POST /clone            start a job (async), returns {job_id, status}
 GET  /jobs/<id>        status, progress, analysis summary (no raw secrets)
+POST /jobs/<id>/source read-only scrubbed snippet of deobf/ocr/mirror source
 POST /jobs/<id>/cancel request cancel
 GET  /health           liveness
 """
@@ -39,6 +40,28 @@ def _job_dir(campaign_id: str, job_id: str) -> Path:
     if not SAFE.match(job_id or ""):
         raise ValueError("invalid job id")
     return DATA / camp / job_id
+
+
+def _read_source(body: dict[str, Any], job_id: str) -> dict[str, Any]:
+    """Return a secret-scrubbed source window for a finding. Never executes it."""
+    campaign_id = str(body.get("campaign_id") or "")
+    rel = str(body.get("path") or body.get("source_path") or "")
+    try:
+        job_dir = _job_dir(campaign_id, job_id)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if not job_dir.is_dir():
+        return {"ok": False, "error": "unknown job"}
+    try:
+        from site_clone_analyze import source_snippet
+    except Exception as e:
+        return {"ok": False, "error": "source reader unavailable: %s" % type(e).__name__}
+    return source_snippet(
+        job_dir, rel,
+        line=body.get("line") or body.get("source_line") or 0,
+        evidence=str(body.get("evidence") or ""),
+        context=body.get("context") or 20,
+    )
 
 
 def _public(job: dict[str, Any]) -> dict[str, Any]:
@@ -266,6 +289,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job["cancel"] = True
             self._send(200, {"ok": True, "job_id": job_id, "status": job.get("status")})
+            return
+        m = re.match(r"^/jobs/([A-Za-z0-9._-]+)/source$", path)
+        if m:
+            job_id = m.group(1)
+            result = _read_source(body, job_id)
+            self._send(200 if result.get("ok") else 400, result)
             return
         m = re.match(r"^/jobs/([A-Za-z0-9._-]+)/ingested$", path)
         if m:

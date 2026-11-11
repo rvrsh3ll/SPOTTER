@@ -5,6 +5,10 @@ Reuses flowsint_client the same way WF13 does: add_node + create_edge.
 Emails and names become Individual nodes, the cloned site is a WebAsset,
 secret-shaped hits become Credential nodes (hash + mask only — never the
 raw value), technologies from generator meta become Technology nodes.
+API endpoints and JS URLs become WebAsset nodes: same-registrable-domain
+ones are correlated to the cloned site and any existing org apex
+WebAsset (`{domain} (web)`); external hosts stay separate, with
+provenance source=site-clone and deobfuscated/ocr flags when applicable.
 
 Idempotent on (type, label) because add_node MERGEs on the label.
 """
@@ -35,6 +39,88 @@ def _hash_secret(sketch_id: str, masked: str) -> str:
     # Raw values never reach this module — the analyzer already redacted them.
     # Hash the masked form plus sketch so a Credential node still dedups.
     return hashlib.sha256(("%s:%s" % (sketch_id, masked)).encode()).hexdigest()
+
+
+_TWO_LEVEL = {
+    "co.uk", "com.au", "co.jp", "com.br", "co.nz", "com.tr",
+    "co.za", "co.in", "com.mx", "co.kr", "com.sg", "com.hk",
+}
+
+
+def registrable_domain(host: str) -> str:
+    """Best-effort registrable domain; errs toward a longer (stricter) base."""
+    h = (host or "").strip().lower().rstrip(".")
+    if h.startswith("www."):
+        h = h[4:]
+    parts = [p for p in h.split(".") if p]
+    if len(parts) <= 2:
+        return ".".join(parts)
+    if ".".join(parts[-2:]) in _TWO_LEVEL and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _same_registrable(host_a: str, host_b: str) -> bool:
+    a = registrable_domain(host_a)
+    b = registrable_domain(host_b)
+    return bool(a and b and a == b)
+
+
+def _normalize_endpoint(value: str, start_url: str) -> str:
+    """Turn a JS-discovered URL or API path into an absolute http(s) URL."""
+    raw = (value or "").strip()
+    if not raw or len(raw) > 2048:
+        return ""
+    lower = raw.lower()
+    if lower.startswith(("javascript:", "data:", "mailto:", "about:", "blob:")):
+        return ""
+    if raw.startswith("//"):
+        scheme = urlparse(start_url).scheme or "https"
+        raw = "%s:%s" % (scheme, raw)
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        # Drop fragments; keep query (it is often part of an API shape).
+        return parsed._replace(fragment="").geturl()
+    if parsed.scheme and parsed.scheme not in {"http", "https"}:
+        return ""
+    base = start_url or ""
+    if not base:
+        return ""
+    from urllib.parse import urljoin
+    joined = urljoin(base if base.endswith("/") else base + "/", raw)
+    got = urlparse(joined)
+    if got.scheme not in {"http", "https"} or not got.netloc:
+        return ""
+    return got._replace(fragment="").geturl()
+
+
+def _host_of(node: dict[str, Any]) -> str:
+    props = node.get("nodeProperties") or {}
+    return (
+        _host(str(props.get("fqdn") or props.get("url") or props.get("domain") or ""))
+        or _host("https://" + str(node.get("nodeLabel") or ""))
+    )
+
+
+def _existing_org_webassets(sketch_id: str, registrable: str) -> list[dict[str, Any]]:
+    """WebAssets already in the sketch that share the org's registrable domain."""
+    if not registrable:
+        return []
+    try:
+        nodes = fc.get_nodes_by_type(
+            "WebAsset", sketch_id=sketch_id,
+            properties=["url", "fqdn", "domain", "source"],
+        )
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for n in nodes or []:
+        host = _host_of(n)
+        label = str(n.get("nodeLabel") or "")
+        if _same_registrable(host, registrable) or _same_registrable(
+                _host("https://" + label.split(" ", 1)[0]), registrable):
+            out.append(n)
+    return out
 
 
 def ingest_findings(
@@ -71,6 +157,7 @@ def ingest_findings(
     people = 0
     creds = 0
     techs = 0
+    endpoints = 0
     errors: list[str] = []
 
     def link(src: str, tgt: str, typ: str) -> None:
@@ -84,6 +171,9 @@ def ingest_findings(
     seen_name: set[str] = set()
     seen_cred: set[str] = set()
     seen_tech: set[str] = set()
+    seen_endpoint: set[str] = set()
+    org_reg = registrable_domain(host)
+    org_assets: list[dict[str, Any]] | None = None
 
     for f in findings:
         cat = f.get("category")
@@ -149,6 +239,49 @@ def ingest_findings(
                     creds += 1
                     written += 1
                     link(nid, site_id, "FOUND_IN")
+            elif cat == "js_endpoint":
+                url = _normalize_endpoint(val, start_url)
+                if not url or url in seen_endpoint:
+                    continue
+                seen_endpoint.add(url)
+                ep_host = _host(url) or host
+                same = _same_registrable(ep_host, host)
+                path = urlparse(url).path or "/"
+                label = (url if len(url) <= 180 else (ep_host + path)[:170]) + " (endpoint)"
+                props = {
+                    "url": url,
+                    "fqdn": ep_host,
+                    "path": path[:300],
+                    "source": "site-clone",
+                    "provenance": "site_clone",
+                    "campaign_id": campaign_id,
+                    "job_id": job_id,
+                    "source_file": str(f.get("source_path") or "")[:200],
+                    "same_site": same,
+                    "external": not same,
+                }
+                if f.get("deobfuscated"):
+                    props["deobfuscated"] = True
+                    if f.get("deobfuscator"):
+                        props["deobfuscator"] = str(f.get("deobfuscator"))[:40]
+                if f.get("ocr"):
+                    props["ocr"] = True
+                node = fc.add_node(
+                    label=label[:200], node_type="WebAsset",
+                    properties=props, sketch_id=sketch_id,
+                )
+                nid = _id(node)
+                if nid:
+                    endpoints += 1
+                    written += 1
+                    link(nid, site_id, "FOUND_ON")
+                    if same:
+                        if org_assets is None:
+                            org_assets = _existing_org_webassets(sketch_id, org_reg)
+                        for asset in org_assets or []:
+                            aid = _id(asset)
+                            if aid and aid != site_id and aid != nid:
+                                link(nid, aid, "FOUND_ON")
             elif cat == "meta" and val.lower().startswith("generator="):
                 tech = val.split("=", 1)[1].strip()[:120]
                 key = tech.lower()
@@ -176,5 +309,6 @@ def ingest_findings(
         "people": people,
         "credentials": creds,
         "technologies": techs,
+        "endpoints": endpoints,
         "errors": errors[:20],
     }

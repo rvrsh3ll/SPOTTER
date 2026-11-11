@@ -1103,6 +1103,10 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 .aclone-st-failed, .aclone-st-cancelled { color:var(--warn); border-color:var(--warn); }
 .aclone-find-tbl { width:100%; font-size:11px; margin-top:8px; }
 .aclone-find-tbl td, .aclone-find-tbl th { padding:3px 6px; text-align:left; vertical-align:top; border-bottom:1px solid var(--border); }
+.aclone-src-btn { margin-left:6px; font-size:9px; padding:1px 6px; }
+#aclone-src-modal .ilm-pre { max-height:60vh; overflow:auto; white-space:pre-wrap; word-break:break-all; }
+#aclone-src-modal .aclone-src-focus { background:rgba(255, 200, 80, .18); display:block; }
+#aclone-src-modal .aclone-src-n { color:var(--dim); -webkit-user-select:none; user-select:none; }
 .aclone-sev-high, .aclone-sev-critical { color:var(--warn); }
 .aclone-sev-medium { color:var(--data); }
 
@@ -3025,6 +3029,25 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
 <div id="tc" aria-live="assertive"></div>
 
 <!-- ── Ingested file view modal ──────────────────────────────────── -->
+<div id="aclone-src-modal" class="hidden" role="dialog" aria-modal="true" aria-label="View recovered source"
+     onclick="if(event.target===this)acloneCloseSource()">
+  <div class="ilm-inner">
+    <div class="ilm-hdr">
+      <div>
+        <div class="ilm-title" id="aclone-src-title">Recovered source</div>
+        <div class="ilm-meta" id="aclone-src-meta"></div>
+      </div>
+      <button class="ilm-close" type="button" onclick="acloneCloseSource()" title="Close">×</button>
+    </div>
+    <div class="ilm-body">
+      <pre class="ilm-pre" id="aclone-src-content"></pre>
+    </div>
+    <div class="ilm-footer">
+      <button class="btn" type="button" onclick="acloneCloseSource()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="ilog-modal" class="hidden" role="dialog" aria-modal="true" aria-label="View ingested file"
      onclick="if(event.target===this)closeIngestModal()">
   <div class="ilm-inner">
@@ -14959,6 +14982,78 @@ function acloneRender() {
   }).join('');
 }
 
+function acloneCanViewSource(f) {
+  if (!f || !f.source_path) return false;
+  if (f.deobfuscated || f.ocr) return true;
+  const p = String(f.source_path).replace(/\\/g, '/');
+  return p.startsWith('deobf/') || p.startsWith('ocr/') || p.indexOf('/sourcemaps/') !== -1;
+}
+
+function acloneCloseSource() {
+  const modal = document.getElementById('aclone-src-modal');
+  if (modal) modal.classList.add('hidden');
+  const pre = document.getElementById('aclone-src-content');
+  if (pre) pre.textContent = '';
+}
+
+async function acloneViewSource(btn) {
+  const ac = getActiveCamp();
+  if (!ac) { toast('Create a campaign first', 'err'); return; }
+  const jobId = btn && btn.getAttribute('data-job') || '';
+  const path = btn && btn.getAttribute('data-path') || '';
+  const line = parseInt(btn && btn.getAttribute('data-line') || '0', 10) || 0;
+  const evidence = btn && btn.getAttribute('data-evidence') || '';
+  if (!jobId || !path) { toast('No recovered source for this finding', 'err'); return; }
+  const modal = document.getElementById('aclone-src-modal');
+  const title = document.getElementById('aclone-src-title');
+  const meta = document.getElementById('aclone-src-meta');
+  const pre = document.getElementById('aclone-src-content');
+  if (title) title.textContent = path;
+  if (meta) meta.textContent = 'Loading…';
+  if (pre) pre.textContent = '';
+  if (modal) modal.classList.remove('hidden');
+  try {
+    const data = await fetchJson(apiUrl('site-clone'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'source', job_id: jobId, campaign_id: ac.id,
+        path, line, evidence, context: 20,
+      }),
+    });
+    if (!data || data.ok === false) {
+      if (meta) meta.textContent = '';
+      if (pre) pre.textContent = (data && data.error) ? String(data.error) : 'Could not load source';
+      return;
+    }
+    if (meta) {
+      meta.textContent = 'Lines ' + (data.start_line || 1) + '–' + (data.end_line || 1)
+        + (data.focus_line ? ' · at line ' + data.focus_line : '')
+        + ' · shown as text, never executed';
+    }
+    const start = Number(data.start_line || 1);
+    const focus = Number(data.focus_line || 0);
+    const rows = String(data.text || '').split('\n');
+    if (pre) {
+      pre.textContent = '';
+      rows.forEach((ln, i) => {
+        const n = start + i;
+        const row = document.createElement('span');
+        if (focus && n === focus) row.className = 'aclone-src-focus';
+        const num = document.createElement('span');
+        num.className = 'aclone-src-n';
+        num.textContent = String(n).padStart(5, ' ') + ' | ';
+        row.appendChild(num);
+        row.appendChild(document.createTextNode(ln));
+        pre.appendChild(row);
+        pre.appendChild(document.createTextNode('\n'));
+      });
+    }
+  } catch (e) {
+    if (meta) meta.textContent = '';
+    if (pre) pre.textContent = 'Could not load source';
+  }
+}
+
 function acloneShowFindings(id) {
   const job = acloneGetJobs().find(j => j.id === id);
   const el = document.getElementById('aclone-findings');
@@ -14969,7 +15064,8 @@ function acloneShowFindings(id) {
   const ingest = job.ingested && job.ingested.ok
     ? ('Written to sketch: ' + (job.ingested.written || 0) + ' nodes'
        + (job.ingested.emails ? ', ' + job.ingested.emails + ' emails' : '')
-       + (job.ingested.credentials ? ', ' + job.ingested.credentials + ' credentials' : ''))
+       + (job.ingested.credentials ? ', ' + job.ingested.credentials + ' credentials' : '')
+       + (job.ingested.endpoints ? ', ' + job.ingested.endpoints + ' endpoints' : ''))
     : (job.ingested && job.ingested.error ? ('Ingest: ' + job.ingested.error) : '');
   const rag = (job.ingested && job.ingested.site_rag) || job.site_rag || null;
   const ragLine = rag
@@ -15012,6 +15108,11 @@ function acloneShowFindings(id) {
           + '</td><td>' + esc(f.source_path || '')
           + (f.deobfuscated ? ' <span title="' + esc(f.deobfuscator || 'webcrack') + '">· deobf</span>' : '')
           + (f.ocr ? ' <span title="extracted from a cloned image or image-based PDF">· ocr</span>' : '')
+          + (acloneCanViewSource(f) ? ' <button type="button" class="btn aclone-src-btn" data-job="' + esc(job.id)
+             + '" data-path="' + esc(f.source_path || '')
+             + '" data-line="' + esc(String(f.source_line || ''))
+             + '" data-evidence="' + esc(String(f.evidence || '').slice(0, 180))
+             + '" onclick="acloneViewSource(this)">View source</button>' : '')
           + '</td></tr>').join('')
         + '</tbody></table></div>'
       : '<div style="color:var(--dim);font-size:11px;">No findings recorded.</div>');

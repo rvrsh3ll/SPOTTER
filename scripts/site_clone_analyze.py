@@ -76,9 +76,15 @@ def snippet(text: str, start: int = 0, width: int = MAX_EVIDENCE) -> str:
 
 def _safe_rel(root: Path, path: Path) -> str:
     try:
-        return str(path.resolve().relative_to(root.resolve()))
+        return str(path.resolve().relative_to(root.resolve()).as_posix())
     except ValueError:
         return path.name
+
+
+def _line_at(text: str, index: int) -> int:
+    if index <= 0:
+        return 1
+    return text.count("\n", 0, index) + 1
 
 
 def _read_text(path: Path, limit: int = MAX_FILE_BYTES) -> str:
@@ -215,7 +221,8 @@ def _collect_secrets(text: str, source_path: str, findings: list[dict[str, Any]]
         findings.append(_finding(
             "js_secret", "high", "high", redact(raw),
             snippet(text, m.start()).replace(raw, redact(raw)),
-            source_path, secret_kind="credential_pattern", tags=tags))
+            source_path, secret_kind="credential_pattern", tags=tags,
+            source_line=_line_at(text, m.start())))
 
 
 def parse_html(path: Path, root: Path, findings: list[dict[str, Any]],
@@ -268,16 +275,24 @@ def parse_js(path: Path, root: Path, findings: list[dict[str, Any]],
     text = _read_text(path)
     for m in JS_ENDPOINT_RE.finditer(text):
         url = next(g for g in m.groups() if g)
-        findings.append(_finding("js_endpoint", "medium", "high", url, snippet(text, m.start()), rel, tags=tags))
+        findings.append(_finding(
+            "js_endpoint", "medium", "high", url, snippet(text, m.start()), rel,
+            tags=tags, source_line=_line_at(text, m.start())))
     for m in SOURCEMAP_RE.finditer(text):
-        findings.append(_finding("sourcemap", "medium", "high", m.group(1), m.group(0)[:200], rel, tags=tags))
+        findings.append(_finding(
+            "sourcemap", "medium", "high", m.group(1), m.group(0)[:200], rel,
+            tags=tags, source_line=_line_at(text, m.start())))
     for m in COMMENT_RE.finditer(text):
         c = m.group(0).strip()
         if len(c) > 8:
-            findings.append(_finding("js_comment", "info", "low", c[:200], snippet(text, m.start()), rel, tags=tags))
+            findings.append(_finding(
+                "js_comment", "info", "low", c[:200], snippet(text, m.start()), rel,
+                tags=tags, source_line=_line_at(text, m.start())))
     _collect_secrets(text, rel, findings, tags)
     for m in EMAIL_RE.finditer(text):
-        findings.append(_finding("email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel, tags=tags))
+        findings.append(_finding(
+            "email", "medium", "high", m.group(0).lower(), snippet(text, m.start()), rel,
+            tags=tags, source_line=_line_at(text, m.start())))
 
 
 def parse_textish(path: Path, root: Path, findings: list[dict[str, Any]],
@@ -518,11 +533,13 @@ def analyze_ocr_dir(ocr_dir: str | Path, start_url: str = "") -> dict[str, Any]:
             for m in EMAIL_RE.finditer(text):
                 findings.append(_finding(
                     "email", "medium", "high", m.group().lower(),
-                    snippet(text, m.start()), rel, tags=tags))
+                    snippet(text, m.start()), rel, tags=tags,
+                    source_line=_line_at(text, m.start())))
             for m in PHONE_RE.finditer(text):
                 findings.append(_finding(
                     "phone", "low", "medium", m.group(),
-                    snippet(text, m.start()), rel, tags=tags))
+                    snippet(text, m.start()), rel, tags=tags,
+                    source_line=_line_at(text, m.start())))
             _collect_secrets(text, rel, findings, tags=tags)
             if len(findings) >= MAX_FINDINGS:
                 truncated = True
@@ -573,6 +590,141 @@ def analyze_clone_outputs(
     report = merge_reports(raw, *extras, start_url=start_url)
     report["root"] = str(Path(mirror))
     return report
+
+
+SOURCE_ROOTS = ("deobf", "ocr", "mirror")
+MAX_SOURCE_BYTES = 512 * 1024
+DEFAULT_SOURCE_CONTEXT = 20
+MAX_SOURCE_CONTEXT = 80
+
+
+def resolve_job_source(job_dir: str | Path, rel: str) -> Path | None:
+    """Resolve a job-relative source path, or None if it is not readable.
+
+    Only deobf/, ocr/, and mirror/ under the job directory are allowed.
+    Symlinks and parent-directory escapes are rejected.
+    """
+    rel = (rel or "").replace("\\", "/").strip()
+    if not rel or rel.startswith("/") or rel.startswith("~"):
+        return None
+    parts = [p for p in Path(rel).parts if p not in ("", ".")]
+    if not parts or parts[0] not in SOURCE_ROOTS:
+        return None
+    if any(p == ".." or p.startswith("/") for p in parts):
+        return None
+    root = Path(job_dir).resolve()
+    target = root.joinpath(*parts)
+    try:
+        resolved = target.resolve()
+        resolved.relative_to(root)
+    except (ValueError, OSError):
+        return None
+    # Reject a symlink at the file or any directory on the way, so a planted
+    # link cannot walk out of the job tree.
+    cursor = root
+    for part in parts:
+        cursor = cursor / part
+        try:
+            if cursor.is_symlink():
+                return None
+        except OSError:
+            return None
+    if not resolved.is_file() or resolved.is_symlink():
+        return None
+    return resolved
+
+
+def _focus_line(text: str, line: int, evidence: str) -> int:
+    total = text.count("\n") + (1 if text else 0)
+    try:
+        n = int(line or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if 1 <= n <= max(total, 1):
+        return n
+    ev = (evidence or "").strip()
+    if ev:
+        # Evidence is often whitespace-collapsed and may already be scrubbed.
+        needle = ev[:80]
+        idx = text.find(needle)
+        if idx < 0:
+            compact = re.sub(r"\s+", " ", text)
+            cidx = compact.find(re.sub(r"\s+", " ", needle))
+            if cidx >= 0:
+                # Map compact offset back approximately by walking the original.
+                raw_i = 0
+                compact_i = 0
+                while raw_i < len(text) and compact_i < cidx:
+                    if text[raw_i].isspace():
+                        if compact_i < len(compact) and compact[compact_i] == " ":
+                            compact_i += 1
+                        raw_i += 1
+                        while raw_i < len(text) and text[raw_i].isspace():
+                            raw_i += 1
+                    else:
+                        compact_i += 1
+                        raw_i += 1
+                idx = raw_i
+        if idx >= 0:
+            return _line_at(text, idx)
+    return 1
+
+
+def source_snippet(
+    job_dir: str | Path,
+    rel: str,
+    *,
+    line: int = 0,
+    evidence: str = "",
+    context: int = DEFAULT_SOURCE_CONTEXT,
+) -> dict[str, Any]:
+    """Return a scrubbed, windowed view of a recovered clone source file.
+
+    Never raises. The text is secret-scrubbed and is meant to be shown as
+    text in the UI, not executed.
+    """
+    try:
+        ctx = int(context or DEFAULT_SOURCE_CONTEXT)
+    except (TypeError, ValueError):
+        ctx = DEFAULT_SOURCE_CONTEXT
+    ctx = max(1, min(MAX_SOURCE_CONTEXT, ctx))
+    path = resolve_job_source(job_dir, rel)
+    if path is None:
+        return {"ok": False, "error": "path is not a readable clone source"}
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        return {"ok": False, "error": "could not read source: %s" % type(e).__name__}
+    if size <= 0:
+        return {"ok": False, "error": "source file is empty"}
+    try:
+        raw = path.read_bytes()[:MAX_SOURCE_BYTES]
+    except OSError as e:
+        return {"ok": False, "error": "could not read source: %s" % type(e).__name__}
+    if b"\x00" in raw[:4096]:
+        return {"ok": False, "error": "source is not a text file"}
+    text = raw.decode("utf-8", errors="replace")
+    rel_out = "/".join(
+        p for p in Path((rel or "").replace("\\", "/")).parts if p not in ("", ".")
+    )
+    focus = _focus_line(text, line, evidence)
+    lines = text.splitlines()
+    if not lines:
+        return {"ok": False, "error": "source file is empty"}
+    start = max(1, focus - ctx)
+    end = min(len(lines), focus + ctx)
+    window = "\n".join(lines[start - 1:end])
+    return {
+        "ok": True,
+        "path": rel_out,
+        "start_line": start,
+        "end_line": end,
+        "focus_line": min(focus, len(lines)),
+        "line_count": len(lines),
+        "text": scrub(window),
+        "truncated": size > MAX_SOURCE_BYTES or end < len(lines) or start > 1,
+    }
+
 
 
 def main() -> int:

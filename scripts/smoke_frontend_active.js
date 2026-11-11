@@ -203,10 +203,90 @@ ok(cands.some(u => u.indexOf('primary.test') !== -1), 'includes company-email do
 ok(cands.some(u => u.indexOf('intranet.primary.test') !== -1), 'includes additional identifier URL', cands);
 ok(cands.some(u => u.indexOf('sub.primary.test') !== -1), 'includes additional org domain', cands);
 
+section('View source on recovered findings');
+setupCampaign();
+w.sw('active');
+ok(!!d.getElementById('aclone-src-modal'), 'View source dialog is in the page');
+ok(typeof w.acloneCanViewSource === 'function' && typeof w.acloneViewSource === 'function',
+   'View source helpers are defined');
+ok(w.acloneCanViewSource({ source_path: 'deobf/js/app.js', deobfuscated: true }),
+   'deobfuscated findings can be opened');
+ok(w.acloneCanViewSource({ source_path: 'ocr/example.com/banner.png.txt', ocr: true }),
+   'OCR findings can be opened');
+ok(w.acloneCanViewSource({ source_path: 'deobf/sourcemaps/js/hidden.js' }),
+   'sourcemap paths can be opened');
+ok(!w.acloneCanViewSource({ source_path: 'index.html', category: 'email' }),
+   'raw HTML findings do not get View source');
+w.acloneSaveJobs([{
+  id: 'sc-src', url: 'https://example.com', status: 'done',
+  ingested: { ok: true, written: 4, endpoints: 2 },
+  findings: [
+    { category: 'js_endpoint', severity: 'medium', value: 'https://api.example.com/v1',
+      source_path: 'deobf/js/app.js', source_line: 4, deobfuscated: true, deobfuscator: 'webcrack',
+      evidence: "const api_base = 'https://api.example.com/v1'" },
+    { category: 'email', severity: 'medium', value: '<script>alert(1)</script>@evil.test',
+      source_path: 'index.html' },
+  ],
+}]);
+w.acloneRender();
+w.acloneShowFindings('sc-src');
+const findingsSrc = d.getElementById('aclone-findings');
+ok(findingsSrc && /2 endpoints/.test(findingsSrc.textContent || ''),
+   'findings pane names ingested endpoints', findingsSrc && findingsSrc.textContent);
+const viewBtn = findingsSrc && findingsSrc.querySelector('.aclone-src-btn');
+ok(viewBtn && viewBtn.getAttribute('data-path') === 'deobf/js/app.js'
+   && viewBtn.getAttribute('data-line') === '4',
+   'View source is offered on the recovered JS finding', viewBtn && viewBtn.outerHTML);
+ok(findingsSrc && findingsSrc.querySelectorAll('.aclone-src-btn').length === 1,
+   'View source is only offered on recovered sources');
+ok(findingsSrc && findingsSrc.innerHTML.indexOf('<script>alert(1)</script>') === -1
+   && findingsSrc.innerHTML.indexOf('&lt;script&gt;') !== -1,
+   'finding values are escaped and not executed', findingsSrc && findingsSrc.innerHTML);
+
+const srcCalls = [];
+const origFetchJson = w.fetchJson;
+w.fetchJson = async function (url, opts) {
+  srcCalls.push({ url, body: JSON.parse((opts && opts.body) || '{}') });
+  return {
+    ok: true, path: 'deobf/js/app.js', start_line: 3, end_line: 5, focus_line: 4,
+    text: "const other = 2;\nconst api_base = 'https://api.example.com/v1';\nconst tail = 3;",
+  };
+};
 section('domain recon CTA');
 ok(!!d.getElementById('dr-clone-active'), 'Domain Recon has Clone in Active button');
 ok(typeof w.acloneSendFromDomainRecon === 'function', 'acloneSendFromDomainRecon is defined');
 ok(typeof w.acloneSendSelectedAssets === 'function', 'acloneSendSelectedAssets is defined');
 
-console.log(`\n${failures ? 'FAILED' : 'PASSED'}: ${checks - failures}/${checks} checks`);
-process.exit(failures ? 1 : 0);
+(async () => {
+  // Finish the View source click after helpers above stubbed fetchJson.
+  // If the stub is still in place from the previous section, reuse it;
+  // otherwise this is a no-op when the button or stub is missing.
+  if (typeof origFetchJson !== 'undefined' && d.querySelector('.aclone-src-btn')) {
+    try {
+      await w.acloneViewSource(d.querySelector('.aclone-src-btn'));
+      const modal = d.getElementById('aclone-src-modal');
+      const pre = d.getElementById('aclone-src-content');
+      const meta = d.getElementById('aclone-src-meta');
+      ok(modal && !modal.classList.contains('hidden'), 'View source dialog opens');
+      ok(srcCalls[0] && srcCalls[0].body && srcCalls[0].body.action === 'source'
+         && srcCalls[0].body.path === 'deobf/js/app.js'
+         && srcCalls[0].body.job_id === 'sc-src',
+         'View source posts action=source to the site-clone webhook',
+         srcCalls[0]);
+      ok(pre && pre.textContent.indexOf('api.example.com/v1') !== -1
+         && pre.querySelector('.aclone-src-focus'),
+         'dialog shows the snippet as text with the focus line marked',
+         pre && pre.innerHTML);
+      ok(pre && pre.querySelectorAll('script').length === 0,
+         'recovered source is not inserted as a script element');
+      ok(meta && /never executed/.test(meta.textContent || ''),
+         'dialog states the snippet is not executed', meta && meta.textContent);
+      w.acloneCloseSource();
+      ok(modal.classList.contains('hidden'), 'View source dialog can be closed');
+    } finally {
+      w.fetchJson = origFetchJson;
+    }
+  }
+  console.log(`\n${failures ? 'FAILED' : 'PASSED'}: ${checks - failures}/${checks} checks`);
+  process.exit(failures ? 1 : 0);
+})();
