@@ -334,7 +334,18 @@ sudo ./spotter compose up -d --build site-clone-api
 
 Then open **Active** in the dashboard, paste or send a target URL, review the
 caps, and click **Start clone**. Jobs appear in the list. If a job fails with
-`site-clone-api unreachable`, the worker container is not running.
+`site-clone-api unreachable`, the worker container is not running. A finished
+clone is also indexed into the Prompt tab's company-site corpus (the
+task-runners container now mounts `data/clones` read-only). Redeploy Open
+WebUI tools so the *Ask the Company Website* hint names Site Clone:
+
+```bash
+sudo python3 scripts/setup_openwebui.py
+```
+
+Import or refresh workflow 32 if that workflow is already on the host, then
+recreate `n8n` / `task-runners` so they pick up the clones mount and
+`SITE_CLONE_DATA`.
 
 OPSEC DNS uses a user+mount namespace to bind-mount a per-job `resolv.conf`
 (no `SYS_ADMIN`). The clone service is started with `apparmor:unconfined`

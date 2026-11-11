@@ -539,6 +539,58 @@ class RAGIndexer:
         })
         return dropped
 
+    def drop_documents(self, collection_name: str, *,
+                       ids: Optional[List[str]] = None,
+                       metadata_any: Optional[List[Dict[str, Any]]] = None) -> int:
+        """Remove documents by id or metadata match. Returns how many were dropped.
+
+        ``metadata_any`` is a list of dicts; a document is dropped if *any*
+        dict's key/value pairs are a subset of its metadata (OR of ANDs).
+        Used to replace one site's clone in a per-campaign collection without
+        wiping other hosts that were already indexed for the same sketch.
+
+        Embeddings stay aligned with the remaining documents. A later
+        index_documents() call will refit a corpus embedder as usual.
+        """
+        collection = self._load_collection(collection_name)
+        drop_ids = {str(i) for i in (ids or []) if i}
+        matchers = [dict(m) for m in (metadata_any or []) if m]
+        if not drop_ids and not matchers:
+            return 0
+
+        def _hit(doc_id: str, meta: Dict[str, Any]) -> bool:
+            if doc_id in drop_ids:
+                return True
+            md = meta or {}
+            for matcher in matchers:
+                if all(md.get(k) == v for k, v in matcher.items()):
+                    return True
+            return False
+
+        keep_ids, keep_docs, keep_meta, keep_emb = [], [], [], []
+        embeddings = collection.get("embeddings") or []
+        dropped = 0
+        for i, doc_id in enumerate(collection.get("ids") or []):
+            meta = (collection.get("metadatas") or [None] * (i + 1))[i] or {}
+            if _hit(str(doc_id), meta):
+                dropped += 1
+                continue
+            keep_ids.append(doc_id)
+            keep_docs.append(collection["documents"][i])
+            keep_meta.append(meta)
+            if i < len(embeddings):
+                keep_emb.append(embeddings[i])
+        if dropped:
+            collection["ids"] = keep_ids
+            collection["documents"] = keep_docs
+            collection["metadatas"] = keep_meta
+            collection["embeddings"] = keep_emb
+            # Align embeddings if a previous write left them short.
+            if keep_docs and len(keep_emb) != len(keep_docs):
+                self._refresh_embeddings(collection)
+            self._save_collection(collection_name, collection)
+        return dropped
+
     def index_documents(self, collection_name: str,
                         documents: List[Dict[str, Any]]) -> int:
         """Generic writer: index arbitrary {id, text, metadata} records.

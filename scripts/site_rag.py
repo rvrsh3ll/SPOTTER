@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-site_rag.py — crawl the target company's own website, extract org intelligence,
+site_rag.py — crawl or index the target company's own website, extract org intelligence,
 and index it for retrieval.
 
 WHY THIS EXISTS
@@ -79,6 +79,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -1812,3 +1813,359 @@ def ask_site(question: str, sketch_id: str, n_results: int = 5,
             "score": h.get("score"),
         })
     return out
+
+
+# ── offline Site Clone → Prompt-tab corpus ──────────────────────────────────
+#
+# Live Domain Recon / Organization enrichment no longer crawls the target.
+# After a successful Active Site Clone, WF32 calls index_offline_tree() on
+# the job's mirror/ (and deobf/ when present) and writes the same
+# per-campaign collection crawl_and_index() uses: company_site__<sketch_id>.
+# Nothing here contacts the target. Caps bound how much of a large tree is
+# indexed; HTML/text always come from the raw mirror, JavaScript prefers
+# recovered deobf/ sources when they exist so the Prompt tab searches the
+# readable form rather than packed originals.
+
+_CLONE_MAX_FILE_BYTES = 512 * 1024
+_CLONE_MAX_FILES = 2000
+_CLONE_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+_CLONE_MAX_CHUNKS = 4000
+
+_CLONE_HTML_EXT = {".html", ".htm", ".xhtml"}
+_CLONE_TEXT_EXT = {".txt", ".md", ".csv", ".rst"}
+_CLONE_JS_EXT = {".js", ".mjs", ".cjs"}
+_CLONE_SKIP_DIR = {"hts-cache", ".work", "__pycache__"}
+_CLONE_SKIP_NAME_PREFIX = ("hts-",)
+_CLONE_SKIP_NAME = {"manifest.json", "dns-stub.pid", "dns-stub.ready",
+                    "proxychains.conf", "resolv.conf", "status.json",
+                    "ingested.json"}
+
+
+def clone_index_caps() -> Dict[str, int]:
+    return {
+        "max_file_bytes": max(8 * 1024, _as_int(
+            os.environ.get("SITE_CLONE_INDEX_MAX_FILE_BYTES"), _CLONE_MAX_FILE_BYTES)),
+        "max_files": max(1, min(20000, _as_int(
+            os.environ.get("SITE_CLONE_INDEX_MAX_FILES"), _CLONE_MAX_FILES))),
+        "max_total_bytes": max(64 * 1024, _as_int(
+            os.environ.get("SITE_CLONE_INDEX_MAX_TOTAL_BYTES"), _CLONE_MAX_TOTAL_BYTES)),
+        "max_chunks": max(10, min(20000, _as_int(
+            os.environ.get("SITE_CLONE_INDEX_MAX_CHUNKS"), _CLONE_MAX_CHUNKS))),
+    }
+
+
+def _clone_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in _CLONE_HTML_EXT:
+        return "html"
+    if ext in _CLONE_TEXT_EXT:
+        return "text"
+    if ext in _CLONE_JS_EXT:
+        return "js"
+    return ""
+
+
+def _iter_clone_files(root: Path):
+    if not root.is_dir():
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _CLONE_SKIP_DIR and not d.startswith(".")]
+        for name in filenames:
+            if name.startswith(_CLONE_SKIP_NAME_PREFIX) or name in _CLONE_SKIP_NAME:
+                continue
+            if name.startswith("."):
+                continue
+            yield Path(dirpath) / name
+
+
+def clone_file_url(rel: str, start_url: str, *, from_deobf: bool = False) -> str:
+    """Best-effort public URL for a file under mirror/ or deobf/.
+
+    HTTrack writes mirror/<host>/path/index.html. deobf/ mirrors those
+    relative paths (plus deobf/sourcemaps/... for recovered sources).
+    """
+    rel_u = (rel or "").replace("\\\\", "/").lstrip("/")
+    if from_deobf and rel_u.startswith("sourcemaps/"):
+        rel_u = rel_u[len("sourcemaps/"):]
+    start = urlparse(start_url or "")
+    scheme = start.scheme or "https"
+    start_host = (start.hostname or "").lower()
+    parts = [p for p in rel_u.split("/") if p]
+    host = start_host
+    rest: List[str] = parts
+    if parts:
+        first = parts[0]
+        first_host = first.split(":")[0].lower()
+        looks_host = ("." in first_host or first_host == start_host
+                      or first_host.startswith("www."))
+        if looks_host and not first_host.endswith((".html", ".htm", ".js", ".txt",
+                                                     ".md", ".css", ".mjs", ".cjs")):
+            host = first_host
+            rest = parts[1:]
+    if rest and rest[-1].lower() in {"index.html", "index.htm", "index.xhtml"}:
+        rest = rest[:-1]
+    path = "/" + "/".join(rest)
+    if not host:
+        return urljoin(start_url or "https://cloned.local/", rel_u)
+    return urlunparse((scheme, host, path, "", "", ""))
+
+
+def pages_from_clone_tree(
+    job_dir: str | Path,
+    *,
+    start_url: str = "",
+    max_files: int = 0,
+    max_file_bytes: int = 0,
+    max_total_bytes: int = 0,
+) -> Dict[str, Any]:
+    """Read HTML/text/JS from a clone job directory. Never contacts the network.
+
+    Returns {pages, files_considered, files_skipped, truncated, errors}.
+    JavaScript is taken from deobf/ when that tree has any JS; otherwise from
+    the raw mirror. HTML and text always come from the raw mirror so the
+    Prompt corpus is the page the site actually served, plus recovered
+    scripts when deobfuscation ran.
+    """
+    caps = clone_index_caps()
+    max_files = max_files or caps["max_files"]
+    max_file_bytes = max_file_bytes or caps["max_file_bytes"]
+    max_total_bytes = max_total_bytes or caps["max_total_bytes"]
+    job = Path(job_dir)
+    mirror = job / "mirror"
+    deobf = job / "deobf"
+    out: Dict[str, Any] = {
+        "pages": [],
+        "files_considered": 0,
+        "files_skipped": 0,
+        "truncated": False,
+        "errors": [],
+        "used_deobf_js": False,
+    }
+    if not mirror.is_dir() and not deobf.is_dir():
+        out["errors"].append("clone tree not found (expected mirror/ or deobf/ under %s)" % job)
+        return out
+
+    deobf_js = []
+    if deobf.is_dir():
+        deobf_js = [p for p in _iter_clone_files(deobf) if _clone_kind(p) == "js"]
+    use_deobf_js = bool(deobf_js)
+    out["used_deobf_js"] = use_deobf_js
+
+    selected: List[Tuple[Path, Path, bool, str]] = []
+    if mirror.is_dir():
+        for path in _iter_clone_files(mirror):
+            kind = _clone_kind(path)
+            if not kind:
+                continue
+            if kind == "js" and use_deobf_js:
+                continue
+            selected.append((path, mirror, False, kind))
+    if use_deobf_js:
+        for path in deobf_js:
+            selected.append((path, deobf, True, "js"))
+
+    total = 0
+    for path, root, from_deobf, kind in selected:
+        out["files_considered"] += 1
+        if len(out["pages"]) >= max_files:
+            out["truncated"] = True
+            out["files_skipped"] += 1
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            out["files_skipped"] += 1
+            continue
+        if size <= 0:
+            out["files_skipped"] += 1
+            continue
+        try:
+            raw = path.read_bytes()[:max_file_bytes]
+        except OSError as e:
+            out["errors"].append("could not read %s: %s" % (path.name, type(e).__name__))
+            out["files_skipped"] += 1
+            continue
+        try:
+            text_in = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text_in = raw.decode("utf-8", errors="replace")
+        title = ""
+        body = ""
+        if kind == "html":
+            extracted = extract_page(text_in)
+            title = extracted.get("title") or ""
+            body = extracted.get("text") or ""
+        else:
+            body = text_in
+            title = path.name
+        body = body.strip()
+        if not body:
+            out["files_skipped"] += 1
+            continue
+        if total + len(body) > max_total_bytes:
+            out["truncated"] = True
+            out["files_skipped"] += 1
+            continue
+        total += len(body)
+        try:
+            rel = str(path.relative_to(root).as_posix())
+        except ValueError:
+            rel = path.name
+        url = clone_file_url(rel, start_url, from_deobf=from_deobf)
+        out["pages"].append({
+            "url": url,
+            "title": title,
+            "text": body,
+            "source_path": rel,
+            "kind": kind,
+            "from_deobf": from_deobf,
+        })
+    return out
+
+
+def index_offline_tree(
+    job_dir: str | Path,
+    *,
+    sketch_id: str,
+    start_url: str = "",
+    job_id: str = "",
+    campaign_id: str = "",
+    indexer: Any = None,
+    max_files: int = 0,
+    max_file_bytes: int = 0,
+    max_total_bytes: int = 0,
+    max_chunks: int = 0,
+) -> Dict[str, Any]:
+    """Index a Site Clone tree into the Prompt-tab company-site collection.
+
+    Never raises and never contacts the target. Replaces previously indexed
+    documents for this job_id or this site host, leaving other hosts in the
+    same campaign collection intact. Returns a status dict suitable for
+    storing on the clone job (ingested.site_rag).
+    """
+    caps = clone_index_caps()
+    max_chunks = max_chunks or caps["max_chunks"]
+    col = collection_name(sketch_id)
+    out: Dict[str, Any] = {
+        "ok": False,
+        "source": "site-clone",
+        "collection": col,
+        "chunks_indexed": 0,
+        "pages": 0,
+        "files_considered": 0,
+        "files_skipped": 0,
+        "truncated": False,
+        "used_deobf_js": False,
+        "dropped": 0,
+        "errors": [],
+        "job_id": str(job_id or ""),
+    }
+    if not (sketch_id or "").strip():
+        out["errors"].append("missing sketch_id; cannot index a per-campaign corpus")
+        return out
+
+    harvested = pages_from_clone_tree(
+        job_dir, start_url=start_url,
+        max_files=max_files, max_file_bytes=max_file_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    out["files_considered"] = harvested["files_considered"]
+    out["files_skipped"] = harvested["files_skipped"]
+    out["truncated"] = bool(harvested["truncated"])
+    out["used_deobf_js"] = bool(harvested["used_deobf_js"])
+    out["errors"].extend(harvested.get("errors") or [])
+    pages = harvested.get("pages") or []
+    out["pages"] = len(pages)
+    if not pages:
+        if not out["errors"]:
+            out["errors"].append("no HTML, text or JavaScript sources were eligible to index")
+        return out
+
+    size = _as_int(os.environ.get("SITE_CHUNK_CHARS"), _DEFAULT_CHUNK_CHARS)
+    overlap = _as_int(os.environ.get("SITE_CHUNK_OVERLAP"), _DEFAULT_CHUNK_OVERLAP)
+    indexed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    start = urlparse(start_url or "")
+    host = (start.hostname or "").lower().lstrip("www.")
+    docs: List[Dict[str, Any]] = []
+    for page in pages:
+        if len(docs) >= max_chunks:
+            out["truncated"] = True
+            break
+        body = page.get("text") or ""
+        for i, ch in enumerate(chunk_text(body, size=size, overlap=overlap)):
+            if len(docs) >= max_chunks:
+                out["truncated"] = True
+                break
+            docs.append({
+                "id": "clone:%s:%s#%d" % (job_id or host or "site",
+                                          page.get("url") or page.get("source_path"), i),
+                "text": ch["text"],
+                "metadata": {
+                    "url": page.get("url") or "",
+                    "page_title": page.get("title") or "",
+                    "heading": ch.get("heading") or "",
+                    "sketch_id": str(sketch_id or ""),
+                    "crawled_at": indexed_at,
+                    "chunk_ix": i,
+                    "source": "site-clone",
+                    "job_id": str(job_id or ""),
+                    "campaign_id": str(campaign_id or ""),
+                    "source_path": page.get("source_path") or "",
+                    "kind": page.get("kind") or "",
+                    "from_deobf": bool(page.get("from_deobf")),
+                    "clone_host": host,
+                    "in_scope": True,
+                },
+            })
+
+    try:
+        if indexer is None:
+            from rag_indexer import RAGIndexer
+            indexer = RAGIndexer()
+        matchers: List[Dict[str, Any]] = []
+        if job_id:
+            matchers.append({"job_id": str(job_id)})
+        if host:
+            matchers.append({"clone_host": host})
+            # A previous live crawl (now removed from Domain Recon) may have
+            # left documents whose url is on this host but that have no job_id.
+            # Drop those too so a clone replaces stale live text for this site.
+        if matchers:
+            # Also drop by URL host when we can parse it, for pre-clone corpora.
+            dropped = indexer.drop_documents(col, metadata_any=matchers)
+            # drop_documents cannot match "url host equals" unless we collect ids.
+            dropped += _drop_docs_for_host(indexer, col, host, keep_job_ids=None)
+            out["dropped"] = dropped
+        out["chunks_indexed"] = indexer.index_documents(col, docs)
+        out["ok"] = out["chunks_indexed"] > 0
+        if not out["ok"] and not out["errors"]:
+            out["errors"].append("indexing wrote no new chunks")
+    except Exception as e:                            # noqa: BLE001
+        out["errors"].append("site clone indexing failed: %r" % (e,))
+    return out
+
+
+def _drop_docs_for_host(indexer: Any, collection: str, host: str,
+                        keep_job_ids: Optional[Set[str]] = None) -> int:
+    """Drop existing company-site docs whose URL host matches ``host``."""
+    if not host or not hasattr(indexer, "_load_collection"):
+        return 0
+    try:
+        data = indexer._load_collection(collection)   # noqa: SLF001
+    except Exception:
+        return 0
+    ids = []
+    host_l = host.lower().lstrip("www.")
+    keep = keep_job_ids or set()
+    for i, doc_id in enumerate(data.get("ids") or []):
+        md = (data.get("metadatas") or [None] * (i + 1))[i] or {}
+        if keep and str(md.get("job_id") or "") in keep:
+            continue
+        url = str(md.get("url") or "")
+        uhost = (urlparse(url).hostname or md.get("clone_host") or "").lower().lstrip("www.")
+        if uhost == host_l:
+            ids.append(doc_id)
+    if not ids:
+        return 0
+    return indexer.drop_documents(collection, ids=ids)

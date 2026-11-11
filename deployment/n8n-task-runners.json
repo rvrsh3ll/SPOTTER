@@ -55,6 +55,7 @@
         "DEPLOYMENT_NAME",
         "FLOWSINT_API_URL",
         "SITE_CLONE_API_URL",
+        "SITE_CLONE_DATA",
         "FLOWSINT_API_KEY",
         "FLOWSINT_SKETCH_ID",
         "SHARPHOUND_DROP_DIR",

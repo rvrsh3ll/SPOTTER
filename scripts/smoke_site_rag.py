@@ -41,6 +41,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -920,6 +921,125 @@ def test_builtin_backend_is_unchanged():
             os.environ["SITE_TAVILY"] = prev
 
 
+def test_offline_clone_index():
+    section("offline Site Clone → Prompt corpus")
+    fix = Path(__file__).resolve().parent / "fixtures" / "site_clone"
+    check("clone fixture is present", (fix / "index.html").is_file())
+
+    check("clone URL helper maps host/index.html to the site root",
+          site_rag.clone_file_url("example.com/index.html", "https://example.com/")
+          == "https://example.com/")
+    check("clone URL helper keeps a nested page",
+          site_rag.clone_file_url("example.com/docs/notes.txt", "https://example.com/")
+          == "https://example.com/docs/notes.txt")
+    check("deobf sourcemaps/ prefix is stripped from the URL",
+          site_rag.clone_file_url("sourcemaps/js/hidden.js", "https://example.com/",
+                                  from_deobf=True)
+          == "https://example.com/js/hidden.js")
+
+    job = Path(tempfile.mkdtemp(prefix="spotter-clone-rag-"))
+    try:
+        shutil.copytree(fix, job / "mirror" / "example.com")
+        harvested = site_rag.pages_from_clone_tree(job, start_url="https://example.com/")
+        kinds = {p["kind"] for p in harvested["pages"]}
+        urls = {p["url"] for p in harvested["pages"]}
+        check("harvests HTML, text and raw JS from the mirror",
+              kinds == {"html", "text", "js"}, str(kinds))
+        check("reconstructs the start URL for index.html",
+              "https://example.com/" in urls, str(urls))
+        check("skips images and sourcemaps",
+              not any(p["source_path"].endswith(("pixel.jpg", "packed.js.map"))
+                      for p in harvested["pages"]))
+        check("does not contact the network (pages came from the tree)",
+              harvested["files_considered"] >= 4 and not harvested["errors"],
+              str(harvested))
+
+        # Caps
+        capped = site_rag.pages_from_clone_tree(job, start_url="https://example.com/",
+                                                max_files=1)
+        check("max_files cap truncates the harvest",
+              len(capped["pages"]) == 1 and capped["truncated"] is True,
+              str((len(capped["pages"]), capped["truncated"])))
+
+        # Recovered JS is preferred over packed originals.
+        deobf_js = job / "deobf" / "js" / "recovered.js"
+        deobf_js.parent.mkdir(parents=True)
+        deobf_js.write_text("const role = 'Chief Privacy Officer of Recovered Corp';\n")
+        hidden = job / "deobf" / "sourcemaps" / "js" / "hidden.js"
+        hidden.parent.mkdir(parents=True)
+        hidden.write_text("const email = 'secret@ops.example.com';\n")
+        (job / "deobf" / "manifest.json").write_text("{}")
+        harvested2 = site_rag.pages_from_clone_tree(job, start_url="https://example.com/")
+        js_pages = [p for p in harvested2["pages"] if p["kind"] == "js"]
+        check("prefers deobf JavaScript when it exists",
+              harvested2["used_deobf_js"] is True
+              and all(p["from_deobf"] for p in js_pages)
+              and not any(Path(p["source_path"]).name == "packed.js" for p in js_pages),
+              str([(p["source_path"], p["from_deobf"]) for p in js_pages]))
+        check("recovered sourcemap source is harvested",
+              any("secret@ops.example.com" in p["text"] for p in js_pages))
+
+        ix = RAGIndexer()
+        missing = site_rag.index_offline_tree(job, sketch_id="", start_url="https://example.com/")
+        check("refuses to index without a sketch_id",
+              missing["ok"] is False and "sketch_id" in " ".join(missing["errors"]),
+              str(missing))
+
+        result = site_rag.index_offline_tree(
+            job, sketch_id="sk-clone-smoke", start_url="https://example.com/",
+            job_id="sc-1", indexer=ix,
+        )
+        check("indexes the offline tree into the per-campaign collection",
+              result["ok"] is True and result["chunks_indexed"] > 0
+              and result["collection"] == "company_site__sk-clone-smoke",
+              str(result))
+        hits = site_rag.ask_site("Chief Privacy Officer", "sk-clone-smoke",
+                                 n_results=5, indexer=ix)
+        check("Prompt-style retrieval finds recovered JS text",
+              any("Privacy Officer" in h["text"] for h in hits),
+              str([h["text"][:80] for h in hits]))
+        check("every retrieved passage still carries a citation URL",
+              bool(hits) and all(h.get("url") for h in hits), str(hits[:1]))
+        check("another campaign does not see this clone",
+              site_rag.ask_site("Privacy Officer", "sk-OTHER", indexer=ix) == [])
+
+        # Re-clone of the same host replaces; a second host in the campaign stays.
+        job2 = Path(tempfile.mkdtemp(prefix="spotter-clone-rag2-"))
+        (job2 / "mirror" / "example.com").mkdir(parents=True)
+        (job2 / "mirror" / "example.com" / "index.html").write_text(
+            "<html><body><p>Pat Example is the new CTO after the re-clone.</p></body></html>")
+        result2 = site_rag.index_offline_tree(
+            job2, sketch_id="sk-clone-smoke", start_url="https://example.com/",
+            job_id="sc-2", indexer=ix,
+        )
+        joined = " ".join(h["text"] for h in site_rag.ask_site(
+            "who is the CTO", "sk-clone-smoke", n_results=5, indexer=ix))
+        check("re-cloning the same host drops previous chunks",
+              result2["dropped"] >= 1 and "Pat Example" in joined, joined[:160])
+        check("...and no longer serves the recovered-JS text from the old job",
+              "Privacy Officer of Recovered" not in joined, joined[:160])
+
+        job3 = Path(tempfile.mkdtemp(prefix="spotter-clone-rag3-"))
+        (job3 / "mirror" / "partner.test").mkdir(parents=True)
+        (job3 / "mirror" / "partner.test" / "index.html").write_text(
+            "<html><body><p>Partner Labs builds widgets.</p></body></html>")
+        site_rag.index_offline_tree(
+            job3, sketch_id="sk-clone-smoke", start_url="https://partner.test/",
+            job_id="sc-3", indexer=ix,
+        )
+        partner_hits = site_rag.ask_site("widgets", "sk-clone-smoke", n_results=5, indexer=ix)
+        cto_hits = site_rag.ask_site("Pat Example", "sk-clone-smoke", n_results=5, indexer=ix)
+        check("a second host in the same campaign is kept",
+              any("widgets" in h["text"] for h in partner_hits)
+              and any("Pat Example" in h["text"] for h in cto_hits),
+              str((partner_hits[:1], cto_hits[:1])))
+        shutil.rmtree(job2, ignore_errors=True)
+        shutil.rmtree(job3, ignore_errors=True)
+    finally:
+        shutil.rmtree(job, ignore_errors=True)
+
+
+
 def main() -> int:
     for t in (
         test_scope_lock,
@@ -947,6 +1067,7 @@ def main() -> int:
         test_extract_urls_offdomain_gate,
         test_extract_urls_needs_a_key,
         test_builtin_backend_is_unchanged,
+        test_offline_clone_index,
     ):
         t()
     print()

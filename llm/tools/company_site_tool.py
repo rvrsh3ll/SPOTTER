@@ -11,17 +11,20 @@ Install:
 Requires:
   - scripts/rag_indexer.py
   - scripts/site_rag.py
-  - a crawl already performed by WF13's `org` source, which writes the
-    per-campaign collection this reads
+  - an offline Site Clone (Active tab / WF32) or any earlier index written
+    into the per-campaign collection this reads
 
 WHERE THE CORPUS COMES FROM
 ---------------------------
-Live Analysis → DOMAIN RECON ▾ → Enrich Organization crawls the target's own
-site, chunks it and indexes it into `company_site__<sketch_id>`. Until that has
-run for a campaign, this tool has nothing to answer from and says so — it does
-NOT fall back to another campaign's corpus, because one client's website has
-nothing to say about another's and a confident answer sourced from the wrong
-company is worse than no answer.
+Active → Site Clone downloads the target's site with HTTrack, optionally
+deobfuscates JavaScript, and on completion WF32 indexes the offline tree
+(`mirror/` plus recovered sources under `deobf/`) into
+`company_site__<sketch_id>`. Live Domain Recon / Organization enrichment no
+longer crawls the target. Until a clone has been indexed for a campaign, this
+tool has nothing to answer from and says so — it does NOT fall back to another
+campaign's corpus, because one client's website has nothing to say about
+another's and a confident answer sourced from the wrong company is worse than
+no answer.
 
 WHY CITATIONS ARE MANDATORY
 ---------------------------
@@ -134,8 +137,9 @@ class Tools:
                 # does not mention it" when it usually means "nobody has crawled
                 # the site for this campaign yet".
                 "note": "No indexed website content for this campaign. Run "
-                        "Live Analysis > DOMAIN RECON > Enrich Organization to "
-                        "crawl and index the target's site, then ask again. This "
+                        "Active > Site Clone to download the target's site "
+                        "offline and index it for this chat, then ask again. "
+                        "Live Domain Recon crawling has been removed. This "
                         "tool never reads another campaign's corpus.",
             })
 
@@ -158,7 +162,7 @@ class Tools:
 
     def get_company_site_status(self, sketch_id: str = "") -> str:
         """
-        Report whether the target organization's website has been crawled and
+        Report whether the target organization's website has been cloned and
         indexed for this campaign, and how much of it there is.
 
         :param sketch_id: Optional campaign sketch id; defaults to the active one.

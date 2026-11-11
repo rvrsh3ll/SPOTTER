@@ -59,6 +59,7 @@ services:
       # --- Flowsint ---
       FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       SITE_CLONE_API_URL: ${SITE_CLONE_API_URL:-http://site-clone-api:7052}
+      SITE_CLONE_DATA: ${SITE_CLONE_DATA:-/data/clones}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
       # --- Cobalt Strike ---
@@ -332,6 +333,7 @@ services:
       NO_PROXY: "site-clone-api,flowsint-api,flowsint-api-prod,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,127.0.0.1,localhost,.flowsint_net"
       FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       SITE_CLONE_API_URL: ${SITE_CLONE_API_URL:-http://site-clone-api:7052}
+      SITE_CLONE_DATA: ${SITE_CLONE_DATA:-/data/clones}
       FLOWSINT_API_KEY: ${FLOWSINT_API_KEY}
       FLOWSINT_SKETCH_ID: ${FLOWSINT_SKETCH_ID}
       NEO4J_HTTP_URL: ${NEO4J_HTTP_URL:-http://flowsint-neo4j-prod:7474}
@@ -600,6 +602,12 @@ services:
       # invocation the Flowsint checkout, i.e. one dir too high. Any override of
       # SPOTTER_CACHE_HOST_DIR must be absolute.
       - ${SPOTTER_CACHE_HOST_DIR:-${SPOTTER_HOME}/.spotter-cache}:/data/spotter-cache
+      # Read-only: WF32 indexes a finished Site Clone tree (mirror/ + deobf/)
+      # into the Prompt-tab company-site RAG collection that lives on the
+      # cache volume above. Same host path as site-clone-api's /data/clones
+      # (docker-compose.flowsint.yml). The runner never writes here.
+      # Absolute override only (SITE_CLONE_HOST_DIR).
+      - ${SITE_CLONE_HOST_DIR:-${SPOTTER_HOME}/data/clones}:/data/clones:ro
       # Read-WRITE: WF06's "Parse EyeWitness" node copies web screenshots here, in a
       # per-campaign subdir (/data/screenshots/<sketch_id>/). An ABSOLUTE host path,
       # not "../screenshots" — this container and spotter-ui (docker-compose.frontend.yml)

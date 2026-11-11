@@ -2547,8 +2547,10 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
         When <strong>Respect OPSEC profile</strong> is on, name lookups go through the
         campaign proxy (SOCKS5/TOR/HTTP via proxychains) or the Infrastructure DNS
         resolvers — never Docker's default resolver — unless you check
-        <strong>Allow Docker DNS (leaks lookups)</strong>. Live website crawling was
-        removed from Domain Recon / Organization enrichment; use this tab instead.
+        <strong>Allow Docker DNS (leaks lookups)</strong>. A finished clone is
+        indexed into the Prompt tab&rsquo;s company-site corpus (offline; the
+        target is not contacted again). Live website crawling stays removed
+        from Domain Recon / Organization enrichment; use this tab instead.
       </p>
 
       <div id="aclone-form">
@@ -14914,12 +14916,17 @@ function acloneRender() {
   host.innerHTML = jobs.map(j => {
     const prog = j.progress || {};
     const dnsLab = (j.dns && j.dns.label) ? ('DNS: ' + j.dns.label) : '';
+    const rag = (j.ingested && j.ingested.site_rag) || j.site_rag || null;
+    const ragLab = (rag && rag.ok && rag.chunks_indexed)
+      ? ('Prompt: ' + rag.chunks_indexed + ' chunks')
+      : '';
     const meta = [
       j.files ? (j.files + ' files') : '',
       j.bytes ? (Math.round(j.bytes/1024) + ' KB') : '',
       j.elapsed ? (j.elapsed + 's') : '',
       j.finding_count ? (j.finding_count + ' findings') : '',
       dnsLab,
+      ragLab,
     ].filter(Boolean).join(' · ');
     const actions = [];
     if (j.status === 'queued' || j.status === 'running')
@@ -14955,6 +14962,14 @@ function acloneShowFindings(id) {
        + (job.ingested.emails ? ', ' + job.ingested.emails + ' emails' : '')
        + (job.ingested.credentials ? ', ' + job.ingested.credentials + ' credentials' : ''))
     : (job.ingested && job.ingested.error ? ('Ingest: ' + job.ingested.error) : '');
+  const rag = (job.ingested && job.ingested.site_rag) || job.site_rag || null;
+  const ragLine = rag
+    ? (rag.ok
+      ? ('Prompt index: ' + (rag.chunks_indexed || 0) + ' chunk(s) from '
+         + (rag.pages || 0) + ' page(s)'
+         + (rag.collection ? ' (' + rag.collection + ')' : ''))
+      : (rag.error || (rag.errors && rag.errors[0]) ? ('Prompt index: ' + (rag.error || rag.errors[0])) : ''))
+    : '';
   const deob = job.deobfuscation || {};
   const deobLine = deob.enabled === false
     ? 'JavaScript deobfuscation was turned off for this job'
@@ -14968,6 +14983,7 @@ function acloneShowFindings(id) {
     + '<div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:8px;">'
     + esc(head)
     + (ingest ? '<br>' + esc(ingest) : '')
+    + (ragLine ? '<br>' + esc(ragLine) : '')
     + (deobLine ? '<br>' + esc(deobLine) : '')
     + (warnLine ? '<br>' + esc(warnLine) : '')
     + '</div>'

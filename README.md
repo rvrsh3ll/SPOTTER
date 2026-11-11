@@ -508,8 +508,11 @@ feature is **Site Clone**:
    See the DNS table below.
 4. Start the job. Progress, cancel and retry live in the job list (persisted on the
    campaign, including export/import). When a job finishes, **Open findings** shows
-   the offline analysis, and the workflow writes Email / Individual / WebAsset /
-   Credential / Technology nodes into the campaign sketch.
+   the offline analysis, the workflow writes Email / Individual / WebAsset /
+   Credential / Technology nodes into the campaign sketch, and the offline tree
+   (`mirror/` plus recovered JavaScript under `deobf/`) is indexed into the
+   Prompt tab's per-campaign company-site corpus so you can search or chat
+   over the clone without contacting the target again.
 
 The clone runs inside the `spotter-site-clone` container, not on the host. Output
 lands in `data/clones/<campaignId>/<jobId>/`. The raw HTTrack tree is
@@ -1195,6 +1198,19 @@ collection `company_site__<sketch_id>`. The five pre-existing RAG collections ar
 global; a target's website corpus must not join them. Ask questions of it from
 the **Prompt** tab — the *Ask the Company Website* tool returns passages with the
 URL each came from.
+
+**The live Domain Recon / Organization enrichment crawl stays removed.** The
+Prompt-tab corpus is filled from a finished **Active → Site Clone**: WF32
+calls `site_rag.index_offline_tree()` on that job's `mirror/` (HTML and
+text) and, when present, recovered JavaScript under `deobf/`. The target is
+not contacted again. Per-file, per-job file-count, total-text and chunk caps
+bound a large tree (`SITE_CLONE_INDEX_MAX_*`). Re-cloning the same host
+replaces that host's documents; other hosts already indexed for the campaign
+are left in place. Until a clone has been indexed for a campaign, the tool
+says so rather than reading another campaign's corpus.
+
+Redeploy the Open WebUI tool after this change (`scripts/setup_openwebui.py`)
+so the empty-state hint points at Site Clone rather than Enrich Organization.
 
 **An unreachable target is not an empty one.** Before the crawl opens its
 budget it makes a single bounded request to the site root over the configured
@@ -2622,7 +2638,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export. Websites, domains and subdomains can be sent to **Active → Site Clone**. |
-| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy/DNS — fail-closed so lookups do not use Docker DNS), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32). |
+| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy/DNS — fail-closed so lookups do not use Docker DNS), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32) and the offline tree is indexed for the Prompt tab's *Ask the Company Website* tool. Live Domain Recon crawling stays removed. |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |

@@ -167,6 +167,22 @@ const normDns = w.acloneNormaliseJobs([
 ok(normDns[0].dns && normDns[0].dns.label === 'via SOCKS5' && !('leak' in normDns[0]),
    'normaliser keeps dns and still drops unknown fields', JSON.stringify(normDns[0]));
 
+section('Prompt index label on the job card');
+setupCampaign();
+w.sw('active');
+w.acloneSaveJobs([{
+  id: 'sc-rag', url: 'https://example.com', status: 'done',
+  ingested: { ok: true, written: 2, site_rag: { ok: true, chunks_indexed: 7, pages: 3, collection: 'company_site__sk-1' } },
+}]);
+w.acloneRender();
+const cardRag = d.querySelector('.aclone-job[data-job="sc-rag"]');
+ok(cardRag && /Prompt:\s*7 chunks/.test(cardRag.textContent || ''),
+   'job card renders Prompt: 7 chunks', cardRag && cardRag.textContent);
+w.acloneShowFindings('sc-rag');
+const findings = d.getElementById('aclone-findings');
+ok(findings && /Prompt index: 7 chunk/.test(findings.textContent || ''),
+   'findings pane names the Prompt index', findings && findings.textContent);
+
 section('candidate URLs from multi-org objectives');
 setupCampaign({
   objectives: {
