@@ -59,27 +59,41 @@ function boot(localStorageSeed) {
   const vc = new VirtualConsole();
   vc.on('jsdomError', e => jsdomErrors.push((e && e.detail && e.detail.message) || e.message));
 
-  const dom = new JSDOM(fs.readFileSync(INDEX, 'utf8'), {
-    runScripts: 'dangerously', pretendToBeVisual: true,
-    url: PAGE_URL, virtualConsole: vc,
-    beforeParse(w) {
-      /* Seed BEFORE any script runs: the boot handler reads localStorage, and
-         seeding afterwards would test the wrong branch. */
-      Object.entries(localStorageSeed || {}).forEach(([k, v]) => {
-        try { w.localStorage.setItem(k, v); } catch {}
-      });
-      /* No /config.js in jsdom -- index.html loads it from nginx. Absent, the
-         GATES defaults apply, which is exactly the fallback worth pinning. */
-    },
-  });
-  const w = dom.window;
+  /* The DCL listener MUST be attached in beforeParse. Registering it after
+     the JSDOM constructor returns races: jsdom often flips readyState off
+     'loading' before it dispatches DOMContentLoaded, so the post-construct
+     branch ran setTimeout(0) in the same turn as the page handler and the
+     #llmEndpoint assertion saw an empty field about half the time. Hooking
+     here runs first; the trailing setTimeout(0) then lands after every DCL
+     handler, including the one that fills the Prompt tab ENDPOINT field. */
   return new Promise(resolve => {
-    const done = () => setTimeout(() => resolve({ w, jsdomErrors }), 0);
-    if (w.document.readyState === 'loading') {
-      w.document.addEventListener('DOMContentLoaded', done);
-    } else {
-      done();
-    }
+    let settled = false;
+    const finish = (w) => {
+      if (settled) return;
+      settled = true;
+      resolve({ w, jsdomErrors });
+    };
+
+    const dom = new JSDOM(fs.readFileSync(INDEX, 'utf8'), {
+      runScripts: 'dangerously', pretendToBeVisual: true,
+      url: PAGE_URL, virtualConsole: vc,
+      beforeParse(w) {
+        /* Seed BEFORE any script runs: the boot handler reads localStorage, and
+           seeding afterwards would test the wrong branch. */
+        Object.entries(localStorageSeed || {}).forEach(([k, v]) => {
+          try { w.localStorage.setItem(k, v); } catch {}
+        });
+        /* No /config.js in jsdom -- index.html loads it from nginx. Absent, the
+           GATES defaults apply, which is exactly the fallback worth pinning. */
+        w.document.addEventListener('DOMContentLoaded', () => {
+          setTimeout(() => finish(w), 0);
+        });
+      },
+    });
+
+    /* If DCL never fires the assertion should still run (empty field = fail)
+       rather than hang the suite. One second is far past a successful boot. */
+    setTimeout(() => finish(dom.window), 1000);
   });
 }
 

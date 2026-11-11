@@ -115,7 +115,38 @@ async function main() {
   /* ── Step 2: structure ─────────────────────────────────────────────── */
   section('Step 2 — DOM structure');
   ok(d.getElementById('classbar') === null, '#classbar is gone');
-  ok(!html.includes('AUTHORIZED ENGAGEMENT'), 'index.html no longer carries the classification stamp');
+  /* Comments in index.html still name the stamp (it used to occupy the ticker
+     wedge, and now lives only on login.html). The original source-wide
+     includes() treated those comments as a regression. Pin the document the
+     operator actually sees, plus comment-stripped markup so a leftover
+     element, attribute, or script string still fails. */
+  function stripComments(src) {
+    return src.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+  function displayedText(root) {
+    const parts = [];
+    const ATTRS = ['title', 'aria-label', 'alt', 'placeholder', 'value'];
+    (function walk(node) {
+      if (node.nodeType === 3) {
+        const p = node.parentElement;
+        if (p && /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName)) return;
+        parts.push(node.data);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      for (const a of ATTRS) {
+        const v = node.getAttribute && node.getAttribute(a);
+        if (v) parts.push(v);
+      }
+      if (typeof node.value === 'string' && node.value) parts.push(node.value);
+      for (const c of node.childNodes) walk(c);
+    })(root);
+    return parts.join(' ');
+  }
+  ok(!stripComments(html).includes('AUTHORIZED ENGAGEMENT'),
+     'index.html markup no longer carries the classification stamp');
+  ok(!displayedText(d.documentElement).includes('AUTHORIZED ENGAGEMENT'),
+     'dashboard does not display the classification stamp');
   const login = fs.readFileSync(path.join(path.dirname(INDEX), 'login.html'), 'utf8');
   ok(login.includes('AUTHORIZED ENGAGEMENT'), 'login.html still carries the stamp');
   ok(!html.includes('margin-right: 120px'), 'the hand-reserved #ql gutter is gone');
