@@ -2594,6 +2594,7 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-opsec" checked> Respect OPSEC profile (User-Agent, proxy, DNS)</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-docker-dns"> Allow Docker DNS (leaks lookups)</label>
           <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-deobf" checked> Deobfuscate JavaScript</label>
+          <label class="radio-opt" style="gap:8px;"><input type="checkbox" id="aclone-ocr" checked> OCR images</label>
         </div>
         <div class="obj-save-row">
           <button class="btn btn-p" type="button" id="aclone-start" onclick="acloneStart()">Start clone</button>
@@ -14692,6 +14693,7 @@ function acloneDefaults() {
     includeImages: true, includeJs: true, includeCss: true, includeOther: true,
     external: 'none', respectOpsec: true, allowDockerDns: false,
     deobfuscate: true, deobfuscateTimeout: 180,
+    ocrImages: true,
   };
 }
 
@@ -14718,6 +14720,7 @@ function acloneNormaliseJobs(jobs) {
       progress: (j.progress && typeof j.progress === 'object') ? j.progress : {},
       warnings: Array.isArray(j.warnings) ? j.warnings.map(w => String(w).slice(0, 300)).slice(0, 40) : [],
       deobfuscation: (j.deobfuscation && typeof j.deobfuscation === 'object') ? j.deobfuscation : null,
+      ocr: (j.ocr && typeof j.ocr === 'object') ? j.ocr : null,
       dns: (j.dns && typeof j.dns === 'object') ? j.dns : null,
     };
   }).filter(j => j && j.id);
@@ -14768,6 +14771,7 @@ function acloneReadOptions() {
     allowDockerDns: chk('aclone-docker-dns', false),
     deobfuscate: chk('aclone-deobf', true),
     deobfuscateTimeout: num('aclone-deobf-timeout', d.deobfuscateTimeout, 15, 1800),
+    ocrImages: chk('aclone-ocr', true),
   };
 }
 
@@ -14785,6 +14789,7 @@ function acloneWriteOptions(o) {
   setc('aclone-docker-dns', !!o.allowDockerDns);
   setc('aclone-deobf', o.deobfuscate !== false);
   setv('aclone-deobf-timeout', o.deobfuscateTimeout != null ? o.deobfuscateTimeout : 180);
+  setc('aclone-ocr', o.ocrImages !== false && o.ocr !== false);
 }
 
 function acloneLooksLikeUrl(s) {
@@ -14920,12 +14925,16 @@ function acloneRender() {
     const ragLab = (rag && rag.ok && rag.chunks_indexed)
       ? ('Prompt: ' + rag.chunks_indexed + ' chunks')
       : '';
+    const ocrLab = (j.ocr && j.ocr.files_ocrd)
+      ? ('OCR: ' + j.ocr.files_ocrd + ' image' + (j.ocr.files_ocrd === 1 ? '' : 's'))
+      : '';
     const meta = [
       j.files ? (j.files + ' files') : '',
       j.bytes ? (Math.round(j.bytes/1024) + ' KB') : '',
       j.elapsed ? (j.elapsed + 's') : '',
       j.finding_count ? (j.finding_count + ' findings') : '',
       dnsLab,
+      ocrLab,
       ragLab,
     ].filter(Boolean).join(' · ');
     const actions = [];
@@ -14978,6 +14987,14 @@ function acloneShowFindings(id) {
          + (deob.version ? ' ' + deob.version : '')
          + (deob.sourcemaps_applied ? ', ' + deob.sourcemaps_applied + ' sourcemap(s)' : ''))
       : '');
+  const ocr = job.ocr || {};
+  const ocrLine = ocr.enabled === false
+    ? 'Image OCR was turned off for this job'
+    : (ocr.files_ocrd
+      ? ('OCR: ' + (ocr.files_ocrd || 0) + ' image(s) via ' + (ocr.engine || 'tesseract')
+         + (ocr.version ? ' ' + ocr.version : '')
+         + (ocr.pages_ocrd && ocr.pages_ocrd !== ocr.files_ocrd ? ', ' + ocr.pages_ocrd + ' page(s)' : ''))
+      : (ocr.available === false ? 'OCR skipped: tesseract is not available' : ''));
   const warnLine = (job.warnings && job.warnings.length) ? job.warnings.join(' · ') : '';
   el.innerHTML = '<div class="sh" style="margin-top:14px;">Findings · ' + esc(job.url) + '</div>'
     + '<div style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:8px;">'
@@ -14985,6 +15002,7 @@ function acloneShowFindings(id) {
     + (ingest ? '<br>' + esc(ingest) : '')
     + (ragLine ? '<br>' + esc(ragLine) : '')
     + (deobLine ? '<br>' + esc(deobLine) : '')
+    + (ocrLine ? '<br>' + esc(ocrLine) : '')
     + (warnLine ? '<br>' + esc(warnLine) : '')
     + '</div>'
     + (rows.length
@@ -14993,6 +15011,7 @@ function acloneShowFindings(id) {
           + esc(f.severity || '') + '</td><td style="word-break:break-all;">' + esc(String(f.value || '').slice(0, 300))
           + '</td><td>' + esc(f.source_path || '')
           + (f.deobfuscated ? ' <span title="' + esc(f.deobfuscator || 'webcrack') + '">· deobf</span>' : '')
+          + (f.ocr ? ' <span title="extracted from a cloned image or image-based PDF">· ocr</span>' : '')
           + '</td></tr>').join('')
         + '</tbody></table></div>'
       : '<div style="color:var(--dim);font-size:11px;">No findings recorded.</div>');
@@ -15084,6 +15103,7 @@ async function acloneRefreshOne(job) {
       ingested: data.ingested || job.ingested,
       warnings: data.warnings || job.warnings || [],
       deobfuscation: data.deobfuscation || job.deobfuscation || null,
+      ocr: data.ocr || job.ocr || null,
       dns: data.dns || job.dns || null,
     });
   } catch {}

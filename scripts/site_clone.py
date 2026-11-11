@@ -45,6 +45,7 @@ from site_clone_dns import (
     stop_stub,
     write_proxychains_conf,
 )
+from site_clone_ocr import ocr_tree
 
 DEFAULTS = {
     "max_depth": 2,
@@ -63,6 +64,11 @@ DEFAULTS = {
     "allow_docker_dns": False,
     "deobfuscate": True,
     "deobf_timeout": 180,
+    "ocr": True,
+    "ocr_timeout": 15,
+    "ocr_max_images": 40,
+    "ocr_max_image_bytes": 8 * 1024 * 1024,
+    "ocr_max_pdf_pages": 5,
 }
 
 ALLOWED_SCHEMES = {"http", "https"}
@@ -134,6 +140,11 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
                         "deobfuscateJavascript"),
         "deobf_timeout": ("deobfTimeout", "deobfuscateTimeout", "deobf_timeout",
                           "deobfuscate_timeout"),
+        "ocr": ("ocr", "ocrImages", "ocr_images"),
+        "ocr_timeout": ("ocrTimeout", "ocr_timeout"),
+        "ocr_max_images": ("ocrMaxImages", "ocr_max_images"),
+        "ocr_max_image_bytes": ("ocrMaxImageBytes", "ocr_max_image_bytes"),
+        "ocr_max_pdf_pages": ("ocrMaxPdfPages", "ocr_max_pdf_pages"),
     }
     for key, names in aliases.items():
         for n in names:
@@ -148,10 +159,15 @@ def normalize_options(opts: dict[str, Any] | None) -> dict[str, Any]:
     o["same_host"] = _bool(o["same_host"], True)
     o["robots"] = _bool(o["robots"], True)
     for k in ("include_images", "include_js", "include_css", "include_other",
-              "respect_opsec", "deobfuscate"):
+              "respect_opsec", "deobfuscate", "ocr"):
         o[k] = _bool(o[k], True)
     o["allow_docker_dns"] = _bool(o["allow_docker_dns"], False)
     o["deobf_timeout"] = _int(o["deobf_timeout"], 180, 15, 1800)
+    o["ocr_timeout"] = _int(o["ocr_timeout"], 15, 3, 120)
+    o["ocr_max_images"] = _int(o["ocr_max_images"], 40, 1, 400)
+    o["ocr_max_image_bytes"] = _int(
+        o["ocr_max_image_bytes"], 8 * 1024 * 1024, 32_768, 64 * 1024 * 1024)
+    o["ocr_max_pdf_pages"] = _int(o["ocr_max_pdf_pages"], 5, 1, 20)
     ext = str(o.get("external") or "none").lower().replace("-", "_")
     if ext not in {"none", "same_registrable", "all"}:
         ext = "none"
@@ -260,6 +276,15 @@ def count_tree_files(root: Path) -> tuple[int, int]:
 
 
 
+def _public_ocr(ocr_meta: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "ok", "enabled", "available", "engine", "version", "lang",
+        "files_considered", "files_ocrd", "pages_ocrd", "skipped",
+        "timed_out", "truncated", "caps",
+    )
+    return {k: ocr_meta[k] for k in keys if k in ocr_meta}
+
+
 def _analyze_job(
     url: str,
     job_dir: Path,
@@ -267,7 +292,7 @@ def _analyze_job(
     options: dict[str, Any],
     progress_cb: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    """Run optional JS deobfuscation, then analyze the raw and recovered trees."""
+    """Deobfuscate JS, OCR images, then analyze the raw and recovered trees."""
     warnings: list[str] = []
     deobf_dir = job_dir / "deobf"
     deobf_meta: dict[str, Any] = {
@@ -286,17 +311,31 @@ def _analyze_job(
         # A previous run may have left files; do not reuse them if the
         # operator turned deobfuscation off for this job.
         deobf_dir = None  # type: ignore[assignment]
+    ocr_dir = job_dir / "ocr"
+    ocr_meta: dict[str, Any] = {
+        "ok": True, "enabled": bool(options.get("ocr")),
+        "available": False, "engine": "tesseract", "version": "",
+        "warnings": [],
+    }
+    if options.get("ocr"):
+        ocr_meta = ocr_tree(mirror, ocr_dir, options, progress_cb=progress_cb)
+        warnings.extend(ocr_meta.get("warnings") or [])
+    elif ocr_dir.exists():
+        # A previous run may have left text; do not mine it if OCR is off.
+        ocr_dir = None  # type: ignore[assignment]
     report = analyze_clone_outputs(
         mirror,
         deobf_dir if options.get("deobfuscate") and deobf_dir and deobf_dir.is_dir() else None,
         url,
         deobf_meta if options.get("deobfuscate") else None,
+        ocr_dir if options.get("ocr") and ocr_dir and ocr_dir.is_dir() else None,
     )
     report["deobfuscation"] = {k: deobf_meta.get(k) for k in (
         "ok", "enabled", "available", "tool", "version", "pinned",
         "files_considered", "files_deobfuscated", "files_unpacked",
         "sourcemaps_applied", "skipped", "timed_out", "isolated_network",
     ) if k in deobf_meta or k in {"ok", "enabled", "available", "tool", "version"}}
+    report["ocr"] = _public_ocr(ocr_meta)
     report["warnings"] = warnings
     return report, deobf_meta, warnings
 
@@ -331,6 +370,7 @@ def run_clone(
             return {
                 "ok": True, "url": url, "skipped_httrack": True,
                 "analysis": report, "deobfuscation": report.get("deobfuscation") or deobf_meta,
+                "ocr": report.get("ocr") or {},
                 "warnings": warnings,
                 "options": {k: options[k] for k in DEFAULTS},
             }
@@ -468,6 +508,7 @@ def run_clone(
             "elapsed_seconds": round(time.time() - started, 1),
             "analysis": report,
             "deobfuscation": report.get("deobfuscation") or deobf_meta,
+            "ocr": report.get("ocr") or {},
             "warnings": warnings,
             "dns": dns,
             "error": (None if files > 0 else

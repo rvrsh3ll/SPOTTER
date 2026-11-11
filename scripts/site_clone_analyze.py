@@ -439,6 +439,8 @@ def _rank_finding(f: dict[str, Any]) -> int:
         return 2
     if f.get("deobfuscated"):
         return 1
+    if f.get("ocr"):
+        return -1
     return 0
 
 
@@ -488,11 +490,65 @@ def merge_reports(*reports: dict[str, Any], start_url: str = "") -> dict[str, An
     }
 
 
+def analyze_ocr_dir(ocr_dir: str | Path, start_url: str = "") -> dict[str, Any]:
+    """Mine emails, phones, and secret-shaped strings from OCR text files.
+
+    Does not emit a document finding for every image; those would drown
+    the report. Each finding is tagged ocr=true.
+    """
+    root = Path(ocr_dir)
+    findings: list[dict[str, Any]] = []
+    files = 0
+    truncated = False
+    tags = {"ocr": True, "source_prefix": "ocr"}
+    if root.is_dir():
+        paths = sorted(
+            [p for p in root.rglob("*.txt") if p.is_file()],
+            key=lambda p: str(p).lower(),
+        )
+        for path in paths:
+            if any(part in {".work", "__pycache__"} or part.startswith(".")
+                   for part in path.relative_to(root).parts[:-1]):
+                continue
+            files += 1
+            text = _read_text(path)
+            if not text.strip():
+                continue
+            rel = _safe_rel(root, path)
+            for m in EMAIL_RE.finditer(text):
+                findings.append(_finding(
+                    "email", "medium", "high", m.group().lower(),
+                    snippet(text, m.start()), rel, tags=tags))
+            for m in PHONE_RE.finditer(text):
+                findings.append(_finding(
+                    "phone", "low", "medium", m.group(),
+                    snippet(text, m.start()), rel, tags=tags))
+            _collect_secrets(text, rel, findings, tags=tags)
+            if len(findings) >= MAX_FINDINGS:
+                truncated = True
+                break
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["category"]] = counts.get(f["category"], 0) + 1
+    return {
+        "ok": True,
+        "start_url": start_url,
+        "root": str(root),
+        "files_scanned": files,
+        "finding_count": len(findings),
+        "high_or_critical": sum(1 for f in findings if f.get("severity") in {"high", "critical"}),
+        "summary": counts,
+        "findings": findings,
+        "truncated": truncated,
+    }
+
+
 def analyze_clone_outputs(
     mirror: str | Path,
     deobf_dir: str | Path | None,
     start_url: str = "",
     deobf_meta: dict[str, Any] | None = None,
+    ocr_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Analyze the raw mirror plus any recovered or deobfuscated tree."""
     raw = analyze_tree(mirror, start_url)
@@ -512,6 +568,8 @@ def analyze_clone_outputs(
             deobfuscator_version=version, source_prefix="deobf",
             skip_dirs={"sourcemaps", ".work"},
         ))
+    if ocr_dir and Path(ocr_dir).is_dir():
+        extras.append(analyze_ocr_dir(ocr_dir, start_url))
     report = merge_reports(raw, *extras, start_url=start_url)
     report["root"] = str(Path(mirror))
     return report

@@ -68,6 +68,9 @@ ok(d.getElementById('aclone-robots').checked, 'form follow-robots is checked');
 ok(d.getElementById('aclone-opsec').checked, 'form respect-OPSEC is checked');
 ok(d.getElementById('aclone-deobf') && d.getElementById('aclone-deobf').checked,
    'form Deobfuscate JavaScript is checked');
+ok(d.getElementById('aclone-ocr') && d.getElementById('aclone-ocr').checked,
+   'form OCR images is checked');
+ok(def.ocrImages === true, 'defaults.ocrImages is true');
 ok(d.getElementById('aclone-docker-dns') && !d.getElementById('aclone-docker-dns').checked,
    'form Allow Docker DNS (leaks lookups) is present and unchecked');
 ok(def.allowDockerDns === false, 'defaults.allowDockerDns is false');
@@ -75,7 +78,7 @@ ok(d.getElementById('aclone-deobf-timeout') && d.getElementById('aclone-deobf-ti
    'form deobfuscation timeout default is 180s', d.getElementById('aclone-deobf-timeout') && d.getElementById('aclone-deobf-timeout').value);
 
 section('options round-trip');
-const edited = { ...def, maxDepth: 3, maxTime: 120, robots: false, external: 'same_registrable', includeImages: false, deobfuscate: false, deobfuscateTimeout: 90 };
+const edited = { ...def, maxDepth: 3, maxTime: 120, robots: false, external: 'same_registrable', includeImages: false, deobfuscate: false, deobfuscateTimeout: 90, ocrImages: false };
 w.acloneWriteOptions(edited);
 const read = w.acloneReadOptions();
 ok(read.maxDepth === 3 && read.maxTime === 120, 'numeric options survive a write/read', JSON.stringify(read));
@@ -83,6 +86,7 @@ ok(read.robots === false && read.includeImages === false && read.external === 's
    'toggles and external mode survive a write/read', JSON.stringify(read));
 ok(read.deobfuscate === false && read.deobfuscateTimeout === 90,
    'deobfuscate toggle and timeout survive a write/read', JSON.stringify(read));
+ok(read.ocrImages === false, 'OCR images toggle survives a write/read', JSON.stringify(read));
 w.acloneWriteOptions({ ...def, allowDockerDns: true });
 ok(w.acloneReadOptions().allowDockerDns === true,
    'allowDockerDns survives a write/read');

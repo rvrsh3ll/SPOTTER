@@ -1919,13 +1919,15 @@ def pages_from_clone_tree(
     max_file_bytes: int = 0,
     max_total_bytes: int = 0,
 ) -> Dict[str, Any]:
-    """Read HTML/text/JS from a clone job directory. Never contacts the network.
+    """Read HTML/text/JS (and OCR text) from a clone job directory.
 
-    Returns {pages, files_considered, files_skipped, truncated, errors}.
-    JavaScript is taken from deobf/ when that tree has any JS; otherwise from
-    the raw mirror. HTML and text always come from the raw mirror so the
-    Prompt corpus is the page the site actually served, plus recovered
-    scripts when deobfuscation ran.
+    Never contacts the network. Returns {pages, files_considered,
+    files_skipped, truncated, errors}. JavaScript is taken from deobf/
+    when that tree has any JS; otherwise from the raw mirror. HTML and
+    text always come from the raw mirror so the Prompt corpus is the
+    page the site actually served, plus recovered scripts when
+    deobfuscation ran. OCR output under ocr/ (plain text extracted from
+    cloned images and image-based PDFs) is indexed as additional text.
     """
     caps = clone_index_caps()
     max_files = max_files or caps["max_files"]
@@ -1942,8 +1944,10 @@ def pages_from_clone_tree(
         "errors": [],
         "used_deobf_js": False,
     }
-    if not mirror.is_dir() and not deobf.is_dir():
-        out["errors"].append("clone tree not found (expected mirror/ or deobf/ under %s)" % job)
+    ocr = job / "ocr"
+    if not mirror.is_dir() and not deobf.is_dir() and not ocr.is_dir():
+        out["errors"].append(
+            "clone tree not found (expected mirror/, deobf/, or ocr/ under %s)" % job)
         return out
 
     deobf_js = []
@@ -2021,6 +2025,60 @@ def pages_from_clone_tree(
             "kind": kind,
             "from_deobf": from_deobf,
         })
+
+    if ocr.is_dir():
+        for path in _iter_clone_files(ocr):
+            if path.suffix.lower() != ".txt":
+                continue
+            out["files_considered"] += 1
+            if len(out["pages"]) >= max_files:
+                out["truncated"] = True
+                out["files_skipped"] += 1
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                out["files_skipped"] += 1
+                continue
+            if size <= 0:
+                out["files_skipped"] += 1
+                continue
+            try:
+                raw = path.read_bytes()[:max_file_bytes]
+            except OSError as e:
+                out["errors"].append("could not read %s: %s" % (path.name, type(e).__name__))
+                out["files_skipped"] += 1
+                continue
+            try:
+                body = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                body = raw.decode("utf-8", errors="replace")
+            body = body.strip()
+            if not body:
+                out["files_skipped"] += 1
+                continue
+            if total + len(body) > max_total_bytes:
+                out["truncated"] = True
+                out["files_skipped"] += 1
+                continue
+            total += len(body)
+            try:
+                rel = str(path.relative_to(ocr).as_posix())
+            except ValueError:
+                rel = path.name
+            cite = rel[:-4] if rel.lower().endswith(".txt") else rel
+            # PDF pages are written as <file>.page-N.txt
+            cite = re.sub(r"\.page-\d+$", "", cite)
+            url = clone_file_url(cite, start_url)
+            out["pages"].append({
+                "url": url,
+                "title": path.name,
+                "text": body,
+                "source_path": "ocr/" + rel,
+                "kind": "text",
+                "from_deobf": False,
+                "from_ocr": True,
+            })
     return out
 
 

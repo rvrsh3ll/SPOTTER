@@ -60,6 +60,7 @@ def _public(job: dict[str, Any]) -> dict[str, Any]:
         "elapsed_seconds": job.get("elapsed_seconds"),
         "warnings": list(job.get("warnings") or [])[:40],
         "deobfuscation": job.get("deobfuscation") or None,
+        "ocr": job.get("ocr") or None,
         "dns": job.get("dns") or None,
         "ingested": job.get("ingested") or _load_ingested(job) or None,
         "analysis": {
@@ -135,6 +136,7 @@ def _run_job(job_id: str) -> None:
             "timed_out": result.get("timed_out"),
             "warnings": result.get("warnings") or [],
             "deobfuscation": result.get("deobfuscation") or {},
+            "ocr": result.get("ocr") or {},
             "dns": result.get("dns") or job.get("dns") or {},
         })
         if job.get("cancel"):
@@ -201,6 +203,11 @@ class Handler(BaseHTTPRequestHandler):
                 info["webcrack"] = tool_status()
             except Exception as e:
                 info["webcrack"] = {"available": False, "error": type(e).__name__}
+            try:
+                from site_clone_ocr import tool_status as ocr_status
+                info["ocr"] = ocr_status()
+            except Exception as e:
+                info["ocr"] = {"available": False, "error": type(e).__name__}
             try:
                 from site_clone_dns import capabilities
                 info["dns"] = capabilities()

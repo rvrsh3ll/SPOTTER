@@ -136,6 +136,15 @@ section("deobfuscation options")
 d = site_clone.normalize_options({})
 ok(d["deobfuscate"] is True and d["deobf_timeout"] == 180,
    "deobfuscate is on by default with a 180s job timeout", (d["deobfuscate"], d["deobf_timeout"]))
+ok(d["ocr"] is True and d["ocr_timeout"] == 15 and d["ocr_max_images"] == 40
+   and d["ocr_max_image_bytes"] == 8 * 1024 * 1024 and d["ocr_max_pdf_pages"] == 5,
+   "OCR is on by default with size, count, timeout, and PDF-page caps",
+   {k: d[k] for k in d if k.startswith("ocr")})
+capped_ocr = site_clone.normalize_options({"ocrImages": "no", "ocrTimeout": 2, "ocrMaxImages": 9999})
+ok(capped_ocr["ocr"] is False, "OCR can be turned off via ocrImages")
+ok(capped_ocr["ocr_timeout"] == 3 and capped_ocr["ocr_max_images"] == 400,
+   "OCR timeout and image cap are clamped",
+   (capped_ocr["ocr_timeout"], capped_ocr["ocr_max_images"]))
 capped = site_clone.normalize_options({"deobfuscate": "no", "deobfuscateTimeout": 5})
 ok(capped["deobfuscate"] is False, "deobfuscate can be turned off")
 ok(capped["deobf_timeout"] == 15, "deobf timeout has a lower bound of 15s", capped["deobf_timeout"])
@@ -284,7 +293,7 @@ try:
     try:
         result = site_clone.run_clone(
             "https://example.com/", job_dir,
-            options={"deobfuscate": True, "deobfTimeout": 60},
+            options={"deobfuscate": True, "deobfTimeout": 60, "ocr": False},
         )
     finally:
         site_clone.shutil.which = orig_sc_which
@@ -351,7 +360,7 @@ try:
     try:
         result = site_clone.run_clone(
             "https://example.com/", job_dir,
-            options={"deobfuscate": False},
+            options={"deobfuscate": False, "ocr": False},
         )
     finally:
         site_clone.shutil.which = orig_sc_which
@@ -541,7 +550,7 @@ try:
     try:
         result = site_clone.run_clone(
             "https://example.com/", tmp / "job-refused",
-            options={"respectOpsec": True, "deobfuscate": False},
+            options={"respectOpsec": True, "deobfuscate": False, "ocr": False},
         )
     finally:
         site_clone.shutil.which = orig_which
@@ -556,7 +565,7 @@ try:
         result_ov = site_clone.run_clone(
             "https://example.com/", tmp / "job-ov",
             options={"respectOpsec": True, "allowDockerDns": True, "deobfuscate": False,
-                     "maxTime": 15},
+                     "ocr": False, "maxTime": 15},
         )
     finally:
         site_clone.shutil.which = orig_which
@@ -584,6 +593,199 @@ wire = stub._json_to_dns(query, qname, 1, payload)
 ok(wire and b"\x5d\xb8\xd8\x22" in wire, "JSON DoH answer encodes 93.184.216.34", wire)
 ok("dns.google/dns-query" in stub._doh_wire_url("https://dns.google/resolve"),
    "Google /resolve is rewritten to /dns-query")
+
+
+
+section("image OCR")
+import site_clone_ocr as ocr  # noqa: E402
+import site_rag  # noqa: E402
+
+fixture_png = FIX / "images" / "ocr_contact.png"
+ok(fixture_png.is_file() and fixture_png.stat().st_size > 1000,
+   "fixture image with known contact text is present",
+   (fixture_png, fixture_png.stat().st_size if fixture_png.is_file() else 0))
+
+tmp = Path(tempfile.mkdtemp(prefix="spotter-ocr-"))
+env_bin = os.environ.pop("SPOTTER_TESSERACT", None)
+try:
+    os.environ["SPOTTER_TESSERACT"] = str(tmp / "no-such-tesseract")
+    meta = ocr.ocr_tree(FIX, tmp / "ocr-missing",
+                        site_clone.normalize_options({"ocr": True}))
+    ok(meta["ok"] is True and meta["available"] is False,
+       "missing tesseract is fail-open", meta)
+    ok(any("tesseract is not installed" in w for w in meta["warnings"]),
+       "missing tesseract is a warning", meta["warnings"])
+finally:
+    os.environ.pop("SPOTTER_TESSERACT", None)
+    if env_bin is not None:
+        os.environ["SPOTTER_TESSERACT"] = env_bin
+
+mock = tmp / "tesseract"
+mock.write_text(
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    "src = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "if 'ocr_contact' in src.replace('\\\\','/'):\n"
+    "    sys.stdout.write('Contact poster\\n'\n"
+    "                     'Email: ocr-findme@example.com\\n'\n"
+    "                     'Phone: +1 202-555-0199\\n'\n"
+    "                     'api_key = \"rk_live_OCRONLYSECRET01\"\\n')\n"
+    "sys.exit(0)\n"
+)
+mock.chmod(mock.stat().st_mode | stat.S_IEXEC)
+
+mirror = tmp / "mirror"
+shutil.copytree(FIX, mirror)
+dest = tmp / "ocr"
+os.environ["SPOTTER_TESSERACT"] = str(mock)
+try:
+    meta = ocr.ocr_tree(mirror, dest, site_clone.normalize_options({"ocr": True}))
+    report = an.analyze_clone_outputs(mirror, None, "https://example.com/", ocr_dir=dest)
+finally:
+    os.environ.pop("SPOTTER_TESSERACT", None)
+    if env_bin is not None:
+        os.environ["SPOTTER_TESSERACT"] = env_bin
+
+ok(meta["available"] is True, "mock tesseract is detected", meta)
+ok(meta["files_ocrd"] >= 1, "fixture image was OCR'd", meta)
+txts = list(dest.rglob("ocr_contact.png.txt"))
+ok(txts and "ocr-findme@example.com" in txts[0].read_text(),
+   "OCR text is written under ocr/ next to the relative image path", txts)
+emails = [f for f in report["findings"] if f["category"] == "email"
+          and "ocr-findme@example.com" in str(f.get("value"))]
+phones = [f for f in report["findings"] if f["category"] == "phone"
+          and "202-555-0199" in str(f.get("value"))]
+secrets = [f for f in report["findings"] if f["category"] == "js_secret" and f.get("ocr")]
+ok(emails and emails[0].get("ocr") is True,
+   "OCR email is tagged ocr=true", emails[:1])
+ok(phones and phones[0].get("ocr") is True,
+   "OCR phone is tagged ocr=true", phones[:1])
+ok(secrets and "OCRONLYSECRET01" not in json.dumps(secrets)
+   and "***" in str(secrets[0].get("value")),
+   "OCR secret-shaped string is tagged ocr=true and redacted", secrets[:1])
+
+# Same value already in HTML should not be replaced by the OCR copy.
+# Inject the fixture email into a tiny HTML and merge.
+html_tree = tmp / "html-pref"
+(html_tree).mkdir()
+(html_tree / "index.html").write_text(
+    "<p>Contact ocr-findme@example.com</p>\n", encoding="utf-8")
+pref = an.merge_reports(
+    an.analyze_tree(html_tree, "https://example.com/"),
+    an.analyze_ocr_dir(dest, "https://example.com/"),
+)
+pref_email = [f for f in pref["findings"] if f.get("value") == "ocr-findme@example.com"]
+ok(len(pref_email) == 1 and not pref_email[0].get("ocr"),
+   "HTML finding wins over the same OCR email", pref_email)
+
+# Caps: only the first image is processed when the job cap is 1.
+cap_root = tmp / "cap-mirror"
+cap_root.mkdir()
+shutil.copy2(fixture_png, cap_root / "a-ocr_contact.png")
+shutil.copy2(fixture_png, cap_root / "b-ocr_contact.png")
+shutil.copy2(fixture_png, cap_root / "c-ocr_contact.png")
+os.environ["SPOTTER_TESSERACT"] = str(mock)
+try:
+    cap_meta = ocr.ocr_tree(
+        cap_root, tmp / "ocr-cap",
+        site_clone.normalize_options({"ocr": True, "ocrMaxImages": 1}),
+    )
+finally:
+    os.environ.pop("SPOTTER_TESSERACT", None)
+    if env_bin is not None:
+        os.environ["SPOTTER_TESSERACT"] = env_bin
+ok(cap_meta["files_ocrd"] == 1 and cap_meta["truncated"] is True
+   and cap_meta["skipped"] >= 2,
+   "max-images cap stops the job and marks it truncated", cap_meta)
+
+# Oversized file is skipped.
+big = tmp / "big-mirror"
+big.mkdir()
+big_img = big / "ocr_contact.png"
+shutil.copy2(fixture_png, big_img)
+# The cap is clamped to at least 32 KiB; write a payload larger than that.
+big_img.write_bytes(big_img.read_bytes() + b"\x00" * (40 * 1024))
+os.environ["SPOTTER_TESSERACT"] = str(mock)
+try:
+    big_meta = ocr.ocr_tree(
+        big, tmp / "ocr-big",
+        site_clone.normalize_options({"ocr": True, "ocrMaxImageBytes": 32768}),
+    )
+finally:
+    os.environ.pop("SPOTTER_TESSERACT", None)
+    if env_bin is not None:
+        os.environ["SPOTTER_TESSERACT"] = env_bin
+ok(big_meta["files_ocrd"] == 0 and big_meta["skipped"] >= 1
+   and any("oversized" in w for w in big_meta["warnings"]),
+   "oversized image is skipped", big_meta)
+
+# run_clone on a pre-populated tree with mock tesseract.
+job_dir = tmp / "job"
+job_mirror = job_dir / "mirror"
+shutil.copytree(FIX, job_mirror)
+os.environ["SPOTTER_TESSERACT"] = str(mock)
+orig_sc_which = site_clone.shutil.which
+
+def _sc_which(name):
+    if name in {"httrack", "webcrack"}:
+        return None
+    if name == "tesseract":
+        return str(mock)
+    return orig_sc_which(name)
+
+site_clone.shutil.which = _sc_which
+try:
+    result = site_clone.run_clone(
+        "https://example.com/", job_dir,
+        options={"deobfuscate": False, "ocr": True},
+    )
+finally:
+    site_clone.shutil.which = orig_sc_which
+    os.environ.pop("SPOTTER_TESSERACT", None)
+    if env_bin is not None:
+        os.environ["SPOTTER_TESSERACT"] = env_bin
+
+ocr_info = result.get("ocr") or {}
+ok(result.get("ok") is True and result.get("skipped_httrack") is True,
+   "run_clone with OCR on a pre-populated tree succeeds")
+ok(ocr_info.get("enabled") is True and ocr_info.get("files_ocrd") >= 1,
+   "run_clone records OCR stats", ocr_info)
+job_emails = [f for f in (result.get("analysis") or {}).get("findings") or []
+              if f.get("ocr") and f.get("category") == "email"]
+ok(any("ocr-findme@example.com" in str(f.get("value")) for f in job_emails),
+   "run_clone analysis includes OCR-tagged emails", job_emails)
+
+harvested = site_rag.pages_from_clone_tree(job_dir, start_url="https://example.com/")
+ocr_pages = [p for p in harvested["pages"] if p.get("from_ocr")]
+ok(ocr_pages and any("ocr-findme@example.com" in p["text"] for p in ocr_pages),
+   "Prompt harvest includes OCR text",
+   [(p.get("source_path"), p.get("url")) for p in ocr_pages])
+ok(all(str(p.get("source_path") or "").startswith("ocr/") for p in ocr_pages),
+   "OCR harvest paths are under ocr/",
+   [p.get("source_path") for p in ocr_pages])
+
+# Toggle off must not mine leftover ocr/ text.
+job_off = tmp / "job-off"
+shutil.copytree(FIX, job_off / "mirror")
+leftover = job_off / "ocr" / "example.com" / "leftover.png.txt"
+leftover.parent.mkdir(parents=True)
+leftover.write_text("contact leftover-ocr@example.com\n")
+orig_sc_which = site_clone.shutil.which
+site_clone.shutil.which = lambda name: None if name in {"httrack", "webcrack"} else orig_sc_which(name)
+try:
+    off = site_clone.run_clone(
+        "https://example.com/", job_off,
+        options={"deobfuscate": False, "ocr": False},
+    )
+finally:
+    site_clone.shutil.which = orig_sc_which
+off_vals = [f.get("value") for f in (off.get("analysis") or {}).get("findings") or []]
+ok((off.get("ocr") or {}).get("enabled") is False,
+   "run_clone records OCR disabled", off.get("ocr"))
+ok("leftover-ocr@example.com" not in off_vals,
+   "OCR-off does not mine leftover ocr/ text", off_vals)
+
+shutil.rmtree(tmp, ignore_errors=True)
 
 
 print(("\nPASSED" if not fails else "\nFAILED") + f": {checks - fails}/{checks} checks")

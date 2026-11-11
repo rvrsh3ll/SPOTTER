@@ -531,6 +531,19 @@ recorded on the job. Findings from recovered sources are tagged
 `deobfuscated=true` with the tool and version. Secret-shaped values are still
 redacted the same way as the rest of the analyzer.
 
+After deobfuscation, Site Clone (when **OCR images** is on, the default)
+runs Tesseract on cloned images under `mirror/` (JPEG, PNG, GIF, WebP,
+TIFF, BMP) and, when `pdftoppm` is present, on pages of image-based PDFs
+that have little extractable text. Caps default to 8 MiB per file, 40
+images per job, 15 seconds per image, and 5 pages per PDF (overridable
+via job options or `SPOTTER_OCR_*` env). Text is written under
+`job_dir/ocr/` and is mined for emails, phones, and secret-shaped
+strings with the same analyzers as the rest of the tree; those findings
+are tagged `ocr=true`. The Prompt-tab indexer also harvests `ocr/*.txt`.
+If Tesseract is missing or a file fails, the job still finishes
+(fail-open) and a warning is recorded. The sidecar ships Debian
+`tesseract-ocr`, `tesseract-ocr-eng`, and `poppler-utils`.
+
 **DNS behaviour** when Respect OPSEC is on (Debian bookworm HTTrack 3.49.4
 does not do HTTP CONNECT for HTTPS, so Site Clone does not use HTTrack `-P`
 under OPSEC):
@@ -551,8 +564,6 @@ The frontend proxy envelope (`http_url` / `socks` + `socks_url`) is flattened
 in the clone sidecar so proxychains actually attaches. webcrack is still run
 in a network-less namespace; under OPSEC, if that isolation is unavailable,
 JavaScript deobfuscation is skipped rather than run with the container network.
-
-What it does *not* do yet: OCR of images.
 
 To verify OPSEC DNS on the host after rebuilding `site-clone-api`: start a
 clone with Respect OPSEC on, no
@@ -2638,7 +2649,7 @@ The SPOTTER frontend at https://spotter.localhost:5443 is organized into operato
 | **Ingest** | Drag-and-drop upload for SharpHound, PingCastle, nmap, CSV, images, and plain text |
 | **Dossier** | Search and export Individual dossiers |
 | **Targets** | Prioritized targets across **all** recon, in two views — **People** (individuals, ranked on a blended AD + OSINT score) and **Assets** (AD computers, scanned IPs, subdomains, websites, cloud storage, and services, each tagged with a Type); roster and bulk dossier export. Websites, domains and subdomains can be sent to **Active → Site Clone**. |
-| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy/DNS — fail-closed so lookups do not use Docker DNS), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps and EXIF. Findings are written to the campaign sketch (WF32) and the offline tree is indexed for the Prompt tab's *Ask the Company Website* tool. Live Domain Recon crawling stays removed. |
+| **Active** | Activities that contact the target directly. **Site Clone** downloads a site with HTTrack (depth, timeouts, size caps, robots, asset toggles, OPSEC User-Agent/proxy/DNS — fail-closed so lookups do not use Docker DNS), optionally deobfuscates JavaScript with webcrack (and cloned sourcemaps), and mines the offline tree for emails, people, forms, JS endpoints, secret-shaped strings, comments, sourcemaps, EXIF, and text OCR'd from cloned images (and image-based PDFs). Findings are written to the campaign sketch (WF32) and the offline tree is indexed for the Prompt tab's *Ask the Company Website* tool. Live Domain Recon crawling stays removed. |
 | **Prompt** | Chat with the campaign's full intelligence picture; export the transcript |
 | **Live Analysis** | Three sections: **Domain Recon** (WF13 — DNS/WHOIS/CT, subdomains, Shodan + Censys, FOFA + BinaryEdge, Flare, social, cloud buckets), **Credential & Breach Exposure** (every Flare surface, joined), and **Security Analysis** (WF10 attack-path narratives, filed by triage status) |
 | **Agents** | Live C2 sessions from every framework in one roster — Cobalt Strike **beacons**, Brute Ratel **badgers**, Adaptix **agents** and Tuoni **agents**, filterable, sortable, with per-agent host, user, listener and process detail. Backed by WF23; live-vs-stale derives from `last_checkin` |

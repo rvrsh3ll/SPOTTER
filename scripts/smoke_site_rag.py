@@ -979,6 +979,17 @@ def test_offline_clone_index():
         check("recovered sourcemap source is harvested",
               any("secret@ops.example.com" in p["text"] for p in js_pages))
 
+        ocr_txt = job / "ocr" / "example.com" / "images" / "ocr_contact.png.txt"
+        ocr_txt.parent.mkdir(parents=True)
+        ocr_txt.write_text("Email: ocr-findme@example.com\n")
+        harvested3 = site_rag.pages_from_clone_tree(job, start_url="https://example.com/")
+        ocr_pages = [p for p in harvested3["pages"] if p.get("from_ocr")]
+        check("harvests OCR text from ocr/",
+              ocr_pages and any("ocr-findme@example.com" in p["text"] for p in ocr_pages)
+              and all(p["source_path"].startswith("ocr/") for p in ocr_pages)
+              and any(p["url"].endswith("/images/ocr_contact.png") for p in ocr_pages),
+              str([(p.get("source_path"), p.get("url")) for p in ocr_pages]))
+
         ix = RAGIndexer()
         missing = site_rag.index_offline_tree(job, sketch_id="", start_url="https://example.com/")
         check("refuses to index without a sketch_id",

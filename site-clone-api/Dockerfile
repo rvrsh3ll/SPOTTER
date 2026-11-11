@@ -26,12 +26,18 @@ RUN apt-get update \
         ca-certificates \
         libstdc++6 \
         util-linux \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 # util-linux provides unshare (per-job resolv.conf via a user+mount namespace,
 # and a network-less namespace for webcrack). DoH uses the in-tree Python stub
 # (scripts/site_clone_dns_stub.py): Debian bookworm has no maintained
 # lightweight DoH package (no cloudflared, no AdGuard dnsproxy, no doh-client).
 # No SYS_ADMIN is required; see docker-compose.flowsint.yml for AppArmor.
+# tesseract-ocr + tesseract-ocr-eng (English traineddata) OCR cloned images
+# after the mirror; poppler-utils (pdftoppm / pdftotext) rasterizes
+# image-based PDFs. The step is fail-open if a binary is missing.
 
 COPY --from=webcrack /usr/local /usr/local
 

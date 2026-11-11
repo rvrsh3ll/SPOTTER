@@ -334,10 +334,14 @@ sudo ./spotter compose up -d --build site-clone-api
 
 Then open **Active** in the dashboard, paste or send a target URL, review the
 caps, and click **Start clone**. Jobs appear in the list. If a job fails with
-`site-clone-api unreachable`, the worker container is not running. A finished
-clone is also indexed into the Prompt tab's company-site corpus (the
-task-runners container now mounts `data/clones` read-only). Redeploy Open
-WebUI tools so the *Ask the Company Website* hint names Site Clone:
+`site-clone-api unreachable`, the worker container is not running. After a
+clone (and optional JS deobfuscation), Tesseract OCRs images in the
+sidecar when **OCR images** is on; findings are tagged `ocr=true` and the
+text under `ocr/` is indexed with the rest of the tree. Rebuild
+`site-clone-api` to pick up the Tesseract packages. A finished clone is
+also indexed into the Prompt tab's company-site corpus (the task-runners
+container now mounts `data/clones` read-only). Redeploy Open WebUI tools
+so the *Ask the Company Website* hint names Site Clone:
 
 ```bash
 sudo python3 scripts/setup_openwebui.py
