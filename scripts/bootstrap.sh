@@ -362,8 +362,11 @@ for t in company nessus pingcastle cloudschism; do
 done
 
 # ── 10. workflows ────────────────────────────────────────────────────────────
-# Always through deploy_workflow.sh: it also repairs the publication pointers,
-# which a hand-import through the n8n UI does not.
+# Every file in n8n-workflows/ (including 32-site-clone.json). Always through
+# deploy_workflow.sh: import, publish/activate when the JSON says active:true,
+# repair publication pointers, and restart n8n. Re-running this is idempotent.
+# A later git pull does not deploy new workflow files by itself; run this again
+# (or sudo ./scripts/deploy_workflow.sh --all / the one new file).
 step "Deploying workflows"
 "$ROOT_DIR/scripts/deploy_workflow.sh" --all
 ok "workflows deployed"

@@ -6662,7 +6662,33 @@ function redirectToLogin() {
   location.replace('/login.html?next=' + next);
 }
 
+function _webhookPath(url) {
+  try {
+    const u = String(url || '');
+    const i = u.indexOf('/webhook/');
+    if (i < 0) return '';
+    return decodeURIComponent(u.slice(i + '/webhook/'.length).split(/[?#]/)[0]).replace(/\/$/, '');
+  } catch { return ''; }
+}
+
+function _webhookUnregistered(text) {
+  return /webhook[\s\S]{0,80}not registered|not registered|webhook not found/i.test(String(text || ''));
+}
+
+function _webhookMissingMessage(path, raw) {
+  const p = String(path || '').replace(/\/$/, '');
+  if (p === 'site-clone') {
+    return 'Site Clone workflow not active in n8n — import/activate WF32: sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json';
+  }
+  const target = p ? ('/webhook/' + p) : 'this webhook';
+  const detail = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  return 'n8n webhook ' + target + ' is not registered'
+    + (detail ? ' (' + detail + ')' : '')
+    + ' — import and activate it with: sudo ./scripts/deploy_workflow.sh --all';
+}
+
 async function fetchJson(url, opts) {
+
   opts = _scopeWebhookOpts(url, opts || {});
   let resp;
   try {
@@ -6712,15 +6738,21 @@ async function fetchJson(url, opts) {
       throw new Error('n8n proxy timeout (HTTP 504) — workflow execution exceeded nginx timeout; keep workflow 10 active and raise frontend proxy_read_timeout for long Analysis LLM runs');
     }
     if (resp.status === 404) {
-      throw new Error('Webhook not found (HTTP 404) — import workflow 07-clear-graph.json into n8n and activate it');
+      throw new Error(_webhookMissingMessage(_webhookPath(url), 'Webhook not found (HTTP 404)'));
     }
     if (resp.status === 413) {
       throw new Error('Upload too large (HTTP 413). A single request is capped at 32 MB on the chunk path and 128 MB on the JSON path. Files over 32 MB are sent in chunks; a file over 4 GB must be ingested on the host. Do not raise N8N_PAYLOAD_SIZE_MAX.');
     }
     if (resp.status === 500) {
-      // n8n returns HTML on Python node crashes — try to surface the error text
+      // n8n returns HTML on Python node crashes and, in some versions, when a
+      // webhook path is not registered. Surface a deploy hint for the latter.
       let body = '';
       try { body = (await resp.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300); } catch {}
+      const path = _webhookPath(url);
+      const generic500 = /^error\s+internal server error$/i.test(body) || /^internal server error$/i.test(body);
+      if (_webhookUnregistered(body) || (path === 'site-clone' && generic500)) {
+        throw new Error(_webhookMissingMessage(path, body));
+      }
       throw new Error('n8n workflow crashed (HTTP 500)' + (body ? ' — ' + body : ' — check n8n execution log for the Python traceback'));
     }
     throw new Error('HTTP ' + resp.status + ' — expected JSON but got an HTML page (nginx error?)');
@@ -6736,10 +6768,10 @@ async function fetchJson(url, opts) {
     if (e.message.includes('n8n returned')) throw e;
     throw new Error('n8n response could not be parsed (HTTP ' + resp.status + '): ' + e.message + ' — check the n8n execution log');
   }
-  // n8n returns JSON 404s when the webhook path isn't registered
-  if (resp.status === 404) {
-    const msg = data.message || 'Webhook not found';
-    throw new Error(msg + ' — activate the workflow in n8n and try again');
+  // n8n returns JSON 404s (and sometimes 500s) when the webhook path isn't registered
+  const hookMsg = (data && (data.message || data.error || data.errorMessage)) || '';
+  if (resp.status === 404 || _webhookUnregistered(hookMsg)) {
+    throw new Error(_webhookMissingMessage(_webhookPath(url), hookMsg || 'Webhook not found'));
   }
   if (!resp.ok) {
     throw new Error((data.message || 'HTTP ' + resp.status));

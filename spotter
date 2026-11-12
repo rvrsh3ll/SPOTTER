@@ -37,6 +37,7 @@ Commands:
   logs [args...]     Tail logs (pass-through to compose logs)
   smoke              Run scripts/smoke_postinstall.sh
   check-flowsint     Preflight Flowsint/Neo4j as campaign sketch provisioning sees them
+  doctor             check-flowsint plus n8n webhook registration (flags a missing Site Clone workflow)
   trust-cert         Install Caddy's local CA into the OS trust store
   bootstrap          Run scripts/bootstrap.sh (fresh / resume install)
   compose <args...>  Pass-through to scripts/spotter_compose.sh
@@ -74,8 +75,21 @@ case "$cmd" in
     smoke)
         run_root "$ROOT_DIR/scripts/smoke_postinstall.sh" "$@"
         ;;
-    check-flowsint|doctor)
+    check-flowsint)
         run_root "$ROOT_DIR/scripts/flowsint_preflight.sh" "$@"
+        ;;
+    doctor)
+        pf=0
+        run_root "$ROOT_DIR/scripts/flowsint_preflight.sh" "$@" || pf=$?
+        if [[ $pf -eq 2 ]]; then exit 2; fi
+        echo ""
+        wh=0
+        run_root python3 "$ROOT_DIR/scripts/check_n8n_webhooks.py" || wh=$?
+        if [[ $pf -ne 0 || $wh -ne 0 ]]; then
+            exit 1
+        fi
+        echo ""
+        echo "Doctor passed: Flowsint preflight and n8n webhooks look good."
         ;;
     trust-cert)
         run_root "$ROOT_DIR/scripts/trust_caddy_cert.sh" "$@"

@@ -287,6 +287,71 @@ ok(typeof w.acloneSendSelectedAssets === 'function', 'acloneSendSelectedAssets i
       w.fetchJson = origFetchJson;
     }
   }
+
+  section('unregistered site-clone webhook');
+  const origFetch = w.fetch;
+  async function withFetch(status, body, contentType, requestUrl) {
+    w.fetch = async () => ({
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? contentType : null) },
+      text: async () => body,
+    });
+    try {
+      return await w.fetchJson(requestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', url: 'https://example.com' }),
+      });
+    } finally {
+      w.fetch = origFetch;
+    }
+  }
+  const siteUrl = 'http://localhost:8080/webhook/site-clone';
+  try {
+    await withFetch(404, JSON.stringify({
+      code: 404,
+      message: 'The requested webhook "POST site-clone" is not registered.',
+    }), 'application/json', siteUrl);
+    ok(false, 'JSON 404 unregistered site-clone should throw');
+  } catch (e) {
+    ok(/Site Clone workflow not active/.test(e.message)
+       && /32-site-clone\.json/.test(e.message)
+       && /deploy_workflow\.sh/.test(e.message),
+       'JSON 404 unregistered site-clone names WF32 and the deploy command',
+       e && e.message);
+  }
+  try {
+    await withFetch(500,
+      '<html><head><title>Error</title></head><body>The requested webhook "POST site-clone" is not registered.</body></html>',
+      'text/html', siteUrl);
+    ok(false, 'HTML 500 unregistered site-clone should throw');
+  } catch (e) {
+    ok(/Site Clone workflow not active/.test(e.message),
+       'HTML 500 with not-registered text names WF32', e && e.message);
+  }
+  try {
+    await withFetch(500,
+      '<html><head><title>Error</title></head><body><pre>Internal Server Error</pre></body></html>',
+      'text/html', siteUrl);
+    ok(false, 'generic HTML 500 on site-clone should throw');
+  } catch (e) {
+    ok(/Site Clone workflow not active/.test(e.message),
+       'generic HTML 500 on site-clone is treated as an unregistered WF32',
+       e && e.message);
+  }
+  try {
+    await withFetch(500,
+      '<html><head><title>Error</title></head><body><pre>Internal Server Error</pre></body></html>',
+      'text/html', 'http://localhost:8080/webhook/create-sketch');
+    ok(false, 'generic HTML 500 on another webhook should throw');
+  } catch (e) {
+    ok(/n8n workflow crashed/.test(e.message)
+       && !/Site Clone workflow not active/.test(e.message),
+       'generic HTML 500 on another webhook still reports a crash',
+       e && e.message);
+  }
+
   console.log(`\n${failures ? 'FAILED' : 'PASSED'}: ${checks - failures}/${checks} checks`);
   process.exit(failures ? 1 : 0);
 })();

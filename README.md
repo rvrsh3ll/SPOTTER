@@ -518,7 +518,16 @@ The clone runs inside the `spotter-site-clone` container, not on the host. Outpu
 lands in `data/clones/<campaignId>/<jobId>/`. The raw HTTrack tree is
 `mirror/`; recovered JavaScript is written next to it under `deobf/` and is
 never used to overwrite the mirror. After a compose update, rebuild that
-image: `./spotter compose up -d --build site-clone-api`.
+image: `./spotter compose up -d --build site-clone-api`. The Active tab talks
+to the worker through n8n workflow 32 (`POST /webhook/site-clone`). If Start
+clone fails with "Site Clone workflow not active" or n8n logs that the webhook
+is not registered, import and activate it:
+
+```bash
+sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json
+```
+
+`sudo ./spotter doctor` reports the same gap.
 
 After HTTrack finishes, Site Clone (when the option is on) recovers any cloned
 `.map` files that embed `sourcesContent`, then runs [webcrack](https://github.com/j4k0xb/webcrack)
@@ -2050,7 +2059,7 @@ annotations.
 
 ### 6. Deploy workflows
 
-Bootstrap deploys all 29 workflows. To deploy repository changes later, use
+Bootstrap deploys every file in `n8n-workflows/` (currently 32, including Site Clone). A later git pull does not import new workflow files by itself; `sudo ./scripts/deploy_workflow.sh --all` (or the one new file) does. To deploy repository changes later, use
 `scripts/deploy_workflow.sh`; do not import the JSON files through the n8n UI,
 which can leave active workflows and publication pointers inconsistent. The table
 below is an inventory of the workflow files, not a manual import procedure:
@@ -2087,6 +2096,8 @@ below is an inventory of the workflow files, not a manual import procedure:
 | `26-web-inventory.json` | `/webhook/web-inventory` reads every `Website` node in the campaign sketch (captured by EyeWitness ingest) back for the **Web** tab — URL, resolved host, page title, category, default-cred hits and the served screenshot URL |
 | `27-super-enrich.json` | `/webhook/super-enrich` — operator-initiated identity pivot for one selected person (the Targets tab's `Action ▾` fans out 1–5). AD seed → LinkedIn lookup → maigret username variants → socid-extractor profile mining → Flare **exact-email** search on each discovered alternate address → password-reuse and password-format correlation, written back into the dossier fields that are read everywhere and written by nobody (`personal_emails`, `personal_phones`, `personal_location`, `work_history`, `social_*`). Exact-email rather than username keyword on purpose — that is WF09's own contract, and the keyword search it removed bled hundreds of unrelated people onto one person. Cleartext credential values ride the synchronous response only, never the graph |
 | `29-analysis-correction.json` | Captures operator corrections for analysis results in the local analysis history |
+| `30-russian-corporate-intel.json` | Queries public Russian corporate registries (EGRUL, PEP, procurement, courts, bailiffs) through the campaign OPSEC envelope |
+| `32-site-clone.json` | Active tab Site Clone — `POST /webhook/site-clone` starts, polls, cancels and reads recovered source from an HTTrack clone in `site-clone-api`. Ships **active**. After a git pull that adds or changes this file, run `sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json` (bootstrap is the only install step that deploys new workflows on its own) |
 
 ### 6b. Register the ADRisk custom type (needed for PingCastle ingest)
 

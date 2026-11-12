@@ -143,7 +143,7 @@ docker exec -u root "$CONTAINER" rm -f /tmp/_deploy.json >/dev/null 2>&1 || true
 # Only re-publish workflows whose JSON asks to be active. Importing an
 # active:false workflow and then publishing it would silently switch it on, so
 # the JSON's own "active" flag is the single source of truth for whether a
-# webhook or schedule goes live. (All 29 currently ship active:true; this gate
+# webhook or schedule goes live. (Every workflow in n8n-workflows/ currently ships active:true, including 32-site-clone.json; this gate
 # exists so that shipping one inactive stays a decision the JSON can express,
 # rather than something a deploy quietly overrides.)
 echo "==> publishing"

@@ -168,7 +168,7 @@ what it already did. It will:
    mints an API token and stores it encrypted in `secrets/machine.sops.env`.
 7. Create a fallback sketch.
 8. Recreate the three containers that bake those values in.
-9. Register the Flowsint custom node types and deploy all 29 workflows.
+9. Register the Flowsint custom node types and deploy every workflow in n8n-workflows/ (currently 32, including Site Clone).
 10. **Ask you for an Open WebUI admin email and password**, then install the
     SPOTTER tools into it.
 
@@ -334,6 +334,16 @@ sudo ./spotter compose up -d --build site-clone-api
 
 Then open **Active** in the dashboard, paste or send a target URL, review the
 caps, and click **Start clone**. Jobs appear in the list. If a job fails with
+`Site Clone workflow not active` or n8n logs `The requested webhook "POST
+site-clone" is not registered`, workflow 32 is not imported or not active —
+the clone worker can be healthy and the webhook still missing. From the repo
+root (this imports, activates, repairs publication pointers, and restarts n8n):
+
+```bash
+sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json
+```
+
+`sudo ./spotter doctor` flags the same gap. If a job fails with
 `site-clone-api unreachable`, the worker container is not running. After a
 clone (and optional JS deobfuscation), Tesseract OCRs images in the
 sidecar when **OCR images** is on; findings are tagged `ocr=true` and the
@@ -349,7 +359,8 @@ Open WebUI tools so the *Ask the Company Website* hint names Site Clone:
 sudo python3 scripts/setup_openwebui.py
 ```
 
-Import or refresh workflow 32 if that workflow is already on the host, then
+Import or refresh workflow 32 with `sudo ./scripts/deploy_workflow.sh
+n8n-workflows/32-site-clone.json` if that workflow is already on the host, then
 recreate `n8n` / `task-runners` so they pick up the clones mount and
 `SITE_CLONE_DATA`.
 
