@@ -302,9 +302,11 @@ def _analyze_job(
     }
     if options.get("deobfuscate"):
         deobf_opts = dict(options)
-        # Under OPSEC, webcrack must not have the container network. Isolation
-        # is required; if unshare is denied the step is skipped (fail-closed).
+        # Under OPSEC, webcrack must not have the container network. The
+        # site-clone-deobf worker (network_mode: none) is required; if it is
+        # not running the step is skipped (fail-closed) and analysis continues.
         deobf_opts["require_isolated_network"] = bool(options.get("respect_opsec"))
+        deobf_opts["job_dir"] = str(job_dir)
         deobf_meta = deobfuscate_tree(mirror, deobf_dir, deobf_opts, progress_cb=progress_cb)
         warnings.extend(deobf_meta.get("warnings") or [])
     elif deobf_dir.exists():

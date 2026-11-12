@@ -518,7 +518,7 @@ The clone runs inside the `spotter-site-clone` container, not on the host. Outpu
 lands in `data/clones/<campaignId>/<jobId>/`. The raw HTTrack tree is
 `mirror/`; recovered JavaScript is written next to it under `deobf/` and is
 never used to overwrite the mirror. After a compose update, rebuild that
-image: `./spotter compose up -d --build site-clone-api`. The Active tab talks
+image: `./spotter compose up -d --build site-clone-api site-clone-deobf`. The Active tab talks
 to the worker through n8n workflow 32 (`POST /webhook/site-clone`). If Start
 clone fails with "Site Clone workflow not active" or n8n logs that the webhook
 is not registered, import and activate it:
@@ -533,12 +533,16 @@ After HTTrack finishes, Site Clone (when the option is on) recovers any cloned
 `.map` files that embed `sourcesContent`, then runs [webcrack](https://github.com/j4k0xb/webcrack)
 2.16.0 on `.js` / `.mjs` / `.cjs` files (2 MB and job file caps). Webpack and
 Browserify bundles are unpacked into `deobf/`. Each webcrack invocation has a
-hard timeout, a Node heap cap, an address-space cap, and a network-less namespace
-when the container allows `unshare --net`. If webcrack is missing, times out or
-crashes, the job still finishes and the raw tree is analyzed; a warning is
-recorded on the job. Findings from recovered sources are tagged
-`deobfuscated=true` with the tool and version. Secret-shaped values are still
-redacted the same way as the rest of the analyzer.
+hard timeout, a Node heap cap, and an address-space cap. Under OPSEC, webcrack
+runs in the `site-clone-deobf` worker (`network_mode: none` on the shared
+clone volume) so it has no container network; `unshare --net` is not used,
+because many hosts (Fedora/Nobara included) refuse it inside this container.
+If that worker is not running, webcrack is skipped and the job card names
+`sudo ./spotter compose up -d --build site-clone-deobf`. If webcrack is
+missing, times out or crashes, the job still finishes and the raw tree is
+analyzed; a warning is recorded on the job. Findings from recovered sources
+are tagged `deobfuscated=true` with the tool and version. Secret-shaped
+values are still redacted the same way as the rest of the analyzer.
 
 After deobfuscation, Site Clone (when **OCR images** is on, the default)
 runs Tesseract on cloned images under `mirror/` (JPEG, PNG, GIF, WebP,
@@ -570,10 +574,10 @@ under OPSEC):
 
 | Proxy mode | Where origin DNS resolves | Job card |
 |---|---|---|
-| SOCKS5 | At the SOCKS proxy, via proxychains4 `proxy_dns` (socks5h semantics). The proxy hostname itself may use Docker DNS (usually a compose service name). | `DNS: via SOCKS5` |
+| SOCKS5 | At the SOCKS proxy, via proxychains4 `strict_chain` + `proxy_dns` (socks5h semantics). The proxy endpoint hostname (usually a compose service name such as `ssh-tunnel-api`) is resolved once via Docker DNS to a numeric IP before the conf is written — proxychains-ng requires a numeric first hop. That lookup is not the target. | `DNS: via SOCKS5` |
 | TOR | At the Tor client, same proxychains4 path. | `DNS: via TOR` |
 | SSH tunnel (Use Tunnel as SOCKS Proxy) | Same as SOCKS5; OpenSSH `-D` is a SOCKS dynamic forward and resolves domain requests on the remote SSH host. | `DNS: via SOCKS5` |
-| HTTP proxy | At the HTTP proxy, via proxychains4 (`http` + `proxy_dns`, CONNECT carries the hostname). Not HTTrack `-P`. | `DNS: via HTTP proxy` |
+| HTTP proxy | At the HTTP proxy, via proxychains4 (`http` + `proxy_dns`, CONNECT carries the hostname). The proxy endpoint hostname is resolved to an IP the same way. Not HTTrack `-P`. | `DNS: via HTTP proxy` |
 | No proxy, Infrastructure resolvers set (plain IPs) | Those resolvers, via a per-job bind-mounted `resolv.conf` in a user+mount namespace (the container-global file is unchanged). | `DNS: 77.88.8.8` |
 | No proxy, DoH-only (or mixed) resolvers | In-tree Python stub on `127.0.0.N:53` doing RFC 8484 / JSON DoH (and UDP/DoT upstreams), pointed at by the per-job `resolv.conf`. | `DNS: DoH (dns.google)` |
 | No proxy, no resolvers, override off | Job is refused with a clear error. | — |
@@ -581,12 +585,16 @@ under OPSEC):
 | Respect OPSEC off | Historical behaviour: Docker DNS; HTTP may use HTTrack `-P` (HTTPS still resolved locally on 3.49.4). | (no DNS label) |
 
 The frontend proxy envelope (`http_url` / `socks` + `socks_url`) is flattened
-in the clone sidecar so proxychains actually attaches. webcrack is still run
-in a network-less namespace; under OPSEC, if that isolation is unavailable,
-JavaScript deobfuscation is skipped rather than run with the container network.
+in the clone sidecar so proxychains actually attaches. webcrack under OPSEC
+runs in the `site-clone-deobf` worker (`network_mode: none`). If that worker
+is not running, JavaScript deobfuscation is skipped rather than run with the
+container network. The same user-namespace restriction that blocks
+`unshare --net` can also block the no-proxy per-job `resolv.conf` path
+(`unshare --user --mount`); use a proxy, or **Allow Docker DNS (leaks
+lookups)**, if a no-proxy clone fails with "mount namespace not permitted".
 
-To verify OPSEC DNS on the host after rebuilding `site-clone-api`: start a
-clone with Respect OPSEC on, no
+To verify OPSEC DNS on the host after rebuilding `site-clone-api` and
+`site-clone-deobf`: start a clone with Respect OPSEC on, no
 proxy, and an Infrastructure resolver such as Yandex `77.88.8.8`. The job card
 should show `DNS: 77.88.8.8`. Optionally confirm nothing leaks to Docker's
 embedded DNS:

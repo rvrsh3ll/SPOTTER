@@ -7,8 +7,12 @@ Never fetches URLs. Fail-open: a missing binary, a timeout or a crash is
 recorded as a warning and the raw tree is still analyzed.
 
 webcrack evaluates decoder functions inside isolated-vm. This module still
-applies a hard timeout, a heap cap, an address-space cap and (when permitted)
-a network-less namespace around each invocation.
+applies a hard timeout, a heap cap, an address-space cap and a network-less
+environment around each invocation. Under OPSEC, webcrack is handed to the
+``site-clone-deobf`` worker (compose ``network_mode: none``, shared clone
+volume) rather than ``unshare --net``, which many kernels and container
+profiles refuse. If that worker is not running, deobfuscation is skipped
+(fail-closed) and the rest of the clone still runs.
 """
 from __future__ import annotations
 
@@ -17,9 +21,11 @@ import json
 import os
 import re
 import shutil
+import sys
 import signal
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +40,25 @@ NODE_HEAP_MB = 768
 RLIMIT_AS_BYTES = 4 * 1024 * 1024 * 1024
 SOURCEMAP_RE = re.compile(r"sourceMappingURL\s*=\s*(\S+)")
 SKIP_DIR_NAMES = {"hts-cache"}
+
+QUEUE_DIRNAME = "deobf-queue"
+REQUEST_NAME = "request.json"
+RESULT_NAME = "result.json"
+WORKER_DIRNAME = ".deobf-worker"
+HEARTBEAT_NAME = "heartbeat"
+HEARTBEAT_MAX_AGE = 20.0
+START_WORKER_CMD = "sudo ./spotter compose up -d --build site-clone-deobf"
+WORKER_MISSING_MSG = (
+    "OPSEC DNS: webcrack was not run because the network-less deobfuscation "
+    "worker (site-clone-deobf, network_mode: none) is not running. Start it "
+    "with: " + START_WORKER_CMD
+)
+WORKER_STALE_MSG = (
+    "OPSEC DNS: the network-less deobfuscation worker (site-clone-deobf) did "
+    "not finish in time. Check: sudo docker logs --tail 80 spotter-site-clone-deobf "
+    "and restart it with: " + START_WORKER_CMD
+)
+ISOLATED_ENV = "SPOTTER_DEOBF_ISOLATED"
 
 ProgressCb = Callable[[dict[str, Any]], None] | None
 
@@ -93,6 +118,10 @@ def deobfuscate_tree(
         warnings.append("clone tree not found; skipped JavaScript deobfuscation")
         return result
 
+    require_iso = bool(options.get("require_isolated_network"))
+    if require_iso and not already_isolated():
+        return _deobfuscate_via_worker(mirror_p, dest_p, options, progress_cb, result)
+
     js_files = list(_iter_js(mirror_p, max_files=max_files))
     result["files_considered"] = len(js_files)
     dest_p.mkdir(parents=True, exist_ok=True)
@@ -140,16 +169,15 @@ def deobfuscate_tree(
         _write_manifest(dest_p, result)
         return result
 
-    isolated, isolate_cmd = _network_isolation_prefix()
-    result["isolated_network"] = isolated
-    require_iso = bool(options.get("require_isolated_network"))
+    if already_isolated():
+        isolated, isolate_cmd = True, []
+        result["isolated_network"] = True
+    else:
+        isolated, isolate_cmd = _network_isolation_prefix()
+        result["isolated_network"] = isolated
     if not isolated:
         if require_iso:
-            warnings.append(
-                "OPSEC DNS: webcrack was not run because a network-less namespace "
-                "(unshare --net) is unavailable. Refusing to deobfuscate with the "
-                "container network."
-            )
+            warnings.append(WORKER_MISSING_MSG)
             result["ok"] = False
             result["skipped"] += len(js_files)
             _write_manifest(dest_p, result)
@@ -174,9 +202,9 @@ def deobfuscate_tree(
             work.mkdir(parents=True, exist_ok=True)
             ok, unpacked, err, used_isolation = _run_webcrack(
                 path, work, status["cmd"], per_file, isolate_cmd,
-                require_isolated=require_iso,
+                require_isolated=bool(require_iso and isolate_cmd),
             )
-            if used_isolation:
+            if used_isolation or already_isolated():
                 result["isolated_network"] = True
             if not ok:
                 result["skipped"] += 1
@@ -590,3 +618,299 @@ def _harvest_webcrack_output(work: Path, dest: Path, rel: str) -> tuple[bool, in
             except OSError:
                 continue
     return True, modules
+
+
+
+def already_isolated() -> bool:
+    """True when running inside the network-less deobf worker container."""
+    val = (os.environ.get(ISOLATED_ENV) or "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def data_root() -> Path | None:
+    raw = (os.environ.get("SITE_CLONE_DATA") or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw)
+        return path if path.is_dir() else path
+    except OSError:
+        return None
+
+
+def heartbeat_path(root: Path | None = None) -> Path | None:
+    base = root if root is not None else data_root()
+    if base is None:
+        return None
+    return Path(base) / WORKER_DIRNAME / HEARTBEAT_NAME
+
+
+def write_heartbeat(root: Path | None = None) -> Path | None:
+    path = heartbeat_path(root)
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(HEARTBEAT_NAME + ".tmp")
+    tmp.write_text("%s %s\n" % (time.time(), os.getpid()), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def heartbeat_fresh(root: Path | None = None, max_age: float = HEARTBEAT_MAX_AGE) -> bool:
+    path = heartbeat_path(root)
+    if path is None or not path.is_file():
+        return False
+    try:
+        token = path.read_text(encoding="utf-8").split()[0]
+        return (time.time() - float(token)) <= max_age
+    except (OSError, IndexError, ValueError):
+        return False
+
+
+def worker_available(root: Path | None = None, max_age: float = HEARTBEAT_MAX_AGE) -> bool:
+    return heartbeat_fresh(root, max_age=max_age)
+
+
+def queue_paths(job_dir: Path) -> tuple[Path, Path]:
+    q = Path(job_dir) / QUEUE_DIRNAME
+    return q / REQUEST_NAME, q / RESULT_NAME
+
+
+def _confine(root: Path, path: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+        return resolved
+    except (ValueError, OSError):
+        return None
+
+
+def write_worker_request(
+    job_dir: Path,
+    mirror: Path,
+    dest: Path,
+    options: dict[str, Any] | None = None,
+) -> Path:
+    """Atomically write a deobf request under job_dir/deobf-queue/."""
+    job_dir = Path(job_dir)
+    req_path, res_path = queue_paths(job_dir)
+    req_path.parent.mkdir(parents=True, exist_ok=True)
+    if res_path.exists():
+        try:
+            res_path.unlink()
+        except OSError:
+            pass
+    payload = {
+        "id": uuid.uuid4().hex,
+        "mirror": str(Path(mirror)),
+        "dest": str(Path(dest)),
+        "options": {
+            "deobf_timeout": int((options or {}).get("deobf_timeout") or DEFAULT_TIMEOUT),
+            "max_files": int((options or {}).get("max_files") or 2000),
+        },
+        "created_at": time.time(),
+    }
+    tmp = req_path.with_name(REQUEST_NAME + ".tmp")
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    tmp.replace(req_path)
+    return req_path
+
+
+def read_worker_result(job_dir: Path) -> dict[str, Any] | None:
+    _, res_path = queue_paths(job_dir)
+    if not res_path.is_file():
+        return None
+    try:
+        data = json.loads(res_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _job_dir_for(mirror: Path, dest: Path, options: dict[str, Any] | None) -> Path:
+    explicit = (options or {}).get("job_dir")
+    if explicit:
+        return Path(explicit)
+    return Path(dest).parent
+
+
+def _deobfuscate_via_worker(
+    mirror: Path,
+    dest: Path,
+    options: dict[str, Any],
+    progress_cb: ProgressCb,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Hand the full deobfuscation job to the network-less worker.
+
+    Fail-closed (skip webcrack, record a warning) when the worker is not
+    running. The clone job itself is not failed by this path.
+    """
+    warnings = result["warnings"]
+    job_dir = _job_dir_for(mirror, dest, options)
+    root = data_root()
+    if root is not None:
+        if _confine(Path(root), job_dir) is None:
+            warnings.append(WORKER_MISSING_MSG)
+            result["ok"] = False
+            _write_manifest(dest, result)
+            return result
+    if not worker_available(root):
+        warnings.append(WORKER_MISSING_MSG)
+        result["ok"] = False
+        _write_manifest(dest, result)
+        return result
+    if progress_cb:
+        try:
+            progress_cb({
+                "stage": "deobfuscate",
+                "step": "worker",
+                "file": "",
+                "files": 0,
+                "total": 0,
+                "elapsed": 0,
+            })
+        except Exception:
+            pass
+    write_worker_request(job_dir, mirror, dest, options)
+    timeout = int(options.get("deobf_timeout") or DEFAULT_TIMEOUT)
+    timeout = max(15, min(1800, timeout))
+    deadline = time.time() + timeout + 20
+    last_seen = time.time()
+    while time.time() < deadline:
+        got = read_worker_result(job_dir)
+        if got is not None:
+            # Preserve output_dir from this process; trust worker counters.
+            got["output_dir"] = str(dest)
+            got.setdefault("isolated_network", True)
+            if got.get("warnings") is None:
+                got["warnings"] = []
+            _write_manifest(dest, got)
+            return got
+        if worker_available(root):
+            last_seen = time.time()
+        elif time.time() - last_seen > HEARTBEAT_MAX_AGE:
+            break
+        time.sleep(0.4)
+    warnings.append(WORKER_STALE_MSG)
+    result["ok"] = False
+    result["timed_out"] = True
+    _write_manifest(dest, result)
+    return result
+
+
+def iter_pending_jobs(root: Path | None = None) -> list[Path]:
+    """Return job directories under the data root that have a pending request."""
+    base = root if root is not None else data_root()
+    if base is None:
+        return []
+    base = Path(base)
+    if not base.is_dir():
+        return []
+    found: list[Path] = []
+    for pattern in ("*/" + QUEUE_DIRNAME + "/" + REQUEST_NAME,
+                    "*/*/" + QUEUE_DIRNAME + "/" + REQUEST_NAME):
+        for req in base.glob(pattern):
+            job = req.parent.parent
+            result = req.parent / RESULT_NAME
+            if result.is_file():
+                continue
+            if job not in found:
+                found.append(job)
+    return found
+
+
+def process_worker_request(job_dir: Path, root: Path | None = None) -> dict[str, Any]:
+    """Execute one queued deobf request. Called only inside the isolated worker."""
+    job_dir = Path(job_dir)
+    req_path, res_path = queue_paths(job_dir)
+    confine_root = Path(root) if root is not None else (data_root() or job_dir)
+    try:
+        raw = json.loads(req_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        out = {"ok": False, "error": "invalid request: %s" % type(e).__name__,
+               "warnings": ["invalid deobf request"], "isolated_network": True}
+        _write_result(res_path, out)
+        return out
+    if not isinstance(raw, dict):
+        out = {"ok": False, "error": "invalid request", "warnings": ["invalid deobf request"],
+               "isolated_network": True}
+        _write_result(res_path, out)
+        return out
+    mirror = Path(str(raw.get("mirror") or ""))
+    dest = Path(str(raw.get("dest") or ""))
+    if not mirror.is_absolute():
+        mirror = job_dir / mirror
+    if not dest.is_absolute():
+        dest = job_dir / dest
+    mirror_ok = _confine(confine_root, mirror)
+    dest_ok = _confine(confine_root, dest)
+    if mirror_ok is None or dest_ok is None:
+        out = {
+            "ok": False, "error": "request paths are outside the clone data root",
+            "warnings": ["deobf request paths were rejected"],
+            "isolated_network": True,
+        }
+        _write_result(res_path, out)
+        return out
+    opts = dict(raw.get("options") or {})
+    opts["require_isolated_network"] = False
+    os.environ[ISOLATED_ENV] = "1"
+    result = deobfuscate_tree(mirror_ok, dest_ok, opts)
+    result["isolated_network"] = True
+    result["worker"] = True
+    _write_result(res_path, result)
+    return result
+
+
+def _write_result(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(RESULT_NAME + ".tmp")
+    # output_dir may be a Path; drop it — the client already knows dest.
+    body = {k: v for k, v in payload.items() if k != "output_dir"}
+    tmp.write_text(json.dumps(body) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def worker_healthcheck(root: Path | None = None, max_age: float = HEARTBEAT_MAX_AGE) -> int:
+    return 0 if heartbeat_fresh(root, max_age=max_age) else 1
+
+
+def worker_loop(root: Path | None = None, once: bool = False, interval: float = 0.5) -> int:
+    """Watch the shared volume and process deobf requests until stopped."""
+    base = root if root is not None else data_root()
+    if base is None:
+        print("SITE_CLONE_DATA is not set", flush=True)
+        return 2
+    base = Path(base)
+    base.mkdir(parents=True, exist_ok=True)
+    os.environ[ISOLATED_ENV] = "1"
+    write_heartbeat(base)
+    print("site-clone-deobf worker watching %s" % base, flush=True)
+    while True:
+        write_heartbeat(base)
+        for job in iter_pending_jobs(base):
+            try:
+                process_worker_request(job, root=base)
+            except Exception as e:
+                _, res_path = queue_paths(job)
+                if not res_path.exists():
+                    _write_result(res_path, {
+                        "ok": False,
+                        "error": type(e).__name__,
+                        "warnings": ["deobf worker failed: %s" % type(e).__name__],
+                        "isolated_network": True,
+                    })
+            write_heartbeat(base)
+        if once:
+            return 0
+        time.sleep(interval)
+
+
+def worker_main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--healthcheck"]:
+        return worker_healthcheck()
+    if args[:1] == ["--once"]:
+        return worker_loop(once=True)
+    return worker_loop()

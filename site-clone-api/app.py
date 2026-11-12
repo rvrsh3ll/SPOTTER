@@ -236,6 +236,14 @@ class Handler(BaseHTTPRequestHandler):
                 info["dns"] = capabilities()
             except Exception as e:
                 info["dns"] = {"error": type(e).__name__}
+            try:
+                from site_clone_deobfuscate import START_WORKER_CMD, worker_available
+                info["deobf_worker"] = {
+                    "available": worker_available(),
+                    "start": START_WORKER_CMD,
+                }
+            except Exception as e:
+                info["deobf_worker"] = {"available": False, "error": type(e).__name__}
             self._send(200, info)
             return
         m = re.match(r"^/jobs/([A-Za-z0-9._-]+)$", path)

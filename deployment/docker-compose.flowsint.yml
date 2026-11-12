@@ -143,12 +143,15 @@ services:
       - SITE_CLONE_PORT=7052
     volumes:
       - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
-      - ${SPOTTER_HOME}/data/clones:/data/clones
+      - ${SITE_CLONE_HOST_DIR:-${SPOTTER_HOME}/data/clones}:/data/clones
     # Per-job resolv.conf is applied with `unshare --user --map-root-user --mount`
     # plus a bind mount, so concurrent clones do not share /etc/resolv.conf and
     # SYS_ADMIN is not added. docker-default AppArmor denies mount(2); this
     # service is unconfined for that bind only. Binding 127.0.0.N:53 for a DoH
     # stub uses Docker's default NET_BIND_SERVICE capability.
+    # webcrack under OPSEC is not run here: unshare --net is often denied
+    # (seccomp / unprivileged user namespaces). The site-clone-deobf service
+    # below uses network_mode: none instead, with no extra caps.
     security_opt:
       - apparmor:unconfined
     healthcheck:
@@ -158,6 +161,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── Site Clone deobfuscation worker ──────────────────────────────────────
+  # Same image as site-clone-api. network_mode: none means webcrack has no
+  # container network and no Docker DNS. Jobs are handed off on the shared
+  # clones volume (<job>/deobf-queue/). No SYS_ADMIN, no custom seccomp.
+  site-clone-deobf:
+    build:
+      context: ${SPOTTER_HOME}/site-clone-api
+    container_name: spotter-site-clone-deobf
+    restart: unless-stopped
+    network_mode: "none"
+    environment:
+      - SPOTTER_SCRIPTS_DIR=/data/scripts
+      - SITE_CLONE_DATA=/data/clones
+      - SPOTTER_DEOBF_ISOLATED=1
+    volumes:
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+      - ${SITE_CLONE_HOST_DIR:-${SPOTTER_HOME}/data/clones}:/data/clones
+    command: ["python3", "/data/scripts/site_clone_deobf_worker.py"]
+    healthcheck:
+      test: ["CMD", "python3", "/data/scripts/site_clone_deobf_worker.py", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Egress control-plane sidecar ──────────────────────────────────────────
   # Backs the Infrastructure tab: a single managed SSH SOCKS tunnel, a single

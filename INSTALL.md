@@ -329,7 +329,7 @@ Trade-offs:
 After bootstrap, rebuild the clone worker once if the image is not yet on the host:
 
 ```bash
-sudo ./spotter compose up -d --build site-clone-api
+sudo ./spotter compose up -d --build site-clone-api site-clone-deobf
 ```
 
 Then open **Active** in the dashboard, paste or send a target URL, review the
@@ -343,12 +343,14 @@ root (this imports, activates, repairs publication pointers, and restarts n8n):
 sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json
 ```
 
-`sudo ./spotter doctor` flags the same gap. If a job fails with
-`site-clone-api unreachable`, the worker container is not running. After a
-clone (and optional JS deobfuscation), Tesseract OCRs images in the
-sidecar when **OCR images** is on; findings are tagged `ocr=true` and the
-text under `ocr/` is indexed with the rest of the tree. Rebuild
-`site-clone-api` to pick up the Tesseract packages and the read-only
+`sudo ./spotter doctor` flags the same gap, and also checks that
+`site-clone-api` and the network-less `site-clone-deobf` worker are
+running. If a job fails with `site-clone-api unreachable`, the API
+container is not running. After a clone (and optional JS deobfuscation),
+Tesseract OCRs images in the sidecar when **OCR images** is on; findings
+are tagged `ocr=true` and the text under `ocr/` is indexed with the rest
+of the tree. Rebuild `site-clone-api` and `site-clone-deobf` (same image)
+to pick up the Tesseract packages, the deobf worker, and the read-only
 source-snippet route used by **View source** in Open findings. Refresh
 workflow 32 so `action=source` and JS-endpoint ingest are live. A
 finished clone is also indexed into the Prompt tab's company-site corpus
@@ -366,10 +368,15 @@ recreate `n8n` / `task-runners` so they pick up the clones mount and
 
 OPSEC DNS uses a user+mount namespace to bind-mount a per-job `resolv.conf`
 (no `SYS_ADMIN`). The clone service is started with `apparmor:unconfined`
-because docker-default AppArmor denies `mount(2)`. To confirm lookups are not
-leaking through Docker DNS: with Respect OPSEC on, no proxy, and an
-Infrastructure resolver selected, start a clone and check the job card shows
-`DNS: <resolver>` (for example `DNS: 77.88.8.8`). Optionally:
+because docker-default AppArmor denies `mount(2)`. When a SOCKS/HTTP/TOR
+proxy is selected, proxychains-ng is written with `strict_chain` +
+`proxy_dns` and the proxy *endpoint* hostname (for example `ssh-tunnel-api`)
+is resolved once via Docker DNS to a numeric IP before the conf is written —
+proxychains-ng requires a numeric first hop. That lookup is the local
+compose service, not the target. To confirm lookups are not leaking through
+Docker DNS: with Respect OPSEC on, no proxy, and an Infrastructure resolver
+selected, start a clone and check the job card shows `DNS: <resolver>` (for
+example `DNS: 77.88.8.8`). Optionally:
 
 ```bash
 sudo tcpdump -n -i docker0 udp port 53 or tcp port 53
@@ -377,8 +384,18 @@ sudo tcpdump -n -i docker0 udp port 53 or tcp port 53
 
 while the clone runs — the *target* hostname should not appear. If a job fails
 with "mount namespace not permitted", the host may have user namespaces
-disabled; either enable them or check **Allow Docker DNS (leaks lookups)** as
-an explicit override.
+disabled (the same restriction that used to break `unshare --net` for
+webcrack). Use a proxy, or check **Allow Docker DNS (leaks lookups)** as an
+explicit override.
+
+JavaScript deobfuscation under OPSEC runs in the `site-clone-deobf` worker
+(`network_mode: none`, no extra capabilities). If that service is not
+running, webcrack is skipped (the rest of the clone still finishes) and the
+job card tells you to start it:
+
+```bash
+sudo ./spotter compose up -d --build site-clone-deobf
+```
 
 Live website crawling was removed from Domain Recon / Organization enrichment;
 that card now points here. Domain Recon still makes one proxied request for the
@@ -398,6 +415,8 @@ homepage title.
 | **`spotter-ui` will not start** | Check `docker logs spotter-ui` — nginx.conf is templated by envsubst, so a bad `SPOTTER_DASHBOARD_HOST`/`SPOTTER_CADDY_PORT` value will fail the template render. |
 | **Browser warns about an untrusted certificate on :5443** | Expected on first use of each hostname — Caddy's internal CA is self-signed. Trust it once: `docker exec spotter-caddy cat /data/caddy/pki/authorities/local/root.crt`. |
 | **A code node dies with `ModuleNotFoundError`** on a module that is clearly allowlisted | The runner is mounting a different `n8n-task-runners.json` than you are reading. Check `SPOTTER_RUNNERS_CONFIG` is an absolute path. |
+| **Site Clone job card: `proxy … has invalid value or is not numeric`** | An older clone image wrote a compose service name (for example `ssh-tunnel-api`) into proxychains-ng's `[ProxyList]`. Rebuild `site-clone-api` so the endpoint is resolved to an IP before the conf is written: `sudo ./spotter compose up -d --build site-clone-api site-clone-deobf`. |
+| **Site Clone job card: webcrack was not run because a network-less namespace is unavailable**, or it names `site-clone-deobf` | Under OPSEC, webcrack runs in the `site-clone-deobf` worker (`network_mode: none`). Start it with `sudo ./spotter compose up -d --build site-clone-deobf`. Deobfuscation is skipped until it is up; the rest of the clone still finishes. `sudo ./spotter doctor` flags a missing worker. |
 | **`restart` succeeds but nothing restarted** | Compose was run without `-p spotter`, so it found nothing under that project name and exited 0. Use the launcher. |
 | **Open WebUI signup is refused** | An account already exists — only the first one can be created that way. Sign in instead. |
 | **`setup_openwebui.py` fails to sign in** | Either the account has not been created yet (visit https://chat.spotter.localhost:5443 and sign up) or `OWUI_ADMIN_*` in `.env` no longer matches it. |

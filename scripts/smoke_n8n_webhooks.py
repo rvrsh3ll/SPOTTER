@@ -102,6 +102,28 @@ def main() -> int:
         ok(chk.SITE_CLONE_ID in live_db and chk.is_active(live_db[chk.SITE_CLONE_ID]),
            "live_workflows reads an active WF32 row from sqlite")
 
+    rows_ok = chk.check_clone_containers(None)
+    ok(rows_ok == [], "clone-container check is skipped without docker")
+
+    orig = chk.container_running
+    try:
+        chk.container_running = lambda docker, name: name in set(docker)
+        missing = chk.check_clone_containers(["docker"])
+        names = [r["msg"] for r in missing]
+        ok(all(r["ok"] is False for r in missing) and len(missing) == 2,
+           "both Site Clone containers are flagged when they are down", names)
+        ok(any(chk.START_CLONE_SERVICES in (r.get("hints") or []) for r in missing),
+           "missing API hints the compose build command")
+        ok(any(chk.START_DEOBF_WORKER in (r.get("hints") or []) for r in missing),
+           "missing deobf worker hints the worker compose command")
+        present = chk.check_clone_containers(
+            [chk.SITE_CLONE_API_CONTAINER, chk.SITE_CLONE_DEOBF_CONTAINER]
+        )
+        ok(all(r["ok"] is True for r in present) and len(present) == 2,
+           "both Site Clone containers pass when running")
+    finally:
+        chk.container_running = orig
+
     print("\n%s: %d/%d checks" % ("FAILED" if fails else "PASSED", checks - fails, checks))
     return 1 if fails else 0
 

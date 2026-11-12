@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -293,7 +294,8 @@ try:
     try:
         result = site_clone.run_clone(
             "https://example.com/", job_dir,
-            options={"deobfuscate": True, "deobfTimeout": 60, "ocr": False},
+            options={"deobfuscate": True, "deobfTimeout": 60, "ocr": False,
+                     "respectOpsec": False},
         )
     finally:
         site_clone.shutil.which = orig_sc_which
@@ -447,10 +449,18 @@ try:
         "https://example.com/", tmp / "tor", opts, {},
         {"type": "tor", "socks_url": "socks5h://ssh-tunnel-api:9050"},
         mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+        resolve_proxy=lambda h: "10.94.0.8" if h == "ssh-tunnel-api" else h,
     )
-    ok(p_tor["label"] == "via TOR"
-       and "socks5 ssh-tunnel-api 9050" in Path(p_tor["proxychains_conf"]).read_text(),
-       "TOR plan label and conf", p_tor)
+    conf_tor = Path(p_tor["proxychains_conf"]).read_text()
+    ok(p_tor["ok"] and p_tor["label"] == "via TOR"
+       and "socks5 10.94.0.8 9050" in conf_tor
+       and "ssh-tunnel-api" in conf_tor
+       and "strict_chain" in conf_tor and "proxy_dns" in conf_tor,
+       "TOR plan resolves the compose service name to an IP in [ProxyList]",
+       conf_tor)
+    ok(p_tor.get("proxy_endpoint_ip") == "10.94.0.8"
+       and p_tor.get("proxy_endpoint_host") == "ssh-tunnel-api",
+       "TOR plan records the resolved endpoint IP", p_tor)
 
     # No proxy + plain IPs
     p_ip = dns.plan_job_dns(
@@ -534,6 +544,43 @@ try:
     )
     ok(p_ov["ok"] is True and p_ov["label"] == "Docker (override)",
        "Allow Docker DNS override is accepted", p_ov)
+
+    p_named = dns.plan_job_dns(
+        "https://example.com/", tmp / "named", opts, {},
+        {"type": "socks5", "socks": {"host": "ssh-tunnel-api", "port": 1080}},
+        mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+        resolve_proxy=lambda h: "172.18.0.12" if h == "ssh-tunnel-api" else h,
+    )
+    conf_named = Path(p_named["proxychains_conf"]).read_text()
+    ok(p_named["ok"] and "socks5 172.18.0.12 1080" in conf_named
+       and "socks5 ssh-tunnel-api" not in conf_named,
+       "SOCKS5 compose hostname is written as a numeric IP", conf_named)
+
+    def _boom(host):
+        raise ValueError(
+            "OPSEC DNS cannot be routed: proxy host %s could not be resolved "
+            "to an IP (Name or service not known). That name is the local "
+            "proxy endpoint, not the target; check that the proxy service is "
+            "on the same Docker network as site-clone-api." % host
+        )
+    p_bad = dns.plan_job_dns(
+        "https://example.com/", tmp / "badhop", opts, {},
+        {"type": "socks5", "socks": {"host": "missing-proxy", "port": 1080}},
+        mount_ok=True, proxychains_bin="/usr/bin/proxychains4",
+        resolve_proxy=_boom,
+    )
+    ok(p_bad["ok"] is False and "missing-proxy" in (p_bad["error"] or "")
+       and "could not be resolved" in (p_bad["error"] or "")
+       and "not the target" in (p_bad["error"] or ""),
+       "unresolvable proxy hostname is fail-closed with a clear error",
+       p_bad["error"])
+
+    ok(dns.is_numeric_ip("10.0.0.9") and dns.is_numeric_ip("127.0.0.1")
+       and dns.is_numeric_ip("::1") and not dns.is_numeric_ip("ssh-tunnel-api")
+       and not dns.is_numeric_ip(""),
+       "is_numeric_ip distinguishes addresses from service names")
+    ok(dns.resolve_proxy_endpoint("8.8.8.8") == "8.8.8.8",
+       "numeric proxy IPs are not looked up again")
 
     # run_clone refuses before starting httrack
     fake_ht = tmp / "httrack"
@@ -925,6 +972,145 @@ ok((ext_id, site_id, "FOUND_ON") in fake.edges
    "external endpoint is not linked to the org apex", fake.edges)
 ok(ing._normalize_endpoint("javascript:alert(1)", "https://example.com/") == "",
    "javascript: endpoints are not ingested")
+
+
+
+section("OPSEC deobf worker handoff")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-deobf-worker-"))
+try:
+    data = tmp / "clones"
+    camp = data / "camp"
+    job_dir = camp / "job"
+    mirror = job_dir / "mirror"
+    shutil.copytree(FIX, mirror)
+    dest = job_dir / "deobf"
+    os.environ["SITE_CLONE_DATA"] = str(data)
+    os.environ.pop("SPOTTER_DEOBF_ISOLATED", None)
+
+    meta_missing = deob.deobfuscate_tree(
+        mirror, dest,
+        {"deobfuscate": True, "deobf_timeout": 30, "require_isolated_network": True,
+         "job_dir": str(job_dir)},
+    )
+    ok(meta_missing.get("ok") is False, "OPSEC deobf without a worker is fail-closed")
+    ok(any("site-clone-deobf" in w and "sudo ./spotter compose up -d --build site-clone-deobf" in w
+           for w in (meta_missing.get("warnings") or [])),
+       "missing-worker warning names the compose command",
+       meta_missing.get("warnings"))
+    ok(meta_missing.get("files_deobfuscated", 0) == 0,
+       "webcrack is not run when the worker is down")
+
+    # Stand-in worker: heartbeat + process_worker_request in a thread.
+    mock = tmp / "webcrack"
+    mock.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "args=sys.argv[1:]\n"
+        "if '--version' in args:\n"
+        "    print('2.16.0'); sys.exit(0)\n"
+        "out=None\n"
+        "for i,a in enumerate(args):\n"
+        "    if a=='-o' and i+1<len(args): out=Path(args[i+1])\n"
+        "if not out: sys.exit(2)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out/'deobfuscated.js').write_text('const api_base=\"https://worker.example.com/v1\";\\n')\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC)
+    os.environ["SPOTTER_WEBCRACK"] = str(mock)
+    deob.write_heartbeat(data)
+    ok(deob.worker_available(data), "fresh heartbeat makes the worker available")
+    ok(deob.worker_healthcheck(data) == 0, "--healthcheck is ok when the heartbeat is fresh")
+    stale = deob.heartbeat_path(data)
+    stale.write_text("%s 1\n" % (time.time() - 120), encoding="utf-8")
+    ok(deob.worker_healthcheck(data) == 1, "--healthcheck fails on a stale heartbeat")
+    deob.write_heartbeat(data)
+
+    def _pump():
+        # Wait until a request appears, then process it once.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            pending = deob.iter_pending_jobs(data)
+            if pending:
+                deob.process_worker_request(pending[0], root=data)
+                return
+            time.sleep(0.05)
+
+    import threading
+    th = threading.Thread(target=_pump, daemon=True)
+    th.start()
+    dest2 = job_dir / "deobf-w"
+    meta_ok = deob.deobfuscate_tree(
+        mirror, dest2,
+        {"deobfuscate": True, "deobf_timeout": 30, "require_isolated_network": True,
+         "job_dir": str(job_dir), "max_files": 50},
+    )
+    th.join(timeout=10)
+    ok(meta_ok.get("ok") is True and meta_ok.get("isolated_network") is True,
+       "worker handoff reports ok and isolated_network", meta_ok)
+    ok(meta_ok.get("files_deobfuscated", 0) >= 1,
+       "stand-in worker harvested webcrack output", meta_ok)
+    recovered = list((dest2).rglob("*.js"))
+    ok(any("worker.example.com" in p.read_text(encoding="utf-8", errors="replace")
+           for p in recovered),
+       "worker output landed under dest", [str(p) for p in recovered])
+
+    # Already-isolated path (inside the worker) runs locally without a queue.
+    os.environ["SPOTTER_DEOBF_ISOLATED"] = "1"
+    dest3 = job_dir / "deobf-local"
+    # Hide the heartbeat so a bug that still queued would fail-closed.
+    hb = deob.heartbeat_path(data)
+    if hb and hb.exists():
+        hb.unlink()
+    meta_local = deob.deobfuscate_tree(
+        mirror, dest3,
+        {"deobfuscate": True, "deobf_timeout": 30, "require_isolated_network": True,
+         "job_dir": str(job_dir)},
+    )
+    ok(meta_local.get("ok") is True and meta_local.get("isolated_network") is True
+       and meta_local.get("files_deobfuscated", 0) >= 1,
+       "already-isolated process runs webcrack locally", meta_local)
+    os.environ.pop("SPOTTER_DEOBF_ISOLATED", None)
+
+    # Deobf skip is non-fatal for the rest of the clone.
+    os.environ.pop("SPOTTER_WEBCRACK", None)
+    job2 = data / "camp" / "job2"
+    mirror2 = job2 / "mirror"
+    shutil.copytree(FIX, mirror2)
+    orig_sc_which = site_clone.shutil.which
+    def _sc_which(name):
+        if name in {"httrack", "proxychains4", "proxychains"}:
+            return None
+        return orig_sc_which(name)
+    site_clone.shutil.which = _sc_which
+    try:
+        result = site_clone.run_clone(
+            "https://example.com/", job2,
+            options={"deobfuscate": True, "deobfTimeout": 30, "ocr": False,
+                     "respectOpsec": True},
+        )
+    finally:
+        site_clone.shutil.which = orig_sc_which
+    ok(result.get("ok") is True and result.get("skipped_httrack") is True,
+       "clone analysis still succeeds when OPSEC deobf is skipped", result.get("error"))
+    warns = result.get("warnings") or []
+    ok(any("site-clone-deobf" in w and "sudo ./spotter compose up -d --build site-clone-deobf" in w
+           for w in warns),
+       "run_clone surfaces the start-worker command on the job card", warns)
+    ok((result.get("deobfuscation") or {}).get("ok") is False,
+       "deobfuscation status records the skip without failing the job",
+       result.get("deobfuscation"))
+    # Raw-tree findings (sourcemaps are also skipped because the whole step
+    # is handed to a missing worker) — the mirror is still analyzed.
+    findings = (result.get("analysis") or {}).get("findings") or []
+    ok(isinstance(findings, list), "raw-tree analysis findings are still produced")
+finally:
+    os.environ.pop("SITE_CLONE_DATA", None)
+    os.environ.pop("SPOTTER_WEBCRACK", None)
+    os.environ.pop("SPOTTER_DEOBF_ISOLATED", None)
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 print(("\nPASSED" if not fails else "\nFAILED") + f": {checks - fails}/{checks} checks")

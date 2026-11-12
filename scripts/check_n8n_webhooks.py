@@ -6,7 +6,8 @@ n8n database when it is readable, and probes POST /webhook/site-clone from
 inside the n8n container (a status request for a fake job_id, never a clone).
 
 Never prints secrets. Exit 0 when the checks that could run all passed and
-Site Clone is registered; exit 1 otherwise.
+Site Clone is registered and the clone/deobf containers are running when
+Docker is reachable; exit 1 otherwise.
 """
 from __future__ import annotations
 
@@ -26,6 +27,12 @@ DEPLOY_SITE_CLONE = (
     "sudo ./scripts/deploy_workflow.sh n8n-workflows/32-site-clone.json"
 )
 DEPLOY_ALL = "sudo ./scripts/deploy_workflow.sh --all"
+SITE_CLONE_API_CONTAINER = "spotter-site-clone"
+SITE_CLONE_DEOBF_CONTAINER = "spotter-site-clone-deobf"
+START_CLONE_SERVICES = (
+    "sudo ./spotter compose up -d --build site-clone-api site-clone-deobf"
+)
+START_DEOBF_WORKER = "sudo ./spotter compose up -d --build site-clone-deobf"
 
 
 def expected_workflows(root: Path | None = None) -> list[dict[str, Any]]:
@@ -230,6 +237,41 @@ def _print(status: str, msg: str, fixes: list[str] | None = None) -> None:
         print("       fix: %s" % hint)
 
 
+def check_clone_containers(docker: list[str] | None) -> list[dict[str, Any]]:
+    """Return FAIL rows for missing Site Clone API or deobf worker containers."""
+    if not docker:
+        return []
+    rows: list[dict[str, Any]] = []
+    if container_running(docker, SITE_CLONE_API_CONTAINER):
+        rows.append({
+            "ok": True,
+            "msg": "site-clone-api container running (%s)" % SITE_CLONE_API_CONTAINER,
+            "hints": [],
+        })
+    else:
+        rows.append({
+            "ok": False,
+            "msg": "site-clone-api container is not running (%s)" % SITE_CLONE_API_CONTAINER,
+            "hints": [START_CLONE_SERVICES],
+        })
+    if container_running(docker, SITE_CLONE_DEOBF_CONTAINER):
+        rows.append({
+            "ok": True,
+            "msg": "site-clone-deobf worker running (%s, network_mode: none)" % SITE_CLONE_DEOBF_CONTAINER,
+            "hints": [],
+        })
+    else:
+        rows.append({
+            "ok": False,
+            "msg": (
+                "site-clone-deobf worker is not running (%s) — under OPSEC, "
+                "JavaScript deobfuscation will be skipped"
+            ) % SITE_CLONE_DEOBF_CONTAINER,
+            "hints": [START_DEOBF_WORKER],
+        })
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "-h" in args or "--help" in args:
@@ -333,11 +375,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         fails += 1
 
+    for row in check_clone_containers(docker):
+        if row["ok"]:
+            _print("PASS", row["msg"])
+        else:
+            _print("FAIL", row["msg"], row.get("hints") or [])
+            fails += 1
+
     if fails:
         print("")
         print("n8n webhook preflight: %d check(s) failed." % fails)
         print("If Active → Site Clone reports a crashed or missing webhook, import WF32:")
         print("  %s" % DEPLOY_SITE_CLONE)
+        print("If JavaScript deobfuscation is skipped under OPSEC, start the worker:")
+        print("  %s" % START_DEOBF_WORKER)
         return 1
     print("")
     print("n8n webhook preflight passed: Site Clone and other active workflows are registered.")

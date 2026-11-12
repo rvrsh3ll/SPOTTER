@@ -19,8 +19,12 @@ proxychains-ng 4.16-2 as proxychains4):
 * SOCKS5 / TOR via proxychains4 with proxy_dns: libc resolution is
   intercepted, a fake IP is returned, and the hostname is sent to the
   proxy (SOCKS5 ATYP 3). Origin DNS is at the SOCKS/Tor process. The
-  proxy endpoint hostname itself (e.g. ssh-tunnel-api) still uses
-  Docker DNS; that is a compose service name, not the target.
+  proxy endpoint hostname itself (e.g. ssh-tunnel-api) is resolved
+  once, via Docker DNS, to a numeric IP before the proxychains conf
+  is written: proxychains-ng requires a numeric first hop even with
+  strict_chain + proxy_dns (a hostname yields "has invalid value or
+  is not numeric"). That lookup is the local compose service, not
+  the clone target, so it is not an OPSEC leak.
 * SSH tunnel: ssh -N -D is a SOCKS4/5 dynamic forward. OpenSSH resolves
   SOCKS5 domain requests on the remote SSH host, but only if the client
   sends a hostname (proxy_dns / socks5h), not a pre-resolved IP. The
@@ -52,6 +56,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import socket
 import re
 import shutil
 import signal
@@ -264,13 +269,79 @@ def write_resolv_conf(path: Path, nameservers: list[str]) -> Path:
     return path
 
 
-def write_proxychains_conf(job_dir: Path, proxy: dict[str, Any]) -> Path:
+def is_numeric_ip(host: str) -> bool:
+    """Return True if host is a bare IPv4 or IPv6 address (no brackets required)."""
+    h = (host or "").strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if not h:
+        return False
+    try:
+        socket.inet_pton(socket.AF_INET, h)
+        return True
+    except OSError:
+        pass
+    try:
+        socket.inet_pton(socket.AF_INET6, h)
+        return True
+    except OSError:
+        return False
+
+
+def resolve_proxy_endpoint(host: str) -> str:
+    """Resolve a local proxy endpoint hostname to a numeric IP.
+
+    proxychains-ng requires the first [ProxyList] entry to be a numeric
+    IP even with strict_chain + proxy_dns. This lookup is for the proxy
+    endpoint (a compose service name such as ssh-tunnel-api, or any
+    other hop hostname), not the clone target. Target DNS still goes
+    through the proxy via proxy_dns. Using the container's Docker DNS
+    here is therefore not an OPSEC leak.
+
+    Prefers IPv4. Raises ValueError if host is empty or cannot be resolved.
+    """
+    h = (host or "").strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if not h:
+        raise ValueError("proxy host is empty")
+    if is_numeric_ip(h):
+        return h
+    try:
+        infos = socket.getaddrinfo(h, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(
+            "OPSEC DNS cannot be routed: proxy host %s could not be resolved "
+            "to an IP (%s). That name is the local proxy endpoint, not the "
+            "target; check that the proxy service is on the same Docker "
+            "network as site-clone-api."
+            % (h, e)
+        ) from e
+    v4 = [item[4][0] for item in infos if item[0] == socket.AF_INET and item[4]]
+    if v4:
+        return v4[0]
+    v6 = [item[4][0] for item in infos if item[0] == socket.AF_INET6 and item[4]]
+    if v6:
+        return v6[0]
+    raise ValueError(
+        "OPSEC DNS cannot be routed: proxy host %s did not resolve to an IP."
+        % h
+    )
+
+
+def write_proxychains_conf(
+    job_dir: Path,
+    proxy: dict[str, Any],
+    *,
+    resolve_proxy: Any = None,
+) -> Path:
     """Write a per-job proxychains-ng conf with remote DNS enabled.
 
     proxy_dns makes proxychains intercept getaddrinfo/gethostbyname, return
     a fake address, and send the hostname to the proxy (SOCKS5 ATYP 3 or
     HTTP CONNECT host:port). That is socks5h semantics. strict_chain keeps
-    a single listed hop.
+    a single listed hop. The hop in [ProxyList] is always a numeric IP
+    (see resolve_proxy_endpoint).
     """
     path = job_dir / "proxychains.conf"
     typ = str(proxy.get("type") or "socks5").lower()
@@ -279,9 +350,27 @@ def write_proxychains_conf(job_dir: Path, proxy: dict[str, Any]) -> Path:
     user = str(proxy.get("username") or "")
     pw = str(proxy.get("password") or "")
     extra = (" %s %s" % (user, pw)) if user else ""
+    raw_host = str(proxy.get("host") or "").strip()
+    resolver = resolve_proxy if resolve_proxy is not None else resolve_proxy_endpoint
+    hop = resolver(raw_host)
+    if not is_numeric_ip(hop):
+        raise ValueError(
+            "OPSEC DNS cannot be routed: proxy host %s resolved to %r, "
+            "which is not a numeric IP (proxychains-ng requires one in "
+            "[ProxyList])." % (raw_host, hop)
+        )
+    hop_write = hop
+    if ":" in hop and not hop.startswith("["):
+        hop_write = "[%s]" % hop
+    note = ""
+    if raw_host and raw_host != hop and not is_numeric_ip(raw_host):
+        note = (
+            "# local proxy endpoint %s resolved to %s "
+            "(compose DNS, not the target)\n" % (raw_host, hop)
+        )
     path.write_text(
-        "strict_chain\nproxy_dns\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n"
-        "[ProxyList]\n%s %s %s%s\n" % (kind, proxy["host"], port, extra),
+        "%sstrict_chain\nproxy_dns\ntcp_read_time_out 15000\ntcp_connect_time_out 8000\n"
+        "[ProxyList]\n%s %s %s%s\n" % (note, kind, hop_write, port, extra),
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -419,12 +508,15 @@ def plan_job_dns(
     *,
     mount_ok: bool | None = None,
     proxychains_bin: str | None | bool = True,
+    resolve_proxy: Any = None,
 ) -> dict[str, Any]:
     """Decide how this job will resolve names.
 
     proxychains_bin: True = look up on PATH, False/None = missing,
     a string = that binary.
     mount_ok: None = probe, else the forced probe result (for tests).
+    resolve_proxy: optional callable(host) -> numeric IP; default is
+    resolve_proxy_endpoint. Injected in tests so they do not need Docker DNS.
     """
     job_dir = Path(job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -477,10 +569,28 @@ def plan_job_dns(
             plan["via"] = flat["type"] if flat["type"] != "http" else "http_proxy"
             plan["label"] = dns_label(plan["via"])
             return plan
-        conf = write_proxychains_conf(job_dir, flat)
+        try:
+            conf = write_proxychains_conf(job_dir, flat, resolve_proxy=resolve_proxy)
+        except ValueError as e:
+            plan["ok"] = False
+            plan["error"] = str(e)
+            plan["via"] = flat["type"] if flat["type"] != "http" else "http_proxy"
+            plan["label"] = dns_label(plan["via"])
+            return plan
         plan["use_proxychains"] = True
         plan["proxychains_conf"] = str(conf)
         plan["prefix"] = [pc_bin, "-f", str(conf), "-q"]
+        plan["proxy_endpoint_host"] = flat["host"]
+        try:
+            hop = Path(conf).read_text(encoding="utf-8")
+            plan["proxy_endpoint_ip"] = ""
+            for line in hop.splitlines():
+                parts = line.split()
+                if parts and parts[0] in {"http", "socks5", "socks4"}:
+                    plan["proxy_endpoint_ip"] = parts[1].strip("[]")
+                    break
+        except OSError:
+            plan["proxy_endpoint_ip"] = ""
         if flat["type"] == "tor":
             plan["via"] = "tor"
             plan["resolver"] = "TOR %s:%s" % (flat["host"], flat["port"])

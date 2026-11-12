@@ -30,11 +30,13 @@ RUN apt-get update \
         tesseract-ocr-eng \
         poppler-utils \
  && rm -rf /var/lib/apt/lists/*
-# util-linux provides unshare (per-job resolv.conf via a user+mount namespace,
-# and a network-less namespace for webcrack). DoH uses the in-tree Python stub
-# (scripts/site_clone_dns_stub.py): Debian bookworm has no maintained
-# lightweight DoH package (no cloudflared, no AdGuard dnsproxy, no doh-client).
-# No SYS_ADMIN is required; see docker-compose.flowsint.yml for AppArmor.
+# util-linux provides unshare (per-job resolv.conf via a user+mount namespace).
+# DoH uses the in-tree Python stub (scripts/site_clone_dns_stub.py): Debian
+# bookworm has no maintained lightweight DoH package (no cloudflared, no
+# AdGuard dnsproxy, no doh-client). No SYS_ADMIN is required; see
+# docker-compose.flowsint.yml for AppArmor. webcrack under OPSEC runs in
+# the site-clone-deobf service (same image, network_mode: none), not via
+# unshare --net, which is often blocked in this container.
 # tesseract-ocr + tesseract-ocr-eng (English traineddata) OCR cloned images
 # after the mirror; poppler-utils (pdftoppm / pdftotext) rasterizes
 # image-based PDFs. The step is fail-open if a binary is missing.
