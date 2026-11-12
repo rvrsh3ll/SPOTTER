@@ -210,6 +210,163 @@ w.fetchJson = async (url, opts) => {
   ok(/objectives:\s*\{[\s\S]*organizations:\s*objNormaliseOrgs\(o\.organizations\)/.test(src),
      'the import allowlist includes organizations');
 
+  /* ── 8. domain helpers and Enrich Domain on additional org cards ─────────── */
+  section('objParseDomains / objOrgDomains / objCampaignDomains');
+  ok(JSON.stringify(w.objParseDomains('partner.test · https://www.careers.partner.test · hr@partner.test'))
+       === JSON.stringify(['partner.test', 'careers.partner.test']),
+     'domains, URLs and emails collapse to unique hostnames',
+     JSON.stringify(w.objParseDomains('partner.test · https://www.careers.partner.test · hr@partner.test')));
+  ok(w.objParseDomains('192.168.1.0/24 not-a-host').length === 0,
+     'IPs and bare tokens are ignored', JSON.stringify(w.objParseDomains('192.168.1.0/24 not-a-host')));
+  const campDomains = w.objCampaignDomains({
+    targetType: 'organization', targetName: 'Primary Inc', companyEmail: 'a@primary.com',
+    additionalIds: 'https://intranet.primary.com',
+    organizations: [{ name: 'Second Ltd', domains: 'second.com', emails: 'hr@second.com',
+                      urls: 'https://careers.second.com' }],
+  });
+  ok(campDomains[0] === 'primary.com', 'company-email domain is first', campDomains);
+  ok(campDomains.includes('intranet.primary.com') && campDomains.includes('second.com')
+     && campDomains.includes('careers.second.com'),
+     'additional identifiers and org domains follow', campDomains.join(','));
+  const match = w.objOrgForDomain('second.com', {
+    targetType: 'organization', targetName: 'Primary Inc', companyEmail: 'a@primary.com',
+    organizations: [{ name: 'Second Ltd', domains: 'second.com', emails: 'hr@second.com' }],
+  });
+  ok(match && match.name === 'Second Ltd' && !match.primary,
+     'objOrgForDomain returns the additional org, not the primary', JSON.stringify(match));
+
+  section('ENRICH DOMAIN on an additional organization card');
+  setupCampaign({ targetType: 'organization', targetName: 'Primary Inc',
+    additionalIds: '', companyEmail: 'a@primary.com', missionStatement: '', socialRegions: [],
+    organizations: [{ name: 'Second Ltd', domains: 'second.com', emails: 'hr@second.com',
+                      urls: 'https://second.com', tech: 'Okta', notes: 'partner' }] });
+  w.loadObjectivesForm();
+  const enrichBtn = [...d.querySelectorAll('[data-obj-org] button')]
+    .find(b => /ENRICH DOMAIN/i.test(b.textContent || ''));
+  ok(!!enrichBtn, 'each additional org card has an ENRICH DOMAIN button',
+     [...d.querySelectorAll('[data-obj-org] button')].map(b => b.textContent).join(' | '));
+  ok([...d.querySelectorAll('[data-obj-org] button')]
+      .some(b => /Send URLs to Active/i.test(b.textContent || '')),
+     'the existing Send URLs to Active button is still on the card');
+
+  let enrichCaptured = [];
+  w.fetchJson = async (url, opts) => {
+    if (String(url).includes('/webhook/domain-recon')) {
+      const body = JSON.parse(opts.body);
+      enrichCaptured.push(body);
+      return { domain: body.domain, errors: [] };
+    }
+    if (String(url).includes('list-campaigns')) return { campaigns: [] };
+    return {};
+  };
+  await w.runDomainReconFromOrgCard(enrichBtn);
+  ok(enrichCaptured.length >= 1, 'ENRICH DOMAIN on the org card called domain-recon',
+     enrichCaptured.length);
+  if (enrichCaptured[0]) {
+    ok(enrichCaptured[0].domain === 'second.com',
+       'against the additional org domain, not the primary', enrichCaptured[0].domain);
+    ok(enrichCaptured[0].company_name === 'Second Ltd',
+       'WF13 is seeded with that org\'s name, not the primary', enrichCaptured[0].company_name);
+    ok(enrichCaptured[0].company_email === 'hr@second.com',
+       'and that org\'s email', enrichCaptured[0].company_email);
+    ok(Array.isArray(enrichCaptured[0].organizations)
+       && enrichCaptured[0].organizations.some(o => o.name === 'Primary Inc')
+       && enrichCaptured[0].organizations.some(o => o.name === 'Second Ltd'),
+       'the full organizations list is still sent',
+       JSON.stringify((enrichCaptured[0].organizations || []).map(o => o.name)));
+  }
+  ok(d.getElementById('tb-analysis').classList.contains('on'),
+     'ENRICH DOMAIN switches to the Live Analysis tab');
+  ok(w._drFocusDomain === 'second.com',
+     'the Domain Recon panel focuses the enriched domain', w._drFocusDomain);
+
+  section('Domain Recon panel works without a company email');
+  setupCampaign({ targetType: 'individual', targetName: 'A Person',
+    additionalIds: '', companyEmail: '', missionStatement: '', socialRegions: [],
+    organizations: [{ name: 'Only Org', domains: 'only.com' }] });
+  w._drFocusDomain = '';
+  w.sw('analysis');
+  w.initDomainRecon();
+  const nd = d.getElementById('dr-nodomain');
+  ok(!nd || nd.style.display === 'none',
+     'no-domain banner stays hidden when an additional org has a domain',
+     nd && nd.style.display);
+  const empty = d.getElementById('dr-empty');
+  ok(empty && empty.style.display === 'block' && /only\.com/.test(empty.innerHTML),
+     'the empty state names the additional org domain', empty && empty.innerHTML);
+  ok(w._drActiveDomain() === 'only.com',
+     'Domain Recon falls back to the additional org domain', w._drActiveDomain());
+
+  section('runDomainRecon(null) uses the focused domain, not only the company email');
+  setupCampaign({ targetType: 'organization', targetName: 'Primary Inc',
+    companyEmail: 'a@primary.com', socialRegions: [],
+    organizations: [{ name: 'Second Ltd', domains: 'second.com' }] });
+  w._drFocusDomain = 'second.com';
+  let focused = null;
+  w.fetchJson = async (url, opts) => {
+    if (String(url).includes('/webhook/domain-recon')) {
+      focused = JSON.parse(opts.body);
+      return { domain: focused.domain, errors: [] };
+    }
+    if (String(url).includes('list-campaigns')) return { campaigns: [] };
+    return {};
+  };
+  await w.runDomainRecon(null, ['dns']);
+  ok(focused && focused.domain === 'second.com',
+     'DOMAIN RECON with no override enriches the focused additional-org domain',
+     focused && focused.domain);
+  ok(focused && focused.company_name === 'Second Ltd',
+     'and still seeds that org\'s name', focused && focused.company_name);
+
+  setupCampaign({ targetType: 'organization', targetName: 'Primary Inc',
+    companyEmail: 'a@primary.com', socialRegions: [],
+    organizations: [{ name: 'Second Ltd', domains: 'second.com' }] });
+  w._drFocusDomain = '';
+  let primaryBody = null;
+  w.fetchJson = async (url, opts) => {
+    if (String(url).includes('/webhook/domain-recon')) {
+      primaryBody = JSON.parse(opts.body);
+      return { domain: primaryBody.domain, errors: [] };
+    }
+    if (String(url).includes('list-campaigns')) return { campaigns: [] };
+    return {};
+  };
+  await w.runDomainRecon(null, ['dns']);
+  ok(primaryBody && primaryBody.domain === 'primary.com',
+     'without a focus, DOMAIN RECON still uses the primary company-email domain',
+     primaryBody && primaryBody.domain);
+  ok(primaryBody && primaryBody.company_name === 'Primary Inc',
+     'and the legacy primary company_name is unchanged', primaryBody && primaryBody.company_name);
+
+  section('domain picker after two cached recons');
+  const camp = JSON.parse(w.localStorage.getItem('s.activeCamp'));
+  w.localStorage.setItem('s.domainRecon', JSON.stringify([
+    { id: 'r2', campaignId: camp.id, domain: 'second.com', timestamp: '2026-11-12T12:00:00Z', dns_a: ['1.2.3.4'] },
+    { id: 'r1', campaignId: camp.id, domain: 'primary.com', timestamp: '2026-11-12T11:00:00Z', dns_a: ['9.9.9.9'] },
+  ]));
+  w._drFocusDomain = 'second.com';
+  w.initDomainRecon();
+  const chips = [...d.querySelectorAll('#dr-domain-picks .dr-dom-chip')].map(c => c.textContent.trim());
+  ok(chips.includes('primary.com') && chips.includes('second.com'),
+     'the Domain Recon header lists both campaign domains', chips.join(','));
+  ok([...d.querySelectorAll('#dr-domain-picks .dr-dom-chip.on')].some(c => c.textContent.indexOf('second.com') !== -1),
+     'the focused domain chip is marked on');
+  ok(w._currentDomainRecon() && w._currentDomainRecon().domain === 'second.com',
+     'the panel shows the focused record, not only the newest',
+     w._currentDomainRecon() && w._currentDomainRecon().domain);
+  w.selectDrDomain('primary.com');
+  ok(w._currentDomainRecon() && w._currentDomainRecon().domain === 'primary.com',
+     'clicking a chip switches the visible recon record',
+     w._currentDomainRecon() && w._currentDomainRecon().domain);
+
+  const osint = w._toolOsintRecon({ section: 'summary', domain: 'second.com' });
+  ok(osint && osint.domain === 'second.com',
+     'get_osint_recon accepts a domain argument', osint && osint.domain);
+  ok(osint && Array.isArray(osint.cached_domains)
+     && osint.cached_domains.includes('second.com')
+     && osint.cached_domains.includes('primary.com'),
+     'and reports every cached domain', osint && JSON.stringify(osint.cached_domains));
+
   console.log(`\n${failures ? 'FAILED' : 'PASSED'}: ${checks - failures}/${checks} checks`);
   process.exit(failures ? 1 : 0);
 })();

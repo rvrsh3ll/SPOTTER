@@ -380,6 +380,35 @@ ok(typeof w.acloneSendSelectedAssets === 'function', 'acloneSendSelectedAssets i
        e && e.message);
   }
 
+  section('Prompt inventory and search_intel see Site Clone findings');
+  setupCampaign();
+  w.acloneSaveJobs([{
+    id: 'sc-inv', url: 'https://example.com', status: 'done',
+    finding_count: 2, summary: { email: 1, js_secret: 1 },
+    findings: [
+      { category: 'email', value: 'osint@example.com', severity: 'medium', source_path: 'index.html' },
+      { category: 'js_secret', value: 'sk-***REDACTED***', severity: 'high', source_path: 'deobf/app.js' },
+    ],
+    ingested: { ok: true, written: 3, emails: 1, credentials: 1,
+      site_rag: { ok: true, chunks_indexed: 4, pages: 2, collection: 'company_site__sk-1' } },
+  }]);
+  const inv = w.spotterDataInventory();
+  const cloneItem = inv.items.find(i => /Site Clone/.test(i.source));
+  ok(!!cloneItem, 'the campaign inventory includes a Site Clone item');
+  ok(cloneItem && cloneItem.status === 'AVAILABLE',
+     'a finished clone is marked AVAILABLE', cloneItem && cloneItem.status);
+  ok(cloneItem && /3 sketch nodes/.test(cloneItem.detail) && /Prompt index 4 chunks/.test(cloneItem.detail),
+     'it reports sketch ingest and the Prompt index', cloneItem && cloneItem.detail);
+  ok(cloneItem && /does not start Domain Recon/.test(cloneItem.detail),
+     'it says Site Clone does not auto-run Domain Recon');
+
+  const hits = [];
+  // _toolSearchIntel is async and walks stores itself; call it.
+  const res = await w._toolSearchIntel({ query: 'osint@example.com', limit: 12 });
+  const found = JSON.stringify(res);
+  ok(/osint@example.com/.test(found) && /site_clone/.test(found),
+     'search_intel finds an email on a finished clone job', found.slice(0, 500));
+
   console.log(`\n${failures ? 'FAILED' : 'PASSED'}: ${checks - failures}/${checks} checks`);
   process.exit(failures ? 1 : 0);
 })();

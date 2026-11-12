@@ -1836,6 +1836,14 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
 .se-social a:hover { border-color: var(--data); color: var(--text); background: rgba(61,143,188,.14); }
 
 /* ── Domain Recon ─────────────────────────────────────────────────────── */
+.dr-dom-picks { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.dr-dom-chip {
+  font-family: var(--mono); font-size: 9px; color: var(--data);
+  padding: 1px 7px; border: 1px solid rgba(61,143,188,.25); border-radius: 1px;
+  background: transparent; cursor: pointer;
+}
+.dr-dom-chip.on { background: rgba(61,143,188,.16); border-color: var(--data); color: var(--text); }
+.dr-dom-chip.dr-dom-pending { color: var(--dim); border-style: dashed; }
 .dr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .dr-card { background: var(--surface); border: 1px solid var(--border); border-radius: 2px; padding: 12px 14px; }
 .dr-card-title { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px;
@@ -2058,6 +2066,11 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
           and the Analysis LLM read the combined list to surface links and relationships
           between the organizations, their people and their technology stacks. The primary
           target defined above is always treated as the first organization.
+          Each additional organization has its own <strong>ENRICH DOMAIN</strong> action,
+          the same domain OSINT run as the primary Company Email button, and
+          <strong>Send URLs to Active</strong> to clone a site. Results for every
+          enriched domain appear in Live Analysis &rsaquo; Domain Recon; switch
+          domains there when more than one has been run.
         </span>
         <div id="obj-orgs"></div>
         <button class="btn" type="button" id="obj-add-org" onclick="objAddOrgCard()" style="margin-bottom:6px;">Add organization</button>
@@ -2774,6 +2787,7 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
       <div class="ti-section" style="margin-top:8px;">Domain Recon
         <span style="display:flex;gap:8px;align-items:center;">
           <span id="dr-domain-badge" style="font-family:var(--mono);font-size:9px;color:var(--data);padding:1px 7px;border:1px solid rgba(61,143,188,.25);border-radius:1px;display:none;"></span>
+          <span id="dr-domain-picks" class="dr-dom-picks" style="display:none;"></span>
           <span id="dr-cache-age" style="font-family:var(--mono);font-size:8px;color:var(--dim);letter-spacing:.06em;" aria-live="polite"></span>
           <div class="act-dd">
             <button class="btn btn-p" id="dr-run" onclick="toggleDrMenu(event)" title="Choose which OSINT sources to enrich for this domain">DOMAIN RECON &#9662;</button>
@@ -2797,10 +2811,10 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
       </div>
 
       <div id="dr-nodomain" class="wbar" style="display:none;">
-        No domain set — add a <strong>Company Email Address</strong> in the <strong>Objectives</strong> tab and use the <strong>ENRICH DOMAIN</strong> button, or click <strong>Run Domain Recon</strong> once a domain is configured.
+        No domain set — add a <strong>Company Email Address</strong> or an <strong>Additional Target Organization</strong> with a domain in the <strong>Objectives</strong> tab, then use <strong>ENRICH DOMAIN</strong> on that target, or click <strong>Domain Recon</strong> once a domain is configured.
       </div>
       <div id="dr-empty" class="obar" style="display:none;">
-        No domain recon data yet — click <strong>Run Domain Recon</strong> or use <strong>ENRICH DOMAIN</strong> in the Objectives tab.
+        No domain recon data yet — click <strong>Domain Recon</strong> or use <strong>ENRICH DOMAIN</strong> on the primary company email or an additional organization in the Objectives tab.
       </div>
       <div id="dr-content"></div>
 
@@ -12075,11 +12089,14 @@ function _capField(v, limit) {
 }
 
 /* ── per-campaign store accessors ─────────────────────────────────── */
+/* Domain the Domain Recon panel (and get_osint_recon) is focused on.
+   Empty means: the campaign's primary company-email domain, else the first
+   configured org domain, else the newest cached recon record.
+   A var (not let) so the binding is visible on window for the picker and tests. */
+var _drFocusDomain = '';
+
 function _activeRecon() {
-  const ac = getActiveCamp();
-  if (!ac) return null;
-  const recs = getDomainRecons().filter(r => r.campaignId === ac.id);
-  return recs.length ? recs[0] : null;
+  return (typeof _currentDomainRecon === 'function') ? _currentDomainRecon() : null;
 }
 function _activeTechIntel() {
   const rec = getTechIntelStore()[tiCampKey()];
@@ -12168,6 +12185,9 @@ function spotterDataInventory() {
     detail: recon
       ? [
           'domain ' + (recon.domain || '?'),
+          (typeof _drCampaignRecons === 'function' && _drCampaignRecons().length > 1
+            ? (_drCampaignRecons().length + ' domains cached: ' + _drCampaignRecons().map(r => r.domain).filter(Boolean).join(', '))
+            : null),
           'collected ' + (age(recon.timestamp) || 'unknown'),
           (recon.subdomains || []).length + ' subdomains',
           (recon.ct_total || 0) + ' CT certs',
@@ -12176,8 +12196,8 @@ function spotterDataInventory() {
           (recon.flare_exposed_creds || 0) + ' exposed creds',
           _credMatchCount(recon).total + ' credential matches',
           ((recon.web_assets || []).length + (recon.cloud_assets || []).length) + ' external assets',
-        ].join(', ')
-      : 'No domain recon has been run for this campaign — the operator runs it from the Analysis tab (DOMAIN RECON button).',
+        ].filter(Boolean).join(', ')
+      : 'No domain recon has been run for this campaign — the operator runs it from the Analysis tab (DOMAIN RECON button) or ENRICH DOMAIN on a primary or additional organization in Objectives.',
   });
 
   items.push({
@@ -12233,6 +12253,28 @@ function spotterDataInventory() {
         (new Blob([t]).size / 1024).toFixed(1) + ' KB',
       ].join(', ');
     })(),
+  });
+
+  const cloneJobs = (typeof acloneGetJobs === 'function') ? acloneGetJobs() : [];
+  const cloneDone = cloneJobs.filter(j => j.status === 'done');
+  items.push({
+    source: 'Site Clone (Active tab / WF32: HTTrack mirror, offline findings, sketch ingest, Prompt-tab company-site index)',
+    tool: 'search_intel; graph tools (search_entities / run_cypher); Open WebUI Ask the Company Website',
+    status: cloneDone.length ? 'AVAILABLE' : (cloneJobs.length ? 'PENDING' : 'EMPTY'),
+    detail: cloneDone.length
+      ? cloneDone.slice(0, 8).map(j => {
+          const rag = (j.ingested && j.ingested.site_rag) || j.site_rag || {};
+          const ingest = j.ingested && j.ingested.ok
+            ? ((j.ingested.written || 0) + ' sketch nodes')
+            : (j.ingested && j.ingested.error ? ('ingest error: ' + j.ingested.error) : 'findings in the Active job card; sketch ingest not confirmed');
+          return (j.url || 'clone') + ' — ' + (j.finding_count || 0) + ' findings, ' + ingest
+            + (rag.ok && rag.chunks_indexed ? ', Prompt index ' + rag.chunks_indexed + ' chunks' : '');
+        }).join('; ')
+        + (cloneDone.length > 8 ? ' (+' + (cloneDone.length - 8) + ' more)' : '')
+        + '. Emails, names, JS secrets, JS endpoints and generator tech are written to the campaign sketch when ingest succeeds; phones, comments and other findings stay on the job card. Re-run Live Analysis or refresh Targets to score newly ingested people. Site Clone does not start Domain Recon by itself.'
+      : (cloneJobs.length
+        ? (cloneJobs.length + ' clone job(s) still running or failed — Open findings appears on a finished job in the Active tab.')
+        : 'No finished site clone for this campaign — the operator runs it from the Active tab.'),
   });
 
   items.push({
@@ -12355,15 +12397,21 @@ function _toolOsintRecon(args) {
   // sees the store — see the _scopeIndex block. This tool returned the raw recon
   // record verbatim until 2026-09-07, so an OoS bucket reached the LLM through it
   // even though list_targets had excluded the same asset.
-  const recon = _scrubRecon(_activeRecon());
   const ac    = getActiveCamp();
   if (!ac) return { error: 'No active campaign. The operator must select or create one in the Ingest tab.' };
+  const recs = getDomainRecons().filter(r => r.campaignId === ac.id);
+  const want = String((args && args.domain) || _drFocusDomain || '').replace(/^www\./i, '').toLowerCase().trim();
+  const picked = want ? recs.find(r => String(r.domain || '').toLowerCase() === want) : null;
+  const recon = _scrubRecon(picked || (typeof _currentDomainRecon === 'function' ? _currentDomainRecon() : recs[0] || null));
+  const cachedDomains = recs.map(r => r.domain).filter(Boolean);
   if (!recon) {
     return {
       status: 'empty',
       campaign: ac.name,
-      configured_domain: _companyDomain() || null,
-      message: 'No OSINT / domain recon data is cached for this campaign yet. It is produced by workflow 13 when the operator clicks DOMAIN RECON in the Analysis tab (or ENRICH DOMAIN in Objectives). Tell the operator that — do not report it as "no access".',
+      configured_domain: (typeof _drActiveDomain === 'function' ? _drActiveDomain() : _companyDomain()) || null,
+      configured_domains: (typeof objCampaignDomains === 'function' ? objCampaignDomains(ac.objectives || {}) : []).slice(0, 25),
+      cached_domains: cachedDomains,
+      message: 'No OSINT / domain recon data is cached for this campaign yet. It is produced by workflow 13 when the operator clicks DOMAIN RECON in the Analysis tab, or ENRICH DOMAIN on the primary company email or an additional organization in Objectives. Tell the operator that — do not report it as "no access".',
     };
   }
 
@@ -12393,6 +12441,7 @@ function _toolOsintRecon(args) {
     section,
     domain: recon.domain,
     collected: recon.timestamp,
+    cached_domains: cachedDomains,
     data: out,
     available_sections: Object.keys(OSINT_SECTIONS).concat(['all']),
     keys_present: allKeys,
@@ -12700,9 +12749,34 @@ async function _toolSearchIntel(args) {
 
   // Every store is scrubbed before it is walked: a keyword sweep that reached into
   // the raw record would hand the model the very rows the other tools drop.
-  const recon = _activeRecon();
-  if (recon) scan('osint_domain_recon', 'get_osint_recon', _scrubRecon(recon));
-  else skipped.push('osint_domain_recon (no domain recon run yet)');
+  const acSearch = getActiveCamp();
+  const allRecons = acSearch ? getDomainRecons().filter(r => r.campaignId === acSearch.id) : [];
+  if (allRecons.length) {
+    allRecons.slice(0, 8).forEach(r => {
+      const label = r.domain ? ('osint_domain_recon[' + r.domain + ']') : 'osint_domain_recon';
+      scan(label, 'get_osint_recon', _scrubRecon(r));
+    });
+  } else {
+    skipped.push('osint_domain_recon (no domain recon run yet)');
+  }
+
+  const cloneJobs = (typeof acloneGetJobs === 'function') ? acloneGetJobs() : [];
+  const cloneDone = cloneJobs.filter(j => j.status === 'done');
+  if (cloneDone.length) {
+    cloneDone.slice(0, 8).forEach(j => {
+      const slim = {
+        url: j.url, status: j.status, finding_count: j.finding_count,
+        summary: j.summary, ingested: j.ingested,
+        findings: (j.findings || []).slice(0, 200).map(f => ({
+          category: f && f.category, value: f && f.value,
+          severity: f && f.severity, source_path: f && f.source_path,
+        })),
+      };
+      scan('site_clone[' + (j.url || j.id || 'job') + ']', 'search_intel', slim);
+    });
+  } else {
+    skipped.push('site_clone (no finished Site Clone job yet)');
+  }
 
   const tech = _activeTechIntel();
   if (tech) scan('tech_inventory', 'get_tech_intel', _scrubTech(tech.data));
@@ -12917,11 +12991,12 @@ const SPOTTER_TOOLS = [
     type: 'function',
     function: {
       name: 'get_osint_recon',
-      description: 'OSINT / external recon for the campaign domain (workflow 13): DNS records, WHOIS/registrar, subdomains, certificate transparency, Shodan ports and vulns, FOFA hosts, Flare breach intel and exposed credentials, LinkedIn company data, discovered web/cloud assets and their owners. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
+      description: 'OSINT / external recon for a campaign domain (workflow 13): DNS records, WHOIS/registrar, subdomains, certificate transparency, Shodan ports and vulns, FOFA hosts, Flare breach intel and exposed credentials, LinkedIn company data, discovered web/cloud assets and their owners. A campaign may have one cached record per domain (primary company email and any additional organizations that were enriched). Pass "domain" to read a specific one; otherwise the Domain Recon panel\'s focused domain is used. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
       parameters: {
         type: 'object',
         properties: {
           section: { type: 'string', description: 'summary | dns | subdomains | certificates | shodan | fofa | breaches | credentials | company | assets | social | errors | all' },
+          domain:  { type: 'string', description: 'Optional domain whose cached recon to read (defaults to the focused Domain Recon domain)' },
           query:   { type: 'string', description: 'Optional keyword filter applied to list entries' },
           limit:   { type: 'integer', description: 'Max entries per list (default 25)' },
         },
@@ -14666,6 +14741,87 @@ function objAllOrganizations(obj) {
   return out;
 }
 
+/* Unique hostnames from a free-text domains / emails / URLs field.
+   IPs and bare tokens without a lettered suffix are ignored. */
+function objParseDomains(text) {
+  const out = [];
+  const seen = new Set();
+  String(text || '').split(/[\s,;·•|/]+/).forEach(tok => {
+    tok = String(tok || '').trim();
+    if (!tok) return;
+    let host = '';
+    if (tok.indexOf('@') >= 0) {
+      host = tok.slice(tok.lastIndexOf('@') + 1);
+    } else {
+      try {
+        const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(tok) ? tok : ('https://' + tok);
+        host = (new URL(withScheme)).hostname || '';
+      } catch {
+        host = tok.replace(/^https?:\/\//i, '').split('/')[0];
+      }
+    }
+    host = String(host || '').replace(/^www\./i, '').toLowerCase().replace(/\.$/, '').split(':')[0];
+    if (!host || host.indexOf('.') < 1) return;
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return;
+    if (/[^a-z0-9.-]/.test(host) || !/[a-z]/.test(host)) return;
+    if (seen.has(host)) return;
+    seen.add(host);
+    out.push(host);
+  });
+  return out;
+}
+
+function objOrgDomains(org) {
+  org = org || {};
+  return objParseDomains([org.domains, org.emails, org.urls].filter(Boolean).join(' '));
+}
+
+/* Every domain configured on the campaign: company email first, then
+   additional identifiers, then each organization card. */
+function objCampaignDomains(obj) {
+  obj = obj || {};
+  const seen = new Set();
+  const out = [];
+  const add = (d) => { if (d && !seen.has(d)) { seen.add(d); out.push(d); } };
+  objParseDomains(obj.companyEmail || '').forEach(add);
+  objParseDomains(obj.additionalIds || '').forEach(add);
+  objAllOrganizations(obj).forEach(o => objOrgDomains(o).forEach(add));
+  return out;
+}
+
+function objOrgForDomain(domain, obj) {
+  domain = String(domain || '').replace(/^www\./i, '').toLowerCase().trim();
+  if (!domain) return null;
+  const orgs = objAllOrganizations(obj || {});
+  const exact = orgs.find(o => objOrgDomains(o).includes(domain));
+  if (exact) return exact;
+  return orgs.find(o => objOrgDomains(o).some(d =>
+    domain === d || domain.endsWith('.' + d) || d.endsWith('.' + domain))) || null;
+}
+
+function objReadForm() {
+  return {
+    targetType:       document.querySelector('input[name="targetType"]:checked')?.value || 'individual',
+    targetName:       (document.getElementById('obj-name')?.value || '').trim(),
+    additionalIds:    (document.getElementById('obj-ids')?.value || '').trim(),
+    companyEmail:     (document.getElementById('obj-company-email')?.value || '').trim(),
+    missionStatement: (document.getElementById('obj-mission')?.value || '').trim(),
+    socialRegions:    objSocialRegions(),
+    organizations:    objReadOrgCards(),
+  };
+}
+
+function objSaveFormQuiet() {
+  const ac = getActiveCamp();
+  if (!ac) return false;
+  if (saveObjectivesToCamp(ac.id, objReadForm())) {
+    const dirtyEl = document.getElementById('obj-dirty');
+    if (dirtyEl) dirtyEl.style.display = 'none';
+    return true;
+  }
+  return false;
+}
+
 function objOrgCardHtml(o) {
   o = o || {};
   const field = (k, label, ph) =>
@@ -14681,7 +14837,10 @@ function objOrgCardHtml(o) {
     + field('urls', 'URLs', 'https://example.com \u00b7 https://careers.example.com')
     + field('tech', 'Technologies', 'Okta \u00b7 Microsoft 365 \u00b7 Palo Alto')
     + field('notes', 'Notes', 'Relationship to the primary target, shared vendors, etc.')
-    + '<div class="obj-save-row"><button type="button" class="btn" onclick="acloneSendFromOrgCard(this)">Send URLs to Active</button></div>'
+    + '<div class="obj-save-row" style="flex-wrap:wrap;">'
+    + '<button type="button" class="btn" onclick="runDomainReconFromOrgCard(this)"'
+    + ' title="Save objectives and run domain OSINT against this organization\'s domains — results appear in Live Analysis › Domain Recon">ENRICH DOMAIN</button>'
+    + '<button type="button" class="btn" onclick="acloneSendFromOrgCard(this)">Send URLs to Active</button></div>'
     + '</div>';
 }
 
@@ -14916,9 +15075,45 @@ function acloneSendFromOrgCard(btn) {
   acloneSend(first, 'Objectives');
 }
 
+const OBJ_ORG_ENRICH_MAX = 5;
+
+function runDomainReconFromOrgCard(btn) {
+  const card = btn && btn.closest('[data-obj-org]');
+  if (!card) return;
+  const rec = {};
+  OBJ_ORG_FIELDS.forEach(k => {
+    const el = card.querySelector('.oo-' + k);
+    rec[k] = (el && el.value ? el.value : '').trim();
+  });
+  const domains = objOrgDomains(rec);
+  if (!domains.length) {
+    toast('Add a domain, email, or URL on this organization first', 'err');
+    return;
+  }
+  const ac = getActiveCamp();
+  if (!ac) { toast('No active campaign — create one first', 'err'); return; }
+  objSaveFormQuiet();
+  const run = domains.slice(0, OBJ_ORG_ENRICH_MAX);
+  const extra = domains.length - run.length;
+  _drFocusDomain = run[0];
+  sw('analysis');
+  return (async () => {
+    for (let i = 0; i < run.length; i++) {
+      _drFocusDomain = run[i];
+      await runDomainRecon(run[i], ['all']);
+    }
+    if (extra > 0) {
+      toast('Enriched the first ' + run.length + ' domains on this organization; '
+        + extra + ' more were skipped. Edit the domain list or switch domain in Live Analysis to run the rest.', 'inf');
+    }
+  })();
+}
+
 function acloneSendFromDomainRecon() {
-  const badge = document.getElementById('dr-domain-badge');
-  const domain = (badge && badge.textContent.trim()) || (typeof _companyDomain === 'function' && _companyDomain()) || '';
+  const domain = (typeof _drActiveDomain === 'function' && _drActiveDomain())
+    || (document.getElementById('dr-domain-badge') && document.getElementById('dr-domain-badge').textContent.trim())
+    || (typeof _companyDomain === 'function' && _companyDomain())
+    || '';
   if (!domain) { toast('No domain to clone — run Domain Recon or set Objectives first', 'err'); return; }
   acloneSend(domain, 'Domain Recon');
 }
@@ -15357,16 +15552,7 @@ function objDirty() {
 function saveObjectives() {
   const ac = getActiveCamp();
   if (!ac) { toast('No active campaign', 'err'); return; }
-  const obj = {
-    targetType:       document.querySelector('input[name="targetType"]:checked')?.value || 'individual',
-    targetName:       document.getElementById('obj-name').value.trim(),
-    additionalIds:    document.getElementById('obj-ids').value.trim(),
-    companyEmail:     document.getElementById('obj-company-email').value.trim(),
-    missionStatement: document.getElementById('obj-mission').value.trim(),
-    socialRegions:    objSocialRegions(),
-    organizations:    objReadOrgCards(),
-  };
-  if (saveObjectivesToCamp(ac.id, obj)) {
+  if (saveObjectivesToCamp(ac.id, objReadForm())) {
     document.getElementById('obj-dirty').style.display = 'none';
     toast('Objectives saved', 'ok');
   } else {
@@ -17408,10 +17594,74 @@ function buildAnalysisReport(a) {
 
 /* ── Domain Recon / Asset Ownership export dispatchers ───────────────── */
 
+function _drCampaignRecons() {
+  const ac = getActiveCamp();
+  if (!ac) return [];
+  return getDomainRecons().filter(r => r.campaignId === ac.id);
+}
+
+function _drKnownDomains() {
+  const ac = getActiveCamp();
+  const seen = new Set();
+  const out = [];
+  const add = (d) => {
+    d = String(d || '').replace(/^www\./i, '').toLowerCase().trim();
+    if (!d || seen.has(d)) return;
+    seen.add(d);
+    out.push(d);
+  };
+  if (ac) objCampaignDomains(ac.objectives || {}).forEach(add);
+  _drCampaignRecons().forEach(r => add(r.domain));
+  return out;
+}
+
+function _drActiveDomain() {
+  const known = _drKnownDomains();
+  const focus = String(_drFocusDomain || '').replace(/^www\./i, '').toLowerCase().trim();
+  if (focus && (known.includes(focus) || _drCampaignRecons().some(r => String(r.domain || '').toLowerCase() === focus))) {
+    return focus;
+  }
+  const primary = (_companyDomain() || '').replace(/^www\./i, '').toLowerCase().trim();
+  if (primary) return primary;
+  return known[0] || '';
+}
+
+function selectDrDomain(domain) {
+  _drFocusDomain = String(domain || '').replace(/^www\./i, '').toLowerCase().trim();
+  initDomainRecon();
+}
+
+function _renderDrDomainPicks() {
+  const picks = document.getElementById('dr-domain-picks');
+  const badge = document.getElementById('dr-domain-badge');
+  const known = _drKnownDomains();
+  const have = new Set(_drCampaignRecons().map(r => String(r.domain || '').toLowerCase()));
+  const cur = _drActiveDomain();
+  if (badge) {
+    badge.textContent = cur;
+    badge.style.display = (cur && known.length <= 1) ? '' : 'none';
+  }
+  if (!picks) return;
+  if (known.length <= 1) { picks.style.display = 'none'; picks.innerHTML = ''; return; }
+  picks.style.display = '';
+  picks.innerHTML = known.map(d => {
+    const on = d === cur ? ' on' : '';
+    const pending = have.has(d) ? '' : ' dr-dom-pending';
+    return '<button type="button" class="dr-dom-chip' + on + pending
+      + '" onclick="selectDrDomain(\'' + esc(d) + '\')">'
+      + esc(d) + (have.has(d) ? '' : ' · not run') + '</button>';
+  }).join('');
+}
+
 function _currentDomainRecon() {
   const ac = getActiveCamp();
   if (!ac) return null;
-  const recs = getDomainRecons().filter(r => r.campaignId === ac.id);
+  const recs = _drCampaignRecons();
+  const want = _drActiveDomain();
+  if (want) {
+    const hit = recs.find(r => String(r.domain || '').toLowerCase() === want);
+    if (hit) return hit;
+  }
   return recs[0] || null;
 }
 
@@ -19002,6 +19252,7 @@ function _setDrCacheAge(ts) {
 function initDomainRecon() {
   const ac      = getActiveCamp();
   const badge   = document.getElementById('dr-domain-badge');
+  const picks   = document.getElementById('dr-domain-picks');
   const ndEl    = document.getElementById('dr-nodomain');
   const emptyEl = document.getElementById('dr-empty');
   const contEl  = document.getElementById('dr-content');
@@ -19013,20 +19264,20 @@ function initDomainRecon() {
     if (emptyEl) { emptyEl.style.display = 'none'; }
     if (contEl)  { contEl.innerHTML = ''; }
     if (badge)   { badge.style.display = 'none'; badge.textContent = ''; }
+    if (picks)   { picks.style.display = 'none'; picks.innerHTML = ''; }
     _setDrCacheAge(null);
     return;
   }
 
-  const domain = _companyDomain();
-  const recs   = getDomainRecons().filter(r => r.campaignId === ac.id);
+  const domain = _drActiveDomain();
+  const rec    = _currentDomainRecon();
+  _renderDrDomainPicks();
 
-  if (recs.length) {
-    const latest = recs[0];
-    if (badge)   { badge.textContent = latest.domain || domain; badge.style.display = latest.domain ? '' : 'none'; }
+  if (rec) {
     if (ndEl)    ndEl.style.display   = 'none';
     if (emptyEl) emptyEl.style.display = 'none';
-    renderDomainRecon(latest);
-    _setDrCacheAge(latest.timestamp);
+    renderDomainRecon(rec);
+    _setDrCacheAge(rec.timestamp);
   } else if (!domain) {
     if (badge)   { badge.style.display = 'none'; }
     if (ndEl)    { ndEl.style.display = 'block'; }
@@ -19034,9 +19285,12 @@ function initDomainRecon() {
     if (contEl)  { contEl.innerHTML = ''; }
     _setDrCacheAge(null);
   } else {
-    if (badge)   { badge.textContent = domain; badge.style.display = ''; }
     if (ndEl)    { ndEl.style.display = 'none'; }
-    if (emptyEl) { emptyEl.style.display = 'block'; emptyEl.innerHTML = 'No domain recon data yet — click <strong>Run Domain Recon</strong> or use <strong>ENRICH DOMAIN</strong> in the Objectives tab.'; }
+    if (emptyEl) {
+      emptyEl.style.display = 'block';
+      emptyEl.innerHTML = 'No domain recon data yet for <strong>' + esc(domain)
+        + '</strong> — click <strong>Domain Recon</strong> or use <strong>ENRICH DOMAIN</strong> on the primary company email or an additional organization in the Objectives tab.';
+    }
     if (contEl)  { contEl.innerHTML = ''; }
     _setDrCacheAge(null);
   }
@@ -19045,31 +19299,15 @@ function initDomainRecon() {
 async function runDomainReconFromObjectives() {
   const emailEl = document.getElementById('obj-company-email');
   const email   = (emailEl?.value || '').trim();
-  const at      = email.indexOf('@');
-  const domain  = (at >= 0 ? email.slice(at + 1) : email).toLowerCase().trim();
+  const parsed  = objParseDomains(email);
+  const domain  = (parsed[0] || (email.indexOf('@') >= 0 ? email.slice(email.indexOf('@') + 1) : email).toLowerCase().trim());
   if (!domain) {
     toast('Enter a Company Email Address first — the domain will be extracted from it', 'err');
     return;
   }
   // Auto-save current objectives form state before switching tabs
-  const ac = getActiveCamp();
-  if (ac) {
-    const obj = {
-      targetType:       document.querySelector('input[name="targetType"]:checked')?.value || 'individual',
-      targetName:       (document.getElementById('obj-name')?.value || '').trim(),
-      additionalIds:    (document.getElementById('obj-ids')?.value || '').trim(),
-      companyEmail:     email,
-      missionStatement: (document.getElementById('obj-mission')?.value || '').trim(),
-      // Read from the form, not from the stored campaign: this save is a full
-      // overwrite of objectives, so a field omitted here is a field erased.
-      socialRegions:    objSocialRegions(),
-      organizations:    objReadOrgCards(),
-    };
-    if (saveObjectivesToCamp(ac.id, obj)) {
-      const dirtyEl = document.getElementById('obj-dirty');
-      if (dirtyEl) dirtyEl.style.display = 'none';
-    }
-  }
+  if (getActiveCamp()) objSaveFormQuiet();
+  _drFocusDomain = domain.replace(/^www\./i, '').toLowerCase();
   sw('analysis');
   await runDomainRecon(domain, ['all']);
 }
@@ -19084,7 +19322,8 @@ async function runDomainRecon(domainOverride, sources) {
   const ac = getActiveCamp();
   if (!ac) { toast('No active campaign — create one first', 'err'); return; }
 
-  const domain = (domainOverride || _companyDomain() || '').trim().replace(/^www\./i, '');
+  const domain = (domainOverride || _drActiveDomain() || _companyDomain() || '').trim().replace(/^www\./i, '');
+  if (domain) _drFocusDomain = domain;
 
   const btn     = document.getElementById('dr-run');
   const badge   = document.getElementById('dr-domain-badge');
@@ -19129,28 +19368,31 @@ async function runDomainRecon(domainOverride, sources) {
         domain,
         campaign_id:   ac.id,
         target_type:   ac.objectives?.targetType || '',
-        company_email: ac.objectives?.companyEmail || '',
-        /* The org source's name seed. Only meaningful when the campaign is
-           aimed at an organization -- for an individual target, obj.targetName
-           is a person, and searching a job board for it would look up the wrong
-           kind of entity entirely. WF13 falls back to the LinkedIn company name,
-           then the WHOIS registrant, then the domain label. */
-        company_name:  (ac.objectives?.targetType === 'organization'
-                          ? (ac.objectives?.targetName || '') : ''),
-        /* Additional Identifiers, and they matter more than the name does.
-           They were never sent -- WF13 got `company_name` and a `company_email`
-           it did not even read -- so a campaign that had told SPOTTER the
-           target's second domain and its legal entity searched on the trading
-           name alone and adopted whatever came back. Sent verbatim: WF13 splits
-           them and sorts the domain-shaped ones from the name-shaped ones,
-           because that decision needs the same parser the matcher uses. Also
-           only for an organization target, for the same reason as above. */
-        additional_ids: (ac.objectives?.targetType === 'organization'
-                          ? (ac.objectives?.additionalIds || '') : ''),
+        /* Seed identity from the organization that owns this domain when the
+           operator enriched an additional org card; otherwise keep the legacy
+           primary-target fields so existing single-org campaigns are unchanged.
+           Additional orgs are always treated as organizations, even if the
+           campaign target type is individual. */
+        ...(() => {
+          const obj = ac.objectives || {};
+          const org = objOrgForDomain(domain, obj);
+          if (org && !org.primary) {
+            const email = String(org.emails || '').split(/[\s,;]+/).map(t => t.trim()).find(Boolean) || '';
+            return {
+              company_email: email,
+              company_name:  org.name || '',
+              additional_ids: [org.notes, org.domains, org.urls, org.tech].filter(Boolean).join(', '),
+            };
+          }
+          return {
+            company_email: obj.companyEmail || '',
+            company_name:  (obj.targetType === 'organization' ? (obj.targetName || '') : ''),
+            additional_ids: (obj.targetType === 'organization' ? (obj.additionalIds || '') : ''),
+          };
+        })(),
         /* The full organization list for broader campaigns. The primary org
-           above (company_name / additional_ids / company_email) is element 0;
-           any additional organizations follow, so WF13 can look across them
-           for shared domains, people and technologies. */
+           (company_name / additional_ids / company_email) is element 0 when
+           this run is for the primary domain; additional organizations follow. */
         organizations: objAllOrganizations(ac.objectives || {}),
         sources,
       })),
