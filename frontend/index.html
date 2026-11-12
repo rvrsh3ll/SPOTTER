@@ -1104,6 +1104,7 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 .aclone-find-tbl { width:100%; font-size:11px; margin-top:8px; }
 .aclone-find-tbl td, .aclone-find-tbl th { padding:3px 6px; text-align:left; vertical-align:top; border-bottom:1px solid var(--border); }
 .aclone-src-btn { margin-left:6px; font-size:9px; padding:1px 6px; }
+.aclone-job-err { color:var(--warn); font-size:10px; margin-top:4px; white-space:pre-wrap; word-break:break-word; }
 #aclone-src-modal .ilm-pre { max-height:60vh; overflow:auto; white-space:pre-wrap; word-break:break-all; }
 #aclone-src-modal .aclone-src-focus { background:rgba(255, 200, 80, .18); display:block; }
 #aclone-src-modal .aclone-src-n { color:var(--dim); -webkit-user-select:none; user-select:none; }
@@ -1283,13 +1284,13 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 .ilog-act .btn-rm { padding: 3px 7px; color: var(--dim); }
 
 /* ── file view modal ─────────────────────────────────────────────── */
-#ilog-modal, #camp-pw-modal, #cfg-modal {
+#ilog-modal, #camp-pw-modal, #cfg-modal, #aclone-src-modal {
   position: fixed; inset: 0;
   background: rgba(13,15,22,.88); backdrop-filter: blur(2px);
   display: flex; align-items: center; justify-content: center;
   z-index: 200;
 }
-#ilog-modal.hidden, #camp-pw-modal.hidden, #cfg-modal.hidden { display: none; }
+#ilog-modal.hidden, #camp-pw-modal.hidden, #cfg-modal.hidden, #aclone-src-modal.hidden { display: none; }
 .ilm-inner {
   background: var(--surface); border: 1px solid var(--border); border-radius: 3px;
   width: min(760px, 94vw); max-height: 82vh;
@@ -3030,7 +3031,7 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
 
 <!-- ── Ingested file view modal ──────────────────────────────────── -->
 <div id="aclone-src-modal" class="hidden" role="dialog" aria-modal="true" aria-label="View recovered source"
-     onclick="if(event.target===this)acloneCloseSource()">
+     tabindex="-1" onclick="if(event.target===this)acloneCloseSource()">
   <div class="ilm-inner">
     <div class="ilm-hdr">
       <div>
@@ -15006,7 +15007,7 @@ function acloneRender() {
       + '<span style="font-family:var(--mono);font-size:9px;color:var(--dim);">' + esc(meta || (prog.files ? ('in progress · ' + prog.files + ' files') : '')) + '</span>'
       + actions.join('')
       + '</div>'
-      + (j.error ? '<div style="color:var(--warn);font-size:10px;margin-top:4px;">' + esc(j.error) + '</div>' : '')
+      + (j.error ? '<div class="aclone-job-err">' + esc(j.error) + '</div>' : '')
       + ((j.warnings && j.warnings.length)
         ? '<div style="color:var(--warn);font-size:10px;margin-top:4px;">' + esc(j.warnings.join(' · ')) + '</div>'
         : '')
@@ -15023,10 +15024,30 @@ function acloneCanViewSource(f) {
 
 function acloneCloseSource() {
   const modal = document.getElementById('aclone-src-modal');
-  if (modal) modal.classList.add('hidden');
+  if (modal) {
+    modal.classList.add('hidden');
+    if (modal._acloneSrcKey) {
+      modal.removeEventListener('keydown', modal._acloneSrcKey);
+      modal._acloneSrcKey = null;
+    }
+  }
   const pre = document.getElementById('aclone-src-content');
   if (pre) pre.textContent = '';
 }
+
+function acloneSourceKeydown(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    acloneCloseSource();
+  }
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('aclone-src-modal');
+  if (modal && !modal.classList.contains('hidden')) acloneSourceKeydown(e);
+});
 
 async function acloneViewSource(btn) {
   const ac = getActiveCamp();
@@ -15043,7 +15064,14 @@ async function acloneViewSource(btn) {
   if (title) title.textContent = path;
   if (meta) meta.textContent = 'Loading…';
   if (pre) pre.textContent = '';
-  if (modal) modal.classList.remove('hidden');
+  if (modal) {
+    modal.classList.remove('hidden');
+    if (!modal._acloneSrcKey) {
+      modal._acloneSrcKey = acloneSourceKeydown;
+      modal.addEventListener('keydown', modal._acloneSrcKey);
+    }
+    try { modal.focus(); } catch (e) {}
+  }
   try {
     const data = await fetchJson(apiUrl('site-clone'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

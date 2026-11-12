@@ -91,6 +91,56 @@ off = site_clone.build_httrack_argv(
     site_clone.normalize_options({"robots": False, "sameHost": True, "external": "none"}),
 )
 ok("-s0" in off, "robots override uses -s0")
+ok("--max-time" in argv, "passes overall timeout")
+
+section("HTTrack User-Agent cap")
+short = "Mozilla/5.0 (compatible; short)"
+got, warn = site_clone.sanitize_httrack_ua(short)
+ok(got == short and warn == "", "short UA is passed through unchanged", (got, warn))
+long_ua = "Mozilla/5.0 (" + ("X" * 200) + ")"
+got, warn = site_clone.sanitize_httrack_ua(long_ua)
+ok(got == site_clone.HTTRACK_SHORT_UA, "over-long UA is replaced with a short browser UA", got)
+ok(len(got) <= site_clone.HTTRACK_UA_MAX, "replacement UA is within the HTTrack limit", len(got))
+ok(warn == "OPSEC User-Agent truncated for HTTrack (%d→%d chars)" % (
+        len(long_ua), len(site_clone.HTTRACK_SHORT_UA)),
+   "warning names the original and replacement lengths", warn)
+ctrl, ctrl_w = site_clone.sanitize_httrack_ua("Mozilla/5.0\nEvil")
+ok("\n" not in ctrl and "Mozilla/5.0 Evil" == ctrl and ctrl_w == "",
+   "control characters are stripped from the UA", ctrl)
+
+argv_long = site_clone.build_httrack_argv(
+    "https://example.com/", Path("/tmp/clone-ua"),
+    site_clone.normalize_options({}),
+    user_agent=long_ua,
+)
+ok("-F" in argv_long and site_clone.HTTRACK_SHORT_UA in argv_long
+   and long_ua not in argv_long,
+   "HTTrack argv uses the short UA, not the over-long OPSEC UA")
+
+err_ua = site_clone.classify_httrack_failure(1, False, "* User-agent length too long\n")
+ok("User-agent length too long" in err_ua and "Last log:" in err_ua
+   and "exit 1" in err_ua,
+   "UA-length failure is surfaced from the log, not a bare fetched-no-files",
+   err_ua)
+err_ref = site_clone.classify_httrack_failure(1, False, "connection refused", used_proxy=True)
+ok("connection refused via the SOCKS/TOR proxy" in err_ref,
+   "proxy connection-refused gets a specific hint", err_ref)
+err_rob = site_clone.classify_httrack_failure(0, False, "Error: link disallowed by robots.txt")
+ok("robots.txt" in err_rob and "Follow robots.txt" in err_rob,
+   "robots denial is classified with a retry hint", err_rob)
+tmp_logs = Path(tempfile.mkdtemp(prefix="spotter-hts-log-"))
+try:
+    (tmp_logs / "httrack.log").write_text("* User-agent length too long\n", encoding="utf-8")
+    text = site_clone.collect_httrack_logs(tmp_logs, tmp_logs / "mirror")
+    ok("User-agent length too long" in text,
+       "collect_httrack_logs reads the job-root httrack.log when there is no hts-log.txt")
+    (tmp_logs / "mirror").mkdir()
+    (tmp_logs / "mirror" / "hts-log.txt").write_text("Error: HTTP 403 Forbidden\n", encoding="utf-8")
+    text2 = site_clone.collect_httrack_logs(tmp_logs, tmp_logs / "mirror")
+    ok("User-agent length too long" in text2 and "403" in text2,
+       "collect_httrack_logs also reads mirror/hts-log.txt when present")
+finally:
+    shutil.rmtree(tmp_logs, ignore_errors=True)
 
 section("analyzer fixture")
 report = an.analyze_tree(FIX, "https://example.com/")
@@ -582,6 +632,24 @@ try:
     ok(dns.resolve_proxy_endpoint("8.8.8.8") == "8.8.8.8",
        "numeric proxy IPs are not looked up again")
 
+    ok(dns.is_proxychains_fake_ip("224.0.0.1") and dns.is_proxychains_fake_ip("224.1.2.3")
+       and not dns.is_proxychains_fake_ip("1.2.3.4")
+       and not dns.is_proxychains_fake_ip("8.8.8.8"),
+       "proxychains-ng proxy_dns stubs are 224.0.0.0/8")
+    published, berr = dns.filter_preflight_answers(["224.0.0.1"], use_proxychains=True)
+    ok(published == [] and berr == "",
+       "224.0.0.1 from a TOR/SOCKS preflight is an expected proxy_dns stub, not a failure",
+       (published, berr))
+    published_r, berr_r = dns.filter_preflight_answers(["224.0.0.1"], use_proxychains=False)
+    ok(published_r == [] and "non-routable" in berr_r and "224.0.0.1" in berr_r,
+       "the same multicast address is fail-closed on the resolver path", berr_r)
+    published_0, berr_0 = dns.filter_preflight_answers(["0.0.0.0"], use_proxychains=False)
+    ok(berr_0 and "0.0.0.0" in berr_0,
+       "0.0.0.0 from a resolver is fail-closed", berr_0)
+    published_ok, berr_ok = dns.filter_preflight_answers(["77.88.8.8", "224.0.0.1"], use_proxychains=False)
+    ok(published_ok == ["77.88.8.8"] and berr_ok == "",
+       "a usable resolver answer is kept and a multicast extra is dropped")
+
     # run_clone refuses before starting httrack
     fake_ht = tmp / "httrack"
     fake_ht.write_text("#!/bin/sh\necho should-not-run\nexit 0\n")
@@ -623,6 +691,84 @@ try:
     ok((result_ov.get("dns") or {}).get("label") == "Docker (override)",
        "run_clone records Docker (override) on the job", result_ov.get("dns"))
 finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+section("run_clone surfaces HTTrack log and caps the UA")
+tmp = Path(tempfile.mkdtemp(prefix="spotter-hts-fail-"))
+old_path = os.environ.get("PATH", "")
+orig_which = site_clone.shutil.which
+try:
+    fake_dir = tmp / "bin"
+    fake_dir.mkdir()
+    fake_ht = fake_dir / "httrack"
+    fake_ht.write_text(
+        "#!/bin/sh\n"
+        "echo '* User-agent length too long'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_ht.chmod(fake_ht.stat().st_mode | stat.S_IEXEC)
+    os.environ["PATH"] = str(fake_dir) + os.pathsep + old_path
+
+    def _which(name):
+        if name == "httrack":
+            return str(fake_ht)
+        if name in {"proxychains4", "proxychains"}:
+            return None
+        return orig_which(name)
+    site_clone.shutil.which = _which
+
+    result = site_clone.run_clone(
+        "https://example.com/", tmp / "job-ua",
+        options={"respectOpsec": True, "allowDockerDns": True,
+                 "deobfuscate": False, "ocr": False, "maxTime": 15},
+        opsec={"user_agent": "Y" * 200},
+    )
+    err = result.get("error") or ""
+    warns = result.get("warnings") or []
+    ok(result.get("ok") is False and result.get("files") == 0,
+       "over-long UA job is not reported as success")
+    ok("User-agent length too long" in err,
+       "job error includes the httrack.log line, not only 'fetched no files'",
+       err)
+    ok(any("OPSEC User-Agent truncated for HTTrack" in w for w in warns),
+       "job warnings record the UA substitution", warns)
+    ok(result.get("httrack_log_tail") and "User-agent length too long" in result["httrack_log_tail"],
+       "httrack_log_tail is returned on the job", result.get("httrack_log_tail"))
+
+    # Second job: fake httrack writes a file and records -F
+    cap = tmp / "argv.txt"
+    fake_ht.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "argv = sys.argv[1:]\n"
+        "Path(%r).write_text('\\n'.join(sys.argv))\n"
+        "out = Path(argv[argv.index('-O')+1])\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'index.html').write_text('<html>ok</html>')\n"
+        % str(cap),
+        encoding="utf-8",
+    )
+    fake_ht.chmod(fake_ht.stat().st_mode | stat.S_IEXEC)
+    result2 = site_clone.run_clone(
+        "https://example.com/", tmp / "job-ua2",
+        options={"respectOpsec": True, "allowDockerDns": True,
+                 "deobfuscate": False, "ocr": False, "maxTime": 15},
+        opsec={"user_agent": "Z" * 180},
+    )
+    recorded = cap.read_text(encoding="utf-8") if cap.is_file() else ""
+    ok(result2.get("ok") is True and (result2.get("files") or 0) >= 1,
+       "clone succeeds when HTTrack is given the short UA", result2.get("error"))
+    ok(site_clone.HTTRACK_SHORT_UA in recorded and ("Z" * 180) not in recorded,
+       "HTTrack was invoked with the short browser UA", recorded)
+    ok(any("OPSEC User-Agent truncated for HTTrack (180→" in w
+           for w in (result2.get("warnings") or [])),
+       "successful job still warns about the UA substitution",
+       result2.get("warnings"))
+finally:
+    site_clone.shutil.which = orig_which
+    os.environ["PATH"] = old_path
     shutil.rmtree(tmp, ignore_errors=True)
 
 section("DNS stub helpers (no network)")

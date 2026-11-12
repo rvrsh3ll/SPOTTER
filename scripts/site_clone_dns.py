@@ -786,6 +786,85 @@ def stop_stub(proc: subprocess.Popen | None, spec: dict[str, Any] | None = None)
                 pass
 
 
+def is_proxychains_fake_ip(ip: str) -> bool:
+    """True if ip is in proxychains-ng's default proxy_dns fake subnet.
+
+    proxychains-ng intercepts getaddrinfo when proxy_dns is set and returns
+    an address in remote_dns_subnet (default 224.0.0.0/8). 224.0.0.1 from
+    a TOR/SOCKS preflight is therefore expected — it is not the target's
+    address and is not a poisoned SOCKS DNS answer. Origin DNS still
+    happens at the proxy (SOCKS5 ATYP 3).
+    """
+    h = (ip or "").strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    try:
+        packed = socket.inet_pton(socket.AF_INET, h)
+    except OSError:
+        return False
+    return packed[0] == 224
+
+
+def is_bogus_resolver_ip(ip: str) -> bool:
+    """True for an address that is not a usable public or private unicast IP.
+
+    Used on the non-proxychains resolver path (plain nameservers / DoH),
+    where 0.0.0.0, multicast (224/4), reserved 240/4, or the unspecified
+    IPv6 address would mean the configured resolver is unusable.
+    """
+    h = (ip or "").strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if not h:
+        return True
+    try:
+        packed = socket.inet_pton(socket.AF_INET, h)
+        first = packed[0]
+        if first >= 224:  # 224/4 multicast, 240/4 reserved, 255.255.255.255
+            return True
+        if packed == b"\x00\x00\x00\x00":
+            return True
+        return False
+    except OSError:
+        pass
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, h)
+    except OSError:
+        return True
+    if packed == b"\x00" * 16:
+        return True
+    # IPv6 multicast ff00::/8
+    if packed[0] == 0xFF:
+        return True
+    return False
+
+
+def filter_preflight_answers(
+    answers: list[str],
+    use_proxychains: bool,
+) -> tuple[list[str], str]:
+    """Return (answers to publish, error if the job must fail-closed).
+
+    When proxychains proxy_dns is in use, 224.0.0.0/8 answers are fake
+    stubs and are not published as target IPs. When it is not, a result
+    made only of non-routable addresses is fail-closed.
+    """
+    answers = [str(a) for a in (answers or []) if str(a).strip()]
+    if use_proxychains:
+        real = [a for a in answers if not is_proxychains_fake_ip(a)]
+        return real, ""
+    usable = [a for a in answers if not is_bogus_resolver_ip(a)]
+    if answers and not usable:
+        shown = ", ".join(answers[:4])
+        return [], (
+            "OPSEC DNS cannot be routed: the resolver returned a non-routable "
+            "or multicast address (%s). Pick different Infrastructure DNS "
+            "resolvers, or use a SOCKS/TOR proxy."
+            % shown
+        )
+    return usable, ""
+
+
 def preflight_resolve(host: str, prefix: list[str], env: dict[str, str] | None = None,
                       timeout: float = 8.0) -> tuple[bool, list[str], str]:
     """Resolve host through the same wrapper the clone will use."""

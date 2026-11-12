@@ -283,6 +283,34 @@ ok(typeof w.acloneSendSelectedAssets === 'function', 'acloneSendSelectedAssets i
          'dialog states the snippet is not executed', meta && meta.textContent);
       w.acloneCloseSource();
       ok(modal.classList.contains('hidden'), 'View source dialog can be closed');
+      const cssText = [...d.styleSheets].flatMap((sheet) => {
+        try { return [...sheet.cssRules].map((r) => r.cssText || ''); }
+        catch (e) { return []; }
+      }).join('\n');
+      ok(/#aclone-src-modal\.hidden/.test(cssText) && /display:\s*none/.test(cssText),
+         'View source modal CSS hides #aclone-src-modal.hidden with display:none');
+      ok(w.getComputedStyle(modal).display === 'none',
+         'closed View source modal is actually display:none (not a stuck overlay)',
+         w.getComputedStyle(modal).display);
+
+      await w.acloneViewSource(d.querySelector('.aclone-src-btn'));
+      ok(!modal.classList.contains('hidden') && w.getComputedStyle(modal).display !== 'none',
+         'View source modal is visible after reopen');
+      const xBtn = modal.querySelector('.ilm-close');
+      ok(!!xBtn, 'View source modal has an X close button');
+      xBtn.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+      ok(modal.classList.contains('hidden') && w.getComputedStyle(modal).display === 'none',
+         'X button closes the View source modal');
+
+      await w.acloneViewSource(d.querySelector('.aclone-src-btn'));
+      d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      ok(modal.classList.contains('hidden') && w.getComputedStyle(modal).display === 'none',
+         'Escape closes the View source modal');
+
+      await w.acloneViewSource(d.querySelector('.aclone-src-btn'));
+      modal.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+      ok(modal.classList.contains('hidden') && w.getComputedStyle(modal).display === 'none',
+         'clicking the backdrop closes the View source modal');
     } finally {
       w.fetchJson = origFetchJson;
     }

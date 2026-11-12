@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from site_clone_analyze import analyze_clone_outputs
 from site_clone_deobfuscate import deobfuscate_tree
 from site_clone_dns import (
+    filter_preflight_answers,
     normalize_proxy,
     plan_job_dns,
     preflight_resolve,
@@ -74,6 +75,14 @@ DEFAULTS = {
 ALLOWED_SCHEMES = {"http", "https"}
 SAFE_JOB = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 MAX_URL = 2048
+# HTTrack 3.49.x exits immediately with "* User-agent length too long" when
+# -F exceeds ~120 characters (some builds 128). The previous 256-char slice
+# was still too long for typical OPSEC UAs.
+HTTRACK_UA_MAX = 120
+HTTRACK_SHORT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) "
+    "Gecko/20100101 Firefox/128.0"
+)
 
 
 def sanitize_url(url: str) -> str:
@@ -182,6 +191,145 @@ def _registrable(host: str) -> str:
     return host.lower()
 
 
+def sanitize_httrack_ua(user_agent: str) -> tuple[str, str]:
+    """Return (ua for HTTrack -F, warning or "").
+
+    HTTrack 3.49.x rejects a User-Agent longer than HTTRACK_UA_MAX and
+    writes "* User-agent length too long" to the log, then exits with no
+    files. Control characters are stripped. When the OPSEC UA is too long
+    a short browser-like UA is substituted (not mid-string truncated).
+    """
+    raw = (user_agent or "").replace("\r", " ").replace("\n", " ")
+    raw = "".join(ch if ch >= " " else " " for ch in raw)
+    raw = re.sub(r" {2,}", " ", raw).strip()
+    if not raw:
+        return "", ""
+    if len(raw) <= HTTRACK_UA_MAX:
+        return raw, ""
+    short = HTTRACK_SHORT_UA
+    warn = "OPSEC User-Agent truncated for HTTrack (%d→%d chars)" % (
+        len(raw), len(short),
+    )
+    return short, warn
+
+
+def collect_httrack_logs(job_dir: Path, mirror: Path | None = None) -> str:
+    """Join captured stdout (job_dir/httrack.log) and HTTrack's own log files.
+
+    HTTrack only writes mirror/hts-log.txt after a project starts. A
+    start-up rejection (for example a too-long User-Agent) appears only
+    in the stdout capture at the job root.
+    """
+    paths = [
+        Path(job_dir) / "httrack.log",
+        Path(job_dir) / "hts-log.txt",
+    ]
+    if mirror is not None:
+        paths.extend([
+            Path(mirror) / "hts-log.txt",
+            Path(mirror) / "hts-err.txt",
+        ])
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if text.strip():
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def httrack_log_tail(text: str, max_lines: int = 16, max_chars: int = 700) -> str:
+    lines = []
+    for raw in (text or "").splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        lines.append(ln[:240])
+    tail = lines[-max_lines:]
+    out = " | ".join(tail)
+    if len(out) > max_chars:
+        out = out[-max_chars:]
+    return out.strip()
+
+
+def classify_httrack_failure(
+    exit_code: int | None,
+    timed_out: bool,
+    log_text: str,
+    used_proxy: bool = False,
+) -> str:
+    """Human-readable reason when HTTrack wrote no files, including a log tail."""
+    low = (log_text or "").lower()
+    tail = httrack_log_tail(log_text)
+    if timed_out:
+        summary = "clone timed out or hit a cap"
+        prefix = summary
+    elif "user-agent length too long" in low:
+        summary = (
+            "HTTrack rejected the User-Agent as too long "
+            "(limit is %d characters). SPOTTER substitutes a short browser "
+            "User-Agent when the OPSEC UA exceeds that limit"
+            % HTTRACK_UA_MAX
+        )
+        prefix = "HTTrack fetched no files: " + summary
+    elif re.search(r"disallowed by robots|forbidden by robots", low):
+        summary = (
+            "the site disallowed this crawler in robots.txt. "
+            "Uncheck Follow robots.txt and retry, or use an Infrastructure "
+            "User-Agent the site allows"
+        )
+        prefix = "HTTrack fetched no files: " + summary
+    elif re.search(r"\b403\b|access denied|forbidden", low):
+        summary = (
+            "the site returned HTTP 403. Try a different Infrastructure "
+            "User-Agent, or the TOR/proxy exit may be blocked"
+        )
+        prefix = "HTTrack fetched no files: " + summary
+    elif re.search(r"connection refused|connect refused", low):
+        if used_proxy:
+            summary = (
+                "connection refused via the SOCKS/TOR proxy. Check that the "
+                "tunnel or Tor client is running and the SOCKS port is up"
+            )
+        else:
+            summary = "connection refused"
+        prefix = "HTTrack fetched no files: " + summary
+    elif re.search(
+        r"network is unreachable|no route to host|could not connect|"
+        r"unable to connect|connect failed",
+        low,
+    ):
+        if used_proxy:
+            summary = "could not connect through the SOCKS/TOR proxy"
+        else:
+            summary = "could not connect to the site"
+        prefix = "HTTrack fetched no files: " + summary
+    elif re.search(r"unrecognized option|unknown option|invalid option", low):
+        prefix = "HTTrack fetched no files: HTTrack rejected a command-line option"
+    elif re.search(r"ssl|certificate|handshake", low):
+        prefix = "HTTrack fetched no files: TLS/SSL handshake failed"
+    elif re.search(r"timed? ?out", low):
+        prefix = "HTTrack fetched no files: the connection timed out"
+    else:
+        prefix = "HTTrack fetched no files"
+
+    if exit_code not in (None, 0):
+        prefix = prefix + " (exit %s)" % exit_code
+    if tail:
+        prefix = prefix.rstrip(".") + ". Last log: " + tail
+    return prefix[:800]
+
+
 def build_httrack_argv(url: str, out_dir: Path, options: dict[str, Any],
                        user_agent: str = "", proxy: dict[str, Any] | None = None) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +372,7 @@ def build_httrack_argv(url: str, out_dir: Path, options: dict[str, Any],
     if not options["include_other"]:
         argv += ["-*.pdf", "-*.doc", "-*.docx", "-*.xls", "-*.xlsx", "-*.zip", "-*.mp4", "-*.mp3"]
 
-    ua = (user_agent or "").strip()[:256]
+    ua, _ua_warn = sanitize_httrack_ua(user_agent)
     if ua:
         argv += ["-F", ua]
 
@@ -359,8 +507,9 @@ def run_clone(
     log_path = job_dir / "httrack.log"
 
     ua = ""
+    ua_warn = ""
     if options["respect_opsec"] and opsec:
-        ua = str(opsec.get("user_agent") or "")
+        ua, ua_warn = sanitize_httrack_ua(str(opsec.get("user_agent") or ""))
 
     httrack = shutil.which("httrack")
     pre_populated = mirror.exists() and any(mirror.iterdir())
@@ -428,7 +577,26 @@ def run_clone(
                 }
 
         ok_pf, answers, pf_err = preflight_resolve(plan.get("host") or "", plan.get("prefix") or [], env=env)
-        dns = public_dns(plan, answers=answers, preflight_ok=ok_pf, preflight_error=pf_err)
+        published, bogus_err = filter_preflight_answers(
+            answers, use_proxychains=bool(plan.get("use_proxychains")),
+        )
+        if bogus_err:
+            # Non-proxychains path returned only multicast/reserved IPs.
+            # proxychains-ng 224.0.0.0/8 stubs are filtered out, not errors.
+            dns = public_dns(plan, answers=published, preflight_ok=False,
+                             preflight_error=bogus_err)
+            if progress_cb:
+                try:
+                    progress_cb({"stage": "dns", "dns": dns, "files": 0, "bytes": 0,
+                                 "elapsed": int(time.time() - started)})
+                except Exception:
+                    pass
+            return {
+                "ok": False, "error": bogus_err, "url": url,
+                "options": {k: options[k] for k in DEFAULTS},
+                "dns": dns, "warnings": [ua_warn] if ua_warn else [],
+            }
+        dns = public_dns(plan, answers=published, preflight_ok=ok_pf, preflight_error=pf_err)
         if progress_cb:
             try:
                 progress_cb({"stage": "dns", "dns": dns, "files": 0, "bytes": 0,
@@ -497,8 +665,27 @@ def run_clone(
 
         files, nbytes = count_tree_files(mirror)
         report, deobf_meta, warnings = _analyze_job(url, job_dir, mirror, options, progress_cb)
+        warnings = list(warnings or [])
+        if ua_warn:
+            warnings.append(ua_warn)
         if pf_err:
-            warnings = list(warnings or []) + ["DNS preflight: " + pf_err]
+            warnings.append("DNS preflight: " + pf_err)
+        log_text = collect_httrack_logs(job_dir, mirror)
+        log_tail = httrack_log_tail(log_text)
+        used_proxy = bool(plan.get("use_proxychains") or plan.get("use_httrack_p"))
+        if files > 0:
+            err = None
+        else:
+            err = classify_httrack_failure(
+                proc.returncode, timed_out, log_text, used_proxy=used_proxy,
+            )
+            # Also keep the last log lines in warnings so they stay visible
+            # if a later step overwrites error, and on jobs that already
+            # surface warnings on the card.
+            if log_tail and log_tail not in err:
+                warnings.append("HTTrack log: " + log_tail)
+            elif log_tail and "Last log:" not in (err or ""):
+                warnings.append("HTTrack log: " + log_tail)
         return {
             "ok": report.get("ok", False) and files > 0,
             "url": url,
@@ -513,9 +700,8 @@ def run_clone(
             "ocr": report.get("ocr") or {},
             "warnings": warnings,
             "dns": dns,
-            "error": (None if files > 0 else
-                      ("clone timed out or hit a cap" if timed_out else
-                       "HTTrack fetched no files")),
+            "httrack_log_tail": log_tail or None,
+            "error": err,
         }
     finally:
         if stub_proc is not None:
