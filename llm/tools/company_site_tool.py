@@ -148,6 +148,8 @@ class Tools:
             "sketch_id": sk,
             "passages": [{
                 "text": h.get("text", ""),
+                "original": h.get("original") or "",
+                "lang": h.get("lang") or "",
                 "source_url": h.get("url", ""),
                 "page_title": h.get("page_title", ""),
                 "heading": h.get("heading", ""),

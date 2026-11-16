@@ -67,6 +67,44 @@ services:
       retries: 3
       start_period: 20s
 
+  # ── Retrieved-content translation sidecar ─────────────────────────────────
+  # OCR (tesseract) + PDF/DOCX extract + a session-gated front for
+  # scripts/spotter_translate.py. No host port: nginx on :8080 proxies
+  # /translate/ here and overwrites X-Spotter-User. Screenshots are the same
+  # host dir the runners write and spotter-ui serves.
+  translate-api:
+    build:
+      context: ${SPOTTER_HOME}/translate-sidecar
+    container_name: translate-api
+    restart: unless-stopped
+    networks:
+      - flowsint_net
+    environment:
+      SPOTTER_SCRIPTS_DIR: /data/scripts
+      SPOTTER_SCREENSHOTS_DIR: /data/screenshots
+      SPOTTER_CACHE_DIR: /data/spotter-cache
+      VLLM_URL: ${VLLM_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY}
+      VLLM_MODEL: ${VLLM_MODEL:-Qwen/Qwen3.8-27B-FP8}
+      SPOTTER_LLM_BACKEND: ${SPOTTER_LLM_BACKEND:-vllm}
+      TRANSLATE_TESS_LANGS: ${TRANSLATE_TESS_LANGS:-eng+rus+ukr+ara}
+      TRANSLATE_OCR_MAX_PAGES: ${TRANSLATE_OCR_MAX_PAGES:-8}
+      TRANSLATE_ENABLED: ${TRANSLATE_ENABLED:-1}
+      TRANSLATE_TARGET_LANG: ${TRANSLATE_TARGET_LANG:-en}
+      TRANSLATE_MAX_CHARS: ${TRANSLATE_MAX_CHARS:-4000}
+      TRANSLATE_TIMEOUT: ${TRANSLATE_TIMEOUT:-60}
+    volumes:
+      - ${SPOTTER_SCRIPTS_DIR:-${SPOTTER_HOME}/scripts}:/data/scripts:ro
+      - ${SPOTTER_SCREENSHOTS_DIR:-${SPOTTER_HOME}/screenshots}:/data/screenshots
+      - ${SPOTTER_CACHE_DIR:-${SPOTTER_HOME}/.spotter-cache}:/data/spotter-cache
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8052/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # ── Titus credential-scanner sidecar ──────────────────────────────────────
   # Wraps the Titus binary (github.com/praetorian-inc/titus) behind a thin
   # FastAPI endpoint.  n8n workflow 11 calls POST /scan with a multipart file

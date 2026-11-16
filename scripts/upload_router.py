@@ -15,6 +15,7 @@ Supported formats (all from authorized lab / engagement sources):
     ShareACL output    — [shareacl] JSON-lines from the authorized share scanner
   CSV                — Username / email / IP / domain lists
   Cobalt Strike log  — CS team server export or beacon log
+  PDF / DOCX         — extracted via translate-api, indexed for Prompt
   Raw JSON           — Generic entity dict or list
     Plain text         — LLM-assisted entity extraction via the configured backend
 
@@ -124,6 +125,8 @@ def _format_from_zip_names(raw_names: List[str]) -> str:
         norm = n.replace("\\", "/").lower()
         if "screens/" in norm and norm.endswith(".png"):
             return "eyewitness"
+        if norm == "word/document.xml" or norm.endswith("/word/document.xml"):
+            return "docx"
     return "zip_unknown"
 
 
@@ -133,7 +136,7 @@ def detect_format(data: bytes, filename: str = "") -> str:
     """
     Return a format string:
     sharphound | cloudschism | pingcastle | nessus | nmap | amass | shareacl |
-        csv | cobalt | subdomain_jsonl | json | text
+        csv | cobalt | subdomain_jsonl | json | pdf | docx | text
     """
     fname = (filename or "").lower()
 
@@ -147,6 +150,13 @@ def detect_format(data: bytes, filename: str = "") -> str:
                 return "shareacl"
         except Exception:
             pass
+
+    # PDF filings / uploaded documents. Magic first so a misnamed zip is not
+    # swallowed; a .pdf filename with no PK header is still a document.
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    if fname.endswith(".pdf") and data[:2] != b"PK":
+        return "pdf"
 
     # SharpHound — ZIP magic bytes. Member names only: a staged file uses the
     # same classifier via detect_format_path(), so the two paths cannot drift.
@@ -489,6 +499,97 @@ def _parse_nessus(
 # in the runner the env var is not on the allowlist, so it resolves to the default
 # mount path — which is exactly what we want.
 SCREENSHOTS_DIR = os.environ.get("SPOTTER_SCREENSHOTS_DIR", "/data/screenshots")
+
+
+def _parse_document(
+    data: bytes,
+    filename: str,
+    kind: str,
+    sketch_id: Optional[str] = None,
+) -> Tuple[List[dict], List[dict], List[str], Dict[str, Any]]:
+    """Extract PDF/DOCX via the translate sidecar; emit a Document Phrase node.
+
+    The runner cannot import pypdf/python-docx. A down sidecar still produces a
+    node so the upload is visible; text/index is skipped.
+    """
+    errors: List[str] = []
+    nodes: List[dict] = []
+    extracted: Dict[str, Any] = {}
+    try:
+        import spotter_translate as st
+        extracted = st.extract_document_via_sidecar(
+            data, filename or ("upload." + kind))
+    except Exception as exc:  # noqa: BLE001
+        extracted = {"ok": False, "error": repr(exc)[:160], "text": ""}
+    text = str(extracted.get("text") or "")
+    translated = str(extracted.get("translated") or "")
+    lang = str(extracted.get("source_lang") or "")
+    err = str(extracted.get("error") or "")
+    if err and not text:
+        errors.append("document extract: " + err)
+    excerpt = text[:800]
+    label = filename or kind
+    nid = "document:%s" % label
+    nodes.append({
+        "id": nid,
+        "entity_type": "Phrase",
+        "nodeLabel": label,
+        "data": {
+            "label": label,
+            "type": "Document",
+            "filename": filename or "",
+            "kind": kind,
+            "pages": extracted.get("pages") or 0,
+            "excerpt": excerpt,
+            "text_translated": translated[:800] if translated else "",
+            "source_lang": lang,
+            "source": "upload",
+        },
+        "include": True,
+        "node_id": nid,
+    })
+    report: Dict[str, Any] = {
+        "kind": kind,
+        "filename": filename or "",
+        "pages": extracted.get("pages") or 0,
+        "source_lang": lang,
+        "excerpt_chars": len(excerpt),
+        "chunks_indexed": 0,
+    }
+    if text and sketch_id:
+        try:
+            import site_rag
+            from rag_indexer import RAGIndexer
+            ix = RAGIndexer()
+            col = site_rag.collection_name(sketch_id)
+            docs: List[dict] = []
+            for i, ch in enumerate(site_rag.chunk_text(text, size=1500, overlap=200)):
+                try:
+                    import spotter_translate as st
+                    ib = st.index_body(ch["text"], for_ingest=True)
+                except Exception:
+                    ib = {"index_text": ch["text"], "original": ch["text"],
+                          "lang": lang, "translated": ""}
+                md = {
+                    "url": "upload://" + label,
+                    "page_title": label,
+                    "heading": ch.get("heading", ""),
+                    "sketch_id": str(sketch_id),
+                    "chunk_ix": i,
+                    "kind": kind,
+                    "lang": ib.get("lang") or lang,
+                }
+                if ib.get("translated"):
+                    md["original"] = ib.get("original") or ch["text"]
+                docs.append({
+                    "id": "upload:%s#%d" % (label, i),
+                    "text": ib.get("index_text") or ch["text"],
+                    "metadata": md,
+                })
+            report["chunks_indexed"] = ix.index_documents(col, docs)
+        except Exception as exc:  # noqa: BLE001
+            errors.append("document index: %r" % (exc,))
+    return nodes, [], errors, report
 
 
 def _parse_eyewitness(
@@ -1869,6 +1970,10 @@ def route_bytes(
             nodes, edges, ew_errors, report = _parse_eyewitness(
                 data, filename, ingest, sketch_id)
             errors.extend(ew_errors)
+        elif fmt in ("pdf", "docx"):
+            nodes, edges, doc_errors, report = _parse_document(
+                data, filename, fmt, sketch_id)
+            errors.extend(doc_errors)
         elif fmt == "nmap":
             nodes, edges = _parse_nmap(data)
         elif fmt == "amass":

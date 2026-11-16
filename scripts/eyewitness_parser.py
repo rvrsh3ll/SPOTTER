@@ -281,6 +281,15 @@ def _emit_rows(
         }
         if title:
             data_props["title"] = title
+            try:
+                import spotter_translate as st
+                tr = st.translate_text(title, for_ingest=True)
+                if tr.get("translated"):
+                    data_props["title_translated"] = tr["translated"]
+                if tr.get("source_lang"):
+                    data_props["source_lang"] = tr["source_lang"]
+            except Exception:
+                pass
         res.nodes.append({
             "id": wid,
             "entity_type": "Website",
@@ -293,6 +302,13 @@ def _emit_rows(
         res.report["hosts"] += 1
         if screenshot_url:
             res.report["with_screenshot"] += 1
+            if is_high_value:
+                try:
+                    import spotter_translate as st
+                    if st.ocr_on_ingest():
+                        st.ocr_via_sidecar(screenshot_url, sketch_id or "default")
+                except Exception:
+                    pass
         if has_creds:
             res.report["with_default_creds"] += 1
         if is_high_value:

@@ -509,9 +509,40 @@ class RusCorporateClient:
             if not self.budget_exhausted():
                 self.results["courts"] = self.search_courts(person_name)
 
+        _translate_rus_payload(self.results)
         return {
             "results": self.results,
             "errors": self.errors,
             "requests_made": self._requests_made,
             "elapsed_seconds": round(time.time() - self._started, 2),
         }
+
+
+_TRANSLATE_KEYS = (
+    "name", "position", "organization", "status", "customer_name",
+    "subject", "address", "n", "c", "a", "g", "description",
+)
+
+
+def _translate_rus_payload(obj: Any) -> None:
+    """Additive *_translated on free-text fields. Originals stay."""
+    try:
+        import spotter_translate as st
+    except Exception:
+        return
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            try:
+                st.translate_fields(
+                    x, [k for k in _TRANSLATE_KEYS if isinstance(x.get(k), str)],
+                    for_ingest=True)
+            except Exception:
+                pass
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for item in x:
+                walk(item)
+
+    walk(obj)

@@ -932,6 +932,29 @@ class HHClient:
                     out["details"].append(d)
             except HHError as e:
                 self._note(str(e))
+        try:
+            import spotter_translate as st
+            if out.get("profile"):
+                st.translate_fields(out["profile"],
+                                    ["description", "address", "area"],
+                                    for_ingest=True)
+                _inds = [str(x) for x in (out["profile"].get("industries") or []) if x]
+                _tr_inds = []
+                for _ind in _inds[:4]:
+                    _r = st.translate_text(_ind, for_ingest=True)
+                    _tr_inds.append(str(_r.get("translated") or _ind))
+                    if _r.get("source_lang"):
+                        out["profile"].setdefault("source_lang", _r["source_lang"])
+                if _tr_inds and _tr_inds != _inds[:len(_tr_inds)]:
+                    out["profile"]["industries_translated"] = _tr_inds
+            for v in out.get("vacancies") or []:
+                st.translate_fields(v, ["title", "department", "area"],
+                                    for_ingest=True)
+            for d in out.get("details") or []:
+                st.translate_fields(d, ["description", "title", "department"],
+                                    for_ingest=True)
+        except Exception:
+            pass
         return out
 
     @staticmethod

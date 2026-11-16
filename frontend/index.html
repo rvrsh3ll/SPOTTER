@@ -238,6 +238,31 @@ body {
 .qa-bad::after { content: '!'; font-weight: 700; }
 button.qa { background: none; cursor: pointer; }
 #theme-toggle .ico { font-size: 11px; line-height: 1; }
+#tr-toggle.qa-on { border-color: var(--data); color: var(--data); }
+.tr-chip {
+  font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
+  border: 1px solid var(--border); color: var(--dim);
+  padding: 0 4px; border-radius: 2px; flex-shrink: 0; vertical-align: middle;
+}
+.tr-wrap {
+  display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  max-width: 100%; min-width: 0;
+}
+.tr-text { min-width: 0; overflow-wrap: break-word; }
+.tr-orig { color: var(--dim); font-size: 8px; flex-shrink: 0; }
+.tr-orig summary { cursor: pointer; color: var(--dim); list-style: none; }
+.tr-orig summary::-webkit-details-marker { display: none; }
+.web-ocr { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(37,43,58,.4); }
+.web-ocr-btn {
+  font-family: var(--mono); font-size: 9px; letter-spacing: .06em;
+  background: none; color: var(--dim); border: 1px solid var(--border);
+  border-radius: 2px; padding: 3px 9px; cursor: pointer;
+}
+.web-ocr-btn:hover { border-color: var(--data); color: var(--data); }
+.web-ocr-btn:disabled { opacity: .5; cursor: default; }
+.web-ocr-tr { font-size: 10px; line-height: 1.5; margin: 8px 0; color: var(--text); }
+.web-ocr-err { font-size: 9px; color: var(--warn); margin-top: 6px; }
+.web-ocr pre { white-space: pre-wrap; font-size: 9px; color: var(--dim); margin: 6px 0 0; }
 
 
 /* ── workspace ──────────────────────────────────────────────────── */
@@ -1447,6 +1472,8 @@ details.sub-det[open] .sub-sum::before { content: '\25BE  '; }
 .cfg-src.default  { color: var(--dim); }
 .cfg-ctl { flex-shrink: 0; }
 .cfg-ctl input { width: 104px; text-align: right; }
+.cfg-ctl input[type="checkbox"] { width: auto; height: 16px; text-align: left;
+  accent-color: var(--accent); cursor: pointer; margin-top: 4px; }
 .cfg-ctl input:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ── tech intel ──────────────────────────────────────────────────── */
@@ -1928,6 +1955,9 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
     <a class="qa" id="ql-graph" href="https://graph.spotter.localhost:5443" target="_blank" rel="noopener">◈ Graph</a>
     <a class="qa" id="ql-n8n"   href="https://n8n.spotter.localhost:5443" target="_blank" rel="noopener">⎇ Workflows</a>
     <a class="qa" id="ql-chat"  href="https://chat.spotter.localhost:5443" target="_blank" rel="noopener">⬡ Chat</a>
+    <button class="qa" id="tr-toggle" type="button" onclick="toggleTranslate()"
+            title="Show translations of retrieved text" aria-label="Toggle retrieved-text translation"
+            aria-pressed="true">TR</button>
     <button class="qa" id="theme-toggle" type="button" onclick="toggleTheme()"
             title="Toggle light / dark mode" aria-label="Toggle light or dark mode">
       <span class="ico" id="theme-ico" aria-hidden="true">☀</span> <span id="theme-lbl">Light</span>
@@ -3354,6 +3384,48 @@ function toggleTheme() {
   applyThemeUi();
 }
 
+/* Retrieved-content translation. The original string stays in the graph and
+   in exports; this only chooses which one the cards show. Default on. */
+function getTranslateOn() {
+  try {
+    const v = localStorage.getItem('s.translateOn');
+    return v === null ? true : v === '1';
+  } catch (e) { return true; }
+}
+function setTranslateOn(on) {
+  try { localStorage.setItem('s.translateOn', on ? '1' : '0'); } catch (e) {}
+}
+function pinTranslateToggle() {
+  const btn = document.getElementById('tr-toggle');
+  if (!btn) return;
+  const on = getTranslateOn();
+  btn.classList.toggle('qa-on', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  btn.title = on
+    ? 'Showing translations of retrieved text — click to show originals'
+    : 'Showing original retrieved text — click to show translations';
+}
+function toggleTranslate() {
+  setTranslateOn(!getTranslateOn());
+  pinTranslateToggle();
+  try { if (_webCache) renderWeb(); } catch (e) {}
+  try {
+    const d = (typeof _currentDomainRecon === 'function') && _currentDomainRecon();
+    if (d) renderDomainRecon(d);
+  } catch (e) {}
+}
+function _tr(original, translated, lang) {
+  const orig = String(original == null ? '' : original);
+  const trn = String(translated == null ? '' : translated);
+  if (!orig && !trn) return '';
+  const on = getTranslateOn();
+  if (!on || !trn || trn === orig) return esc(orig || trn);
+  const chip = lang
+    ? `<span class="tr-chip" title="Detected source language">${esc(lang)}</span>` : '';
+  return `<span class="tr-wrap"><span class="tr-text">${esc(trn)}</span>${chip}`
+       + `<details class="tr-orig"><summary>original</summary>${esc(orig)}</details></span>`;
+}
+
 /* ── Configuration panel ───────────────────────────────────────────────
    Runtime limits for WF04 (attack path search), WF11 (credential scan),
    WF13 (cloud bucket probe), and the global per-user campaign ownership
@@ -3405,7 +3477,35 @@ function renderConfig(isAdmin) {
   document.getElementById('cfg-body').innerHTML = groups.map(g => `
     <div class="cfg-group">
       <div class="cfg-ghdr">${cfgEsc(g.name)}</div>
-      ${g.rows.map(r => `
+      ${g.rows.map(r => {
+        const choices = Array.isArray(r.choices) ? r.choices : [];
+        const isStr = r.type === 'str' || choices.length;
+        const toggle = !isStr && r.lo === 0 && r.hi === 1;
+        const range = isStr
+          ? `Default ${r.default}${choices.length ? ', one of ' + choices.join(' / ') : ''}.`
+          : toggle
+          ? (r.default ? 'Default on.' : 'Default off.')
+          : `Default ${r.default}, allowed ${r.lo}–${r.hi}.`;
+        const ctl = isStr
+          ? (choices.length
+            ? `<select class="fi-sm" id="cfg-${cfgEsc(r.name)}"
+                       ${isAdmin ? '' : 'disabled'}
+                       aria-label="${cfgEsc(r.label)}">${
+                 choices.map(c => `<option value="${cfgEsc(c)}"${
+                   String(r.value) === String(c) ? ' selected' : ''}>${cfgEsc(c)}</option>`
+                 ).join('')}</select>`
+            : `<input class="fi-sm" type="text" id="cfg-${cfgEsc(r.name)}"
+                      value="${cfgEsc(String(r.value ?? ''))}"
+                      ${isAdmin ? '' : 'disabled'}>`)
+          : toggle
+          ? `<input type="checkbox" id="cfg-${cfgEsc(r.name)}"
+                    ${Number(r.value) ? 'checked' : ''}
+                    ${isAdmin ? '' : 'disabled'}
+                    aria-label="${cfgEsc(r.label)}">`
+          : `<input class="fi-sm" type="number" id="cfg-${cfgEsc(r.name)}"
+                    value="${r.value}" min="${r.lo}" max="${r.hi}"
+                    ${isAdmin ? '' : 'disabled'}>`;
+        return `
         <div class="cfg-row">
           <div>
             <div class="cfg-lbl">${cfgEsc(r.label)}<span
@@ -3413,14 +3513,11 @@ function renderConfig(isAdmin) {
                  title="${r.source === 'override' ? 'Set from this panel'
                         : r.source === 'env' ? 'Pinned in .env for this deployment'
                         : 'Built-in default'}">${cfgEsc(r.source)}</span></div>
-            <div class="cfg-help">${cfgEsc(r.help)} Default ${r.default}, allowed ${r.lo}–${r.hi}.</div>
+            <div class="cfg-help">${cfgEsc(r.help)} ${range}</div>
           </div>
-          <div class="cfg-ctl">
-            <input class="fi-sm" type="number" id="cfg-${cfgEsc(r.name)}"
-                   value="${r.value}" min="${r.lo}" max="${r.hi}"
-                   ${isAdmin ? '' : 'disabled'}>
-          </div>
-        </div>`).join('')}
+          <div class="cfg-ctl">${ctl}</div>
+        </div>`;
+      }).join('')}
     </div>`).join('');
   document.getElementById('cfg-save').style.display = isAdmin ? '' : 'none';
   document.getElementById('cfg-note').textContent = isAdmin
@@ -3436,7 +3533,9 @@ async function saveConfig() {
     const values = {};
     for (const r of CFG_ROWS) {
       const el = document.getElementById('cfg-' + r.name);
-      if (el) values[r.name] = el.value.trim();   // '' clears the override
+      if (!el) continue;
+      if (el.type === 'checkbox') values[r.name] = el.checked ? '1' : '0';
+      else values[r.name] = el.value.trim();   // '' clears the override
     }
     const d = await fetchJson(apiUrl('settings'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3463,6 +3562,7 @@ async function saveConfig() {
 /* ── boot ── */
 document.addEventListener('DOMContentLoaded', () => {
   applyThemeUi();
+  pinTranslateToggle();
   migrateCampaignScope();
   migrateInfraScope();
   reclaimOversizedBackup();
@@ -9282,7 +9382,7 @@ function renderWeb() {
         <div class="web-card-body">
           <div class="web-url">${esc(s.url)} ${oosBadge}</div>
           <div class="web-meta">${fqChip} ${esc(s.resolved || '')} ${cat} ${hv} ${cr}</div>
-          ${s.title ? `<div class="web-title">${esc(s.title)}</div>` : ''}
+          ${s.title ? `<div class="web-title">${_tr(s.title, s.title_translated, s.source_lang)}</div>` : ''}
         </div>
       </button>
       <div class="web-card-body" style="padding-top:0;">${marks}</div>
@@ -9335,7 +9435,11 @@ function openWebDetail(i) {
   const kv = (k, v) => _ddKV(k, (v === null || v === undefined || v === '') ? '—' : String(v));
   let html = '';
   html += shot
-    ? `<div class="web-shot-wrap"><a href="${esc(shot)}" target="_blank" rel="noopener" title="Open full-size in a new tab"><img class="web-shot" src="${esc(shot)}" alt="Screenshot of ${esc(s.url)}" referrerpolicy="no-referrer"></a></div>`
+    ? `<div class="web-shot-wrap"><a href="${esc(shot)}" target="_blank" rel="noopener" title="Open full-size in a new tab"><img class="web-shot" src="${esc(shot)}" alt="Screenshot of ${esc(s.url)}" referrerpolicy="no-referrer"></a></div>
+       <div class="web-ocr" id="web-ocr-panel">
+         <button type="button" class="web-ocr-btn" id="web-ocr-btn" onclick="ocrWebScreenshot(${i})">OCR &amp; translate</button>
+         <div id="web-ocr-body"></div>
+       </div>`
     : `<div class="dev-dm-empty">No screenshot captured for this endpoint (an error row, or deduplicated).</div>`;
 
   html += `<div class="dev-dm-section">Endpoint</div><div class="dev-dm-grid">
@@ -9344,7 +9448,8 @@ function openWebDetail(i) {
     ${kv('Resolved', s.resolved)}
     ${kv('Protocol', s.protocol)}
     ${kv('Port', s.port)}
-    ${kv('Page title', s.title)}
+    <div class="dev-dm-kv"><span class="dev-k">Page title</span><span class="dev-v">${
+      _tr(s.title, s.title_translated, s.source_lang) || '—'}</span></div>
     ${kv('Category', s.category)}
     ${kv('Request status', s.request_status)}
     ${kv('Active', s.active ? 'Yes' : 'No')}
@@ -9367,6 +9472,40 @@ function closeWebDetail() {
   const modal = document.getElementById('web-dm');
   modal.classList.add('hidden');
   if (modal._kh) { modal.removeEventListener('keydown', modal._kh); modal._kh = null; }
+}
+
+async function ocrWebScreenshot(i) {
+  const s = _webRendered[i];
+  if (!s || !s.screenshot_url) return;
+  const sketch = (campScope() || {}).sketch_id || '';
+  if (!sketch) { toast('No campaign sketch — pick a campaign first', 'err'); return; }
+  const btn = document.getElementById('web-ocr-btn');
+  const body = document.getElementById('web-ocr-body');
+  if (btn) { btn.disabled = true; btn.textContent = 'OCR…'; }
+  try {
+    const d = await fetchJson('/translate/ocr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ screenshot_url: s.screenshot_url, sketch_id: sketch }),
+    });
+    if (!body) return;
+    if (!d || d.ok === false) {
+      body.innerHTML = `<div class="web-ocr-err">${esc((d && (d.error || d.skipped)) || 'OCR failed')}</div>`;
+      return;
+    }
+    const orig = d.ocr_text || '';
+    const trn = d.translated || '';
+    body.innerHTML =
+      (d.source_lang ? `<span class="tr-chip">${esc(d.source_lang)}</span>` : '')
+      + (trn ? `<div class="web-ocr-tr">${esc(trn)}</div>` : '')
+      + (orig ? `<details class="tr-orig" open><summary>OCR text</summary><pre>${esc(orig)}</pre></details>` : '')
+      + (d.skipped && !orig && !trn
+         ? `<div class="web-ocr-err">${esc(d.skipped)}</div>` : '');
+  } catch (e) {
+    if (body) body.innerHTML = `<div class="web-ocr-err">${esc(String((e && e.message) || e))}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'OCR & translate'; }
+  }
 }
 
 /* ── hidden targets ── */
@@ -12100,7 +12239,16 @@ function _activeRecon() {
 }
 function _activeTechIntel() {
   const rec = getTechIntelStore()[tiCampKey()];
-  return (rec && rec.data) ? rec : null;
+  if (rec && rec.data) return rec;
+  /* Quota fallback: saveTechIntelData can lose its localStorage write while the
+     Tech Intel tab keeps rendering the run from in-memory _tiData — the chat
+     tools read only the store, so they would report "no inventory" for data the
+     operator can see on screen. _tiData is campaign-scoped (loadTechIntel
+     replaces or nulls it on every campaign switch), so serving it here cannot
+     leak a previous campaign's inventory. ts is genuinely unknown on this
+     path; every reader already handles a null ts. */
+  if (_tiData) return { data: _tiData, ts: null };
+  return null;
 }
 function _activeAnalyses() {
   const ac = getActiveCamp();
@@ -12312,7 +12460,7 @@ function spotterDataInventory() {
 
   items.push({
     source: 'AD graph (SharpHound/BloodHound + Cobalt Strike + OSINT nodes in Neo4j)',
-    tool: 'search_entities, get_dossier, get_attack_paths, get_graph_schema, run_cypher',
+    tool: 'search_entities, get_dossier, get_attack_paths, get_graph_schema, run_cypher, find_kerberoastable, find_asrep_roastable, find_delegation_paths, find_adcs_esc, find_coercion_relay_targets, get_shortest_path_to_tier0, find_gpo_abuse',
     status: ac && ac.sketchId ? 'AVAILABLE' : 'CHECK',
     detail: ac && ac.sketchId
       ? 'sketch ' + ac.sketchId
@@ -13011,7 +13159,7 @@ const SPOTTER_TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          section: { type: 'string', description: 'summary | os | legacy | stale | vulnerable | catalog | pasted | users | devices | all' },
+          section: { type: 'string', description: 'summary | os | legacy | stale | vulnerable | perimeter | cloud | catalog | users | devices | all' },
           query:   { type: 'string', description: 'Optional keyword filter (technology, OS or user name)' },
           limit:   { type: 'integer', description: 'Max entries per list (default 25)' },
         },
@@ -13083,6 +13231,68 @@ const SPOTTER_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'find_kerberoastable',
+      description: 'List kerberoastable users — accounts with a Service Principal Name. Any domain user can request a service ticket for these and crack it offline (Rubeus kerberoast / Impacket GetUserSPNs). Flags rc4_only (far cheaper to crack than AES) and is_admin; results sorted admin + rc4_only first.',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_asrep_roastable',
+      description: 'List users with Kerberos pre-authentication disabled (AS-REP roastable). Their AS-REP can be requested without credentials and cracked offline (Rubeus asreproast / Impacket GetNPUsers). Flags rc4_only and is_admin.',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_delegation_paths',
+      description: 'Enumerate the Kerberos delegation abuse surface as three lists: unconstrained (coerce the host with PetitPotam/PrinterBug and capture a DC TGT via krbrelayx; DCs are always unconstrained), constrained AllowedToDelegate (S4U2Proxy impersonation to the target service), and RBCD AllowedToAct (control the source principal, then S4U2Self + S4U2Proxy to impersonate any user to the target host).',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_adcs_esc',
+      description: 'Find AD Certificate Services misconfigurations: ESC1 templates (enrollee supplies an arbitrary SAN + client-auth EKU + no manager approval — any principal with Enroll can request a certificate authenticating as any user, Certipy req) with the principals holding Enroll, and ESC8 enterprise CAs exposing HTTP web enrollment (coerce a DC with PetitPotam and NTLM-relay to the CA, Certipy relay).',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_coercion_relay_targets',
+      description: 'NTLM coercion + relay building blocks: coercible DCs (PetitPotam / PrinterBug / DFSCoerce sources) and relay destinations — unconstrained-delegation hosts (TGT capture) and ESC8 web-enrollment CAs — with the coerce-to-relay chain noted.',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_shortest_path_to_tier0',
+      description: 'BloodHound signature query: the shortest attack path(s) from a foothold to Tier-0 — Domain Admins / Enterprise Admins groups, high-value objects, or any domain controller. Paths come back shortest-first with the ordered node and edge sequence per hop. Leave identifier empty to search from every compromised user (active beacon or stealer log).',
+      parameters: {
+        type: 'object',
+        properties: {
+          identifier: { type: 'string',  description: 'Username / SAM / SID of the starting (owned) principal. Empty = all compromised users.' },
+          max_hops:   { type: 'integer', description: 'Maximum path length, 1-10 (default 8)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_gpo_abuse',
+      description: 'Principals that can edit a GPO linked to an OU or domain (WriteGPLink / WriteDacl / WriteOwner / GenericAll / GenericWrite) — they can push code to every computer and user in that scope (SharpGPOAbuse / pyGPOAbuse). Highest-value scopes first.',
+      parameters: { type: 'object', properties: {}, },
+    },
+  },
 ];
 
 /* Names routed to the n8n gateway (graph-side), mapped to its query types. */
@@ -13092,6 +13302,13 @@ const GATEWAY_TOOL_TYPES = {
   get_attack_paths: 'get_attack_paths',
   run_cypher:       'run_cypher',
   get_graph_schema: 'graph_schema',
+  find_kerberoastable:         'find_kerberoastable',
+  find_asrep_roastable:        'find_asrep_roastable',
+  find_delegation_paths:       'find_delegation_paths',
+  find_adcs_esc:               'find_adcs_esc',
+  find_coercion_relay_targets: 'find_coercion_relay_targets',
+  get_shortest_path_to_tier0:  'get_shortest_path_to_tier0',
+  find_gpo_abuse:              'find_gpo_abuse',
 };
 
 /* Dispatch one tool call: local stores first (OSINT / tech / analysis /
@@ -13157,8 +13374,10 @@ function saveLlmCfg() {
    declining tool calls on a model with 49152 tokens of room. Open WebUI's own chat UI
    uses the separate `spotter` profile, which carries the server-side prompt and tools;
    this tab supplies both itself, so it wants the model untouched.
-   Keep in sync with MODEL_ID / VLLM_MODEL (scripts/setup_openwebui.py, .env). */
-const SPOTTER_UI_MODEL = 'Qwen/Qwen3.8-27B-FP8';
+   Keep in sync with MODEL_ID / VLLM_MODEL (scripts/setup_openwebui.py, .env).
+   Injected via /config.js so a local-small install does not keep sending the
+   compiled-in 27B id, which Open WebUI answers as HTTP 400 "Model not found". */
+const SPOTTER_UI_MODEL = (SPOTTER_GATES_CFG.vllmModel || '').trim() || 'Qwen/Qwen3.8-27B-FP8';
 
 /* One-time move of operators pinned to a retired default. saveLlmCfg() writes s.llmModel
    whenever ANY field in LLM CONFIG is edited — endpoint or API key, not just the model box —
@@ -13174,8 +13393,12 @@ const LEGACY_UI_MODELS = [
   'qwen3.8-obliterated:27b', 'qwen3.8-obliterated:27b-spotter-ui',
   'qwen3:14b', 'qwen3:8b',
 ];
+const RETIRED_UI_DEFAULT = 'Qwen/Qwen3.8-27B-FP8';
 function migrateLlmModel() {
-  if (LEGACY_UI_MODELS.includes(localStorage.getItem('s.llmModel'))) {
+  const saved = localStorage.getItem('s.llmModel');
+  if (!saved) return;
+  if (LEGACY_UI_MODELS.includes(saved)
+      || (saved === RETIRED_UI_DEFAULT && saved !== SPOTTER_UI_MODEL)) {
     localStorage.setItem('s.llmModel', SPOTTER_UI_MODEL);
   }
 }
@@ -13358,8 +13581,8 @@ function _llmErrorHint(e, llmBase, llmModel) {
          + `engine refuses to start if the KV cache cannot hold it — so read the value back from /v1/models `
          + `rather than trusting the env.`;
 
-  if (st === 404)
-    return `Model "${llmModel}" was not found at ${llmBase}. Use "List models" in LLM CONFIG and pick one that is actually served.`;
+  if (st === 404 || (st === 400 && /model not found/i.test(msg)))
+    return `Model "${llmModel}" was not found at ${llmBase}. Open LLM CONFIG → List models and pick the id vLLM actually serves (VLLM_MODEL). A local-small install is typically Qwen/Qwen2.5-7B-Instruct, not the 27B default.`;
 
   if (st >= 500)
     return `${llmBase} reached the model but it failed upstream (HTTP ${st}). Retry, or switch MODEL in LLM CONFIG.`;
@@ -13375,7 +13598,7 @@ function _llmErrorHint(e, llmBase, llmModel) {
 /* ── model context budget ──────────────────────────────────────────────────
    The agent loop in sendChat() appends every tool result to `messages` and
    removes nothing, so an investigation grows the request without bound. The
-   fixed overhead alone is ~5.6k tokens (system prompt + the twelve tool
+   fixed overhead alone is ~6.5k tokens (system prompt + the nineteen tool
    schemas) and MAX_TOOL_ROUNDS allows twelve more results of up to
    TOOL_RESULT_MAX_CHARS each — ~78k tokens against backends that serve a
    fraction of that. Both of this host's backends were measured well under it:
@@ -13401,9 +13624,9 @@ function _answerReserve(ctxLimit) {
   return Math.min(LLM_ANSWER_RESERVE_TOKENS, Math.floor(ctxLimit * LLM_ANSWER_RESERVE_FRACTION));
 }
 /* The system prompt is the campaign brief and the tool contract — cutting into
-   it changes how the model behaves, not just what it knows, so it has a floor
-   and is never whittled down a second time within a turn. */
-const SYSTEM_PROMPT_FLOOR_CHARS = 3000;
+   it changes how the model behaves, not just what it knows, so it is the last
+   thing _fitMessages() touches and is never whittled down a second time within
+   a turn. */
 /* Used when the backend does not advertise a window. Ollama entries never do,
    and 8192 is what this host's Ollama actually loads these models with.
    Guessing low only trims more than strictly necessary; guessing high costs a
@@ -13424,12 +13647,24 @@ function _rememberContextLimit(model, n) {
 }
 
 /* Open WebUI relays vLLM's `max_model_len` straight through on /api/models.
-   Ollama-backed entries carry no equivalent field — hence the fallback. */
+   Ollama-backed entries carry no equivalent field — hence the fallback.
+   vLLM LoRA cards are the same gap in a new shape: max_model_len is null,
+   but the adapter shares its base model's window and names that base in
+   `parent` (`root` as a second chance). Without this second pass the Prompt
+   tab budgets a LoRA model id at the 8192 fallback and starts declining tool
+   calls against a 32k-window server. */
 function _harvestContextLimits(models) {
-  (models || []).forEach(m => {
+  const list = models || [];
+  list.forEach(m => {
     const id = m && (m.id || m.name);
     const n  = m && (m.max_model_len || m.context_length);
     if (id && n) _rememberContextLimit(id, n);
+  });
+  list.forEach(m => {
+    const id = m && (m.id || m.name);
+    if (!id || _ctxMap()[id]) return;
+    const inherited = (m.parent && _ctxMap()[m.parent]) || (m.root && _ctxMap()[m.root]);
+    if (inherited) _rememberContextLimit(id, inherited);
   });
 }
 
@@ -13606,11 +13841,15 @@ function _fitMessages(msgs, budget, histEnd) {
      any other way, and a truncated one still beats a refused request.
      The arithmetic has to account for what _msgTokens() charges on top of the
      content — the 8-token message envelope and the notice appended below —
-     or the "trimmed" transcript lands a few tokens over and is refused anyway. */
+     or the "trimmed" transcript lands a few tokens over and is refused anyway.
+     There is deliberately no minimum length here: the old 3000-char floor
+     guaranteed an overflow whenever it engaged (it only ever fit while the
+     tool schemas left slack), and a request that does not fit is refused
+     wholesale — fitting the window beats preserving prompt material. */
   if (over() && msgs[0] && msgs[0].role === 'system') {
     const NOTICE = '\n…[system prompt truncated to fit the context window]';
     const rest   = _tokensOf(msgs) - _msgTokens(msgs[0]);
-    const room   = Math.max(SYSTEM_PROMPT_FLOOR_CHARS, (budget - rest - 8) * 3 - NOTICE.length);
+    const room   = Math.max(0, (budget - rest - 8) * 3 - NOTICE.length);
     const wasTrimmed = !!msgs[0]._trimmedSys;
     const cur = String(msgs[0].content || '');
     if (cur.length > room) {
@@ -13981,7 +14220,7 @@ You assist authorized red team operators during legitimate, scoped engagements u
 
 ## Tools
 
-You have twelve tools, split between the graph (served by the n8n gateway) and the campaign intelligence stores held on the operator's workstation (OSINT recon, technology inventory, vulnerability scan findings, analysis records, target dossiers). Both are equally reachable — the tool call is the only way to read either. Each tool's own schema carries its arguments and its caveats; read them there rather than expecting a second copy here.
+You have nineteen tools, split between the graph (served by the n8n gateway) and the campaign intelligence stores held on the operator's workstation (OSINT recon, technology inventory, vulnerability scan findings, analysis records, target dossiers). Both are equally reachable — the tool call is the only way to read either. Each tool's own schema carries its arguments and its caveats; read them there rather than expecting a second copy here.
 
 You MUST call a tool before answering any question about specific users, groups, computers, AD permissions, OSINT findings, breaches, technologies or analysis output. Never guess or hallucinate entity details, and never claim you cannot access campaign data — consult the live inventory above, then call the matching tool. If a store is genuinely EMPTY, name the tab/workflow that fills it.
 
@@ -13995,6 +14234,11 @@ The tools are supplied through the function-calling interface. Invoke them direc
 - "What did the analysis find", scored targets, scenarios → get_analysis
 - Roster / who is compromised / who has a beacon → list_targets
 - AD identities, groups, ACEs, sessions, attack paths → search_entities, get_dossier, get_attack_paths, run_cypher, get_graph_schema
+- Kerberoastable / SPN accounts → find_kerberoastable; AS-REP roastable (no pre-auth) → find_asrep_roastable
+- Delegation (unconstrained / constrained / RBCD) → find_delegation_paths
+- ADCS ESC1/ESC8 templates and CAs → find_adcs_esc; coercion + NTLM relay targets → find_coercion_relay_targets
+- GPO abuse (who can edit a linked GPO) → find_gpo_abuse
+- Shortest path from a foothold to Domain Admins / a DC → get_shortest_path_to_tier0
 - Don't know where it lives → search_intel, or get_campaign_context first
 
 ## Workflow
@@ -14352,6 +14596,13 @@ function _toolBusyLabel(name) {
     list_targets:         'Reading target dossiers…',
     search_intel:         'Searching all campaign intel…',
     get_graph_schema:     'Reading graph schema…',
+    find_kerberoastable:         'Finding kerberoastable accounts…',
+    find_asrep_roastable:        'Finding AS-REP roastable accounts…',
+    find_delegation_paths:       'Finding delegation abuse paths…',
+    find_adcs_esc:               'Finding ADCS ESC misconfigurations…',
+    find_coercion_relay_targets: 'Finding coercion + relay targets…',
+    get_shortest_path_to_tier0:  'Tracing shortest path to Tier-0…',
+    find_gpo_abuse:              'Finding GPO abuse paths…',
   };
   return LBL[name] || `Querying graph… (${name})`;
 }
@@ -15781,6 +16032,7 @@ function _anPrincFlags(u) {
   if (u.has_beacon) f.push('BEACON');
   if (u.confirmed_compromised) f.push('CONFIRMED CRED');
   if (u.has_stealer) f.push('STEALER');
+  if ((u.social_profile_count || 0) > 0) f.push('SM');
   return f.join('; ');
 }
 
@@ -15794,6 +16046,7 @@ function _anPrincHtml(u) {
   if (u.has_beacon) tags.push(hi('BEACON', 'Active C2 beacon'));
   if (u.confirmed_compromised) tags.push(hi('&#128273; CONFIRMED CRED', 'Confirmed / validated credential on this account'));
   if (u.has_stealer) tags.push(hi('STEALER', 'Stealer log hit'));
+  if ((u.social_profile_count || 0) > 0) tags.push('<span class="scen-tag" style="color:var(--data);border-color:rgba(61,143,188,.5)" title="' + (u.social_profile_count) + ' social media profile' + ((u.social_profile_count||0)!==1?'s':'') + ' discovered (LinkedIn, maigret, etc.)">SM</span>');
   const sc = (u.score == null) ? ''
     : `<span class="tgt-score ${u.score >= 70 ? 'sc-hi' : u.score >= 40 ? 'sc-md' : 'sc-lo'}">${esc(u.score)}</span>`;
   return `<span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">${sc}`
@@ -15902,6 +16155,8 @@ function renderAnalysisCard(a) {
     const bTag      = (!t.has_stealer && bcnt > 0) ? ` <span class="scen-tag" style="color:var(--warn);border-color:rgba(230,130,30,.4)">${bcnt} breach${bcnt!==1?'es':''}</span>` : '';
     const pe        = (t.personal_emails || []);
     const peTag     = pe.length ? ` <span class="scen-tag" title="${esc(pe.join(', '))}" style="cursor:default">${pe.length} personal email${pe.length!==1?'s':''}</span>` : '';
+    const smCnt     = (t.social_profile_count || 0);
+    const smTag     = smCnt > 0 ? ` <span class="scen-tag" style="color:var(--data);border-color:rgba(61,143,188,.5)" title="${smCnt} social media profile${smCnt!==1?'s':''} discovered (LinkedIn, maigret, etc.)">SM</span>` : '';
     const liUrl     = safeUrl(t.linkedin_url || '');
     const liTitle   = t.linkedin_job_title ? esc(t.linkedin_job_title) : '';
     const liEmployer= t.linkedin_employer  ? esc(t.linkedin_employer)  : '';
@@ -15924,7 +16179,7 @@ function renderAnalysisCard(a) {
     return `<div class="tgt-row${fp ? ' an-fp' : ''}">
       <span class="tgt-score ${sccls}">${sc}</span>
       ${name}
-      <span class="tgt-rationale">${esc(t.rationale || '')}${opComp}${opOI}${adm}${stealer}${conf}${credTag}${bxcTag}${reuseTag}${bTag}${peTag}${liTag}</span>
+      <span class="tgt-rationale">${esc(t.rationale || '')}${opComp}${opOI}${adm}${stealer}${conf}${credTag}${bxcTag}${reuseTag}${bTag}${peTag}${smTag}${liTag}</span>
       ${_markChip('comp', 'people', nm, isComp)}${_markChip('oi', 'people', nm, isOI)}${_markChip('val', 'people', nm, isVal)}${_markChip('oos', 'people', nm, oos)}${_fpChip('people', nm, fp)}
     </div>`;
   };
@@ -16705,6 +16960,13 @@ function _shodanStatusNote(data) {
     return 'Shodan rate-limited this lookup' + code + detail
       + '. This is not an empty result — retry later. Any rows shown are incomplete.';
   }
+  if (st.bypass_proxy)
+    return (st.state === 'blocked' || Number(st.http_status) === 403)
+      ? String(st.detail || 'Shodan HTTP 403 on direct egress.')
+      : (st.detail ? String(st.detail) + ' ' : '')
+        + 'Queried directly — Configuration → Shodan: Bypass Proxy is on.';
+  if (st.state === 'blocked' || Number(st.http_status) === 403)
+    return String(st.detail || 'Shodan HTTP 403 — the campaign proxy was refused (typical for Tor). Turn on Configuration → Shodan: Bypass Proxy and re-run Enrich Shodan.io.');
   if (st.state === 'error')
     return 'Shodan API error — ' + String(st.detail || 'request failed');
   return '';
@@ -16975,6 +17237,7 @@ function buildDomainReconReport(data) {
       ['Industry',    oInd.join(' · ')],
       ['Website',     oProf.site || ''],
       ['HQ',          oProf.address || ''],
+      ['HQ (translated)', oProf.address_translated || ''],
       ['Region',      oProf.area || oProf.country || data.registrant_country || ''],
       ['Size',        oProf.size_category || String(data.linkedin_employee_count || '')],
       ['Open roles',  oProf.open_vacancies != null ? String(oProf.open_vacancies) : ''],
@@ -17019,6 +17282,8 @@ function buildDomainReconReport(data) {
     });
     const oBlocks = [{ type: 'kv', rows: oRows }];
     if (oProf.description) oBlocks.push({ type: 'note', text: String(oProf.description) });
+    if (oProf.description_translated)
+      oBlocks.push({ type: 'note', text: 'Translated: ' + String(oProf.description_translated) });
     if (data.org_source === 'no_regional_provider') {
       oBlocks.push({ type: 'note', text: 'No regional company source ran for this campaign — '
         + 'the RU region was not selected in Objectives, so hh.ru was not queried. '
@@ -17060,8 +17325,8 @@ function buildDomainReconReport(data) {
     if (oJob.length || oJobRef.length) {
       const jBlocks = [];
       if (oJob.length) jBlocks.push({ type: 'table', label: `Open roles · ${oJob.length}`,
-        columns: ['Role', 'Location', 'Board', 'Posted', 'Employer named'],
-        rows: oJob.map(j => [j.title || '', j.location || '', j.via || '',
+        columns: ['Role', 'Role (translated)', 'Location', 'Board', 'Posted', 'Employer named'],
+        rows: oJob.map(j => [j.title || '', j.title_translated || '', j.location || '', j.via || '',
                              j.posted || '', j.company || '']) });
       // Exported for the same reason they are shown: a reader who cannot see
       // the card has no other way to tell that the target was identified badly.
@@ -17099,8 +17364,9 @@ function buildDomainReconReport(data) {
     if (oPpl.length || oPplHeld.length) {
       const pBlocks = [];
       if (oPpl.length) pBlocks.push({ type: 'table', label: `People & Positions · ${oPpl.length}`,
-        columns: ['Name', 'Title', 'Specialty', 'Employer', 'Location', 'Education', 'Technologies', 'Source', 'Evidence', 'Why', 'URL'],
-        rows: oPpl.map(p => [p.name || '', p.job_title || '', p.specialty || '',
+        columns: ['Name', 'Title', 'Title (translated)', 'Specialty', 'Employer', 'Location', 'Education', 'Technologies', 'Source', 'Evidence', 'Why', 'URL'],
+        rows: oPpl.map(p => [p.name || '', p.job_title || '', p.job_title_translated || '',
+                             p.specialty || '',
                              p.employer || '', p.location || '', p.education || '',
                              (p.technologies || []).join('; '), p.source || '',
                              p.tier || '', p.why || '', p.url || '']) });
@@ -17177,6 +17443,7 @@ function buildDomainReconReport(data) {
       const sBlocks = [{ type: 'kv', rows: [
         ['Pages crawled', String(oSite.pages_crawled || 0)],
         ['Indexed chunks', String(oSite.chunks_indexed || 0)],
+        ['Chunks translated', oSite.chunks_translated != null ? String(oSite.chunks_translated) : ''],
         ['Off-domain URLs refused', String(oSite.pages_refused || 0)],
         ['Pages unreadable', String(oSite.pages_failed || 0)],
         ['Fetched by', oSite.backend ? (oSite.backend_label || 'tavily') : ''],
@@ -17685,6 +17952,203 @@ function exportDrCard(key, fmt) {
   const d = key === 'flare' ? _drReconForExport() : _currentDomainRecon();
   if (!d) { toast('No domain recon data to export', 'err'); return; }
   _exportReport(_reportSubset(buildDomainReconReport(d), key), fmt);
+}
+
+/* ── Consolidated External Attack Surface CSV ──────────────────────
+   One flat, deduplicated list of every discovered FQDN and IP across all
+   domain recon sources (subdomains, DNS, Shodan, FOFA, passive DNS, web
+   assets, services, cloud assets).  Operators feed this into nmap, masscan,
+   or other tooling without manually merging per-card exports. */
+function exportAttackSurfaceCsv() {
+  const d = _drReconForExport();
+  if (!d) { toast('No domain recon data to export', 'err'); return; }
+  const domain = d.domain || 'target';
+  // key: "fqdn|ip|port" → { fqdn, ip, port, type, sources:Set }
+  const seen = new Map();
+  const add = (fqdn, ip, port, type, source) => {
+    fqdn = (fqdn || '').toLowerCase().replace(/\.$/, '');
+    ip   = ip || '';
+    port = port != null ? String(port) : '';
+    if (!fqdn && !ip) return;
+    const key = fqdn + '|' + ip + '|' + port;
+    let e = seen.get(key);
+    if (!e) { e = { fqdn, ip, port, type: type || '', sources: new Set() }; seen.set(key, e); }
+    if (source) e.sources.add(source);
+    if (type && !e.type) e.type = type;
+  };
+  // Subdomains (CT + CertKit enumeration)
+  (d.subdomains || []).forEach(s => add(s, '', '', 'subdomain', 'subdomain_enum'));
+  // DNS A records — IPs resolved for the apex domain
+  (d.dns_a || []).forEach(ip => add(domain, ip, '', 'dns_record', 'dns'));
+  // THC passive-DNS subdomains
+  (d.thc_subdomains || []).forEach(s => add(s, '', '', 'subdomain', 'thc'));
+  // THC reverse DNS — IP → hostnames
+  (d.thc_rdns || []).forEach(r => {
+    (r.hostnames || []).forEach(h => add(h, r.ip || '', '', 'hostname', 'thc_rdns'));
+  });
+  // Shodan — IP with hostnames and ports
+  (d.shodan_results || []).forEach(r => {
+    const ips = r.ip || '';
+    const hosts = (r.hostnames || []);
+    const ports = ((r.ports || []).map(String));
+    if (hosts.length) { hosts.forEach(h => add(h, ips, '', 'hostname', 'shodan')); }
+    else { add('', ips, '', 'ip', 'shodan'); }
+    if (ports.length && (hosts.length || ips)) {
+      ports.forEach(p => {
+        if (hosts.length) hosts.forEach(h => add(h, ips, p, 'service', 'shodan'));
+        else add('', ips, p, 'service', 'shodan');
+      });
+    }
+  });
+  // FOFA — host, ip, port, protocol per row
+  (d.fofa_results || []).forEach(r => {
+    add(r.host || '', r.ip || '', r.port, 'service', 'fofa');
+  });
+  // Web assets persisted to the graph
+  (d.web_assets || []).forEach(a => {
+    const url = a.url || '';
+    let host = '';
+    try { if (url) host = new URL(url).hostname; } catch(_) {}
+    add(host || a.domain || '', a.ip || '', a.port || '', 'web_asset', 'web_asset');
+  });
+  // Services persisted to the graph
+  (d.services || []).forEach(s => {
+    add(s.hostname || s.host || '', s.ip || '', s.port || '', 'service', 'service');
+  });
+  // Cloud assets persisted to the graph
+  (d.cloud_assets || []).forEach(a => {
+    const url = a.url || '';
+    let host = '';
+    try { if (url) host = new URL(url).hostname; } catch(_) {}
+    add(host || a.name || '', '', '', 'cloud_asset', 'cloud_asset');
+  });
+
+  if (!seen.size) { toast('No attack surface data to export', 'err'); return; }
+  const rows = [...seen.values()].sort((a, b) =>
+    (a.fqdn || a.ip || '').localeCompare(b.fqdn || b.ip || '')
+  );
+  const hdr = 'FQDN,IP,Port,Type,Sources';
+  const lines = rows.map(r =>
+    [r.fqdn, r.ip, r.port, r.type, [...r.sources].sort().join('; ')]
+      .map(v => { const s = String(v); return /[,"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; })
+      .join(',')
+  );
+  _downloadBlob(hdr + '\n' + lines.join('\n') + '\n',
+    domain + '_attack_surface.csv', 'text/csv;charset=utf-8');
+  toast('Exported ' + rows.length + ' entries', 'ok');
+}
+
+// LinkedIn override / false positive management
+// Use the ACTIVE campaign's ID, not the cached recon data's campaign_id,
+// because the recon data may be stale or from a different campaign.
+async function markLinkedInFP(_unusedCampaignId, companyName) {
+  const ac = getActiveCamp();
+  const campaignId = ac ? ac.id : '';
+  if (!campaignId || !companyName) {
+    toast('Missing campaign or company data', 'err');
+    return;
+  }
+
+  const note = prompt(`Mark "${companyName}" LinkedIn as false positive?\n\nEnter a note explaining why (optional):`);
+  if (note === null) return; // User cancelled
+
+  try {
+    const resp = await fetch(apiUrl('linkedin-override'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        campaign_id: campaignId,
+        company_name: companyName,
+        mark_fp: true,
+        note: note || 'Marked as false positive via UI'
+      })
+    });
+
+    const result = await resp.json();
+    if (result.status === 'ok') {
+      toast('LinkedIn marked as false positive', 'ok');
+      // Update localStorage recon data to show the override immediately
+      try {
+        const recs = getDomainRecons();
+        const rec = recs.find(r => r.campaignId === campaignId);
+        if (rec) {
+          rec.linkedin_url_fp = true;
+          rec.linkedin_company_url = '';
+          rec.linkedin_company_name = '';
+          rec.linkedin_override_note = note || 'Marked as false positive via UI';
+          rec.linkedin_url_override = '';
+          saveDomainRecons(recs);
+        }
+      } catch (e) {
+        console.warn('Failed to update localStorage:', e);
+      }
+      // Refresh the domain recon data to show the update
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      toast('Failed: ' + (result.error || JSON.stringify(result.debug) || 'Unknown error'), 'err');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'err');
+  }
+}
+
+async function editLinkedInURL(_unusedCampaignId, companyName) {
+  const ac = getActiveCamp();
+  const campaignId = ac ? ac.id : '';
+  if (!campaignId || !companyName) {
+    toast('Missing campaign or company data', 'err');
+    return;
+  }
+
+  const newUrl = prompt(`Enter the correct LinkedIn URL for "${companyName}":\n\nExample: https://www.linkedin.com/company/correct-name/`);
+  if (!newUrl) return;
+
+  if (!newUrl.match(/^https?:\/\/(www\.)?linkedin\.com\/company\//i)) {
+    if (!confirm('This doesn\'t look like a LinkedIn company URL. Continue anyway?')) {
+      return;
+    }
+  }
+
+  const note = prompt('Add a note explaining the correction (optional):') || '';
+
+  try {
+    const resp = await fetch(apiUrl('linkedin-override'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        campaign_id: campaignId,
+        company_name: companyName,
+        linkedin_url: newUrl,
+        note: note || 'URL corrected via UI'
+      })
+    });
+
+    const result = await resp.json();
+    if (result.status === 'ok') {
+      toast('LinkedIn URL updated', 'ok');
+      // Update localStorage recon data to show the override immediately
+      try {
+        const recs = getDomainRecons();
+        const rec = recs.find(r => r.campaignId === campaignId);
+        if (rec) {
+          rec.linkedin_url_override = newUrl;
+          rec.linkedin_company_url = newUrl;
+          rec.linkedin_company_name = companyName;
+          rec.linkedin_override_note = note || 'URL corrected via UI';
+          rec.linkedin_url_fp = false;
+          saveDomainRecons(recs);
+        }
+      } catch (e) {
+        console.warn('Failed to update localStorage:', e);
+      }
+      // Refresh the domain recon data to show the update
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      toast('Failed: ' + (result.error || JSON.stringify(result.debug) || 'Unknown error'), 'err');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'err');
+  }
 }
 function exportAssetReport(fmt) {
   const d = _currentDomainRecon();
@@ -20366,10 +20830,22 @@ function renderDomainRecon(data) {
         <span class="dr-val">${data.linkedin_company_url
           ? `<a href="${esc(data.linkedin_company_url)}" target="_blank" rel="noopener" style="color:var(--data);">${esc(data.linkedin_company_name)}</a>`
           : esc(data.linkedin_company_name)
-        }</span>
+        }
+        ${data.linkedin_url_fp ? ' <span style="color:var(--danger);font-size:9px;" title="Marked as false positive">[FP]</span>' : ''}
+        ${data.linkedin_url_override ? ' <span style="color:var(--success);font-size:9px;" title="Manual override applied">[OVERRIDE]</span>' : ''}
+        </span>
       </div>
       ${data.linkedin_industry       ? `<div class="dr-row"><span class="dr-lbl">Industry</span><span class="dr-val">${esc(data.linkedin_industry)}</span></div>` : ''}
       ${data.linkedin_employee_count ? `<div class="dr-row"><span class="dr-lbl">Employees</span><span class="dr-val">${esc(String(data.linkedin_employee_count))}</span></div>` : ''}
+      ${data.linkedin_override_note  ? `<div class="dr-row"><span class="dr-lbl">Override Note</span><span class="dr-val" style="font-size:9px;color:var(--dim);">${esc(data.linkedin_override_note)}</span></div>` : ''}
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button onclick="markLinkedInFP('${esc(data.campaign_id || '')}', '${esc(data.linkedin_company_name || '')}')" 
+                style="font-size:9px;padding:2px 6px;background:var(--danger);color:#fff;border:none;border-radius:3px;cursor:pointer;"
+                title="Mark this LinkedIn profile as a false positive">Mark as FP</button>
+        <button onclick="editLinkedInURL('${esc(data.campaign_id || '')}', '${esc(data.linkedin_company_name || '')}')"
+                style="font-size:9px;padding:2px 6px;background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;"
+                title="Provide the correct LinkedIn URL">Edit URL</button>
+      </div>
     </div>` : '';
 
   const overviewHtml = `<div class="dr-card">
@@ -20653,6 +21129,7 @@ function renderDomainRecon(data) {
   });
   const fofaHtml = `<div class="dr-card">
     <div class="dr-card-title${fofaPorts.length || fofaStatus.state === 'error' ? ' dr-warn' : ''}">FOFA.io &middot; Attack Surface${fofaTotal ? ' &middot; ' + fofaTotal.toLocaleString() + ' hosts' : ''}${_cardExpBtns('exportDrCard', 'fofa')}</div>
+    ${fofaStatus.bypass_proxy ? `<div style="color:var(--warn,#c9a227);font-size:9px;font-family:var(--mono);margin-bottom:6px;">Queried directly — Configuration → FOFA: Bypass Proxy is on.</div>` : ''}
     ${fofaProtos.length ? `<div style="margin-bottom:8px;">
       <div class="dr-lbl" style="margin-bottom:4px;">Protocols (${fofaProtos.length})${fofaResults.length ? ' <span class="dr-hint">· click a value for its hosts</span>' : ''}</div>
       <div class="dr-tags">${fofaProtos.slice(0,12).map(p =>
@@ -21256,12 +21733,16 @@ function renderDomainRecon(data) {
     // hh.ru first where it has an answer, then the LinkedIn company record and
     // the WHOIS registrant, so the block is populated even with no RU provider.
     const industries = orgProfile.industries || (data.linkedin_industry ? [data.linkedin_industry] : []);
+    const industriesTr = (orgProfile.industries_translated || []).slice(0, 2).join(' · ')
+      || orgProfile.industry_translated || '';
     const profRows = [
       ['Name',      esc(orgProfile.name || data.linkedin_company_name || data.registrant_org || data.org_seed || '')],
-      ['Industry',  esc(industries.slice(0, 2).join(' · '))],
+      ['Industry',  _tr(industries.slice(0, 2).join(' · '),
+                        industriesTr,
+                        orgProfile.source_lang)],
       ['Website',   orgProfile.site ? `<a href="${esc(orgProfile.site)}" target="_blank" rel="noopener" style="color:var(--data);">${esc(orgProfile.site)}</a>` : ''],
       ['Employees', esc(String(data.linkedin_employee_count || orgProfile.size_category || ''))],
-      ['HQ',        esc(orgProfile.address || '')],
+      ['HQ',        _tr(orgProfile.address, orgProfile.address_translated, orgProfile.source_lang)],
       ['Region',    esc(orgProfile.area || orgProfile.country || data.registrant_country || '')],
       ['Open roles', orgProfile.open_vacancies != null ? esc(String(orgProfile.open_vacancies)) : ''],
       ['Rating',    orgProfile.rating != null ? esc(String(orgProfile.rating)) : ''],
@@ -21369,7 +21850,14 @@ function renderDomainRecon(data) {
       <div class="dr-card-title">Profile${_cardExpBtns('exportDrCard', 'organization')}</div>
       ${profRows.map(([l, v]) => _orgRow(l, v)).join('')}
       ${profFlags.length ? `<div class="dr-tags">${profFlags.map(f => `<span class="dr-tag">${esc(f)}</span>`).join('')}</div>` : ''}
-      ${orgProfile.description ? `<div style="margin-top:7px;padding-top:6px;border-top:1px solid rgba(37,43,58,.4);font-size:9px;color:var(--dim);line-height:1.5;">${esc(String(orgProfile.description).slice(0, 320))}${String(orgProfile.description).length > 320 ? '…' : ''}</div>` : ''}
+      ${orgProfile.description ? `<div style="margin-top:7px;padding-top:6px;border-top:1px solid rgba(37,43,58,.4);font-size:9px;color:var(--dim);line-height:1.5;">${
+        _tr(String(orgProfile.description).slice(0, 320) + (String(orgProfile.description).length > 320 ? '…' : ''),
+            orgProfile.description_translated
+              ? String(orgProfile.description_translated).slice(0, 320)
+                + (String(orgProfile.description_translated).length > 320 ? '…' : '')
+              : '',
+            orgProfile.source_lang)
+      }</div>` : ''}
       ${srcNote ? `<div style="margin-top:7px;font-size:9px;color:var(--dim);line-height:1.5;">${srcNote}</div>` : ''}
       ${idHtml}
       ${srcRows ? `<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(37,43,58,.4);">
@@ -21457,8 +21945,8 @@ function renderDomainRecon(data) {
       ${jobShown.slice(0, 12).map(j => `<div class="dr-row">
           <span class="dr-lbl" style="display:flex;align-items:center;">${
             j.url
-              ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" style="color:var(--data);">${esc(j.title)}</a>`
-              : esc(j.title)
+              ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" style="color:var(--data);">${_tr(j.title, j.title_translated, j.source_lang || orgProfile.source_lang)}</a>`
+              : _tr(j.title, j.title_translated, j.source_lang || orgProfile.source_lang)
           }${_oMark(j.title, _oIxA, 'assets')}</span>
           <span class="dr-val" style="font-size:9px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
             ${j.location ? `<span style="color:var(--dim);">${esc(j.location)}</span>` : ''}
@@ -21627,7 +22115,7 @@ function renderDomainRecon(data) {
               : `<span class="dr-link" onclick="openDossierFromCred(&quot;${esc(p.name)}&quot;, &quot;${esc(p.graph_id || '')}&quot;)" title="Open dossier for ${esc(p.name)}">${esc(p.name)}</span>`
           }${_oMark(p.name, _oIxP, 'people')}</span>
           <span class="dr-val" style="font-size:9px;display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
-            ${esc(p.job_title || '—')}
+            ${_tr(p.job_title || '—', p.job_title_translated, p.source_lang)}
             ${_tierChip(p)}
             ${p.specialty && p.specialty !== p.job_title ? `<span class="dr-tag" style="font-size:8px;">${esc(p.specialty)}</span>` : ''}
             ${p.location ? `<span style="color:var(--dim);">${esc(p.location)}</span>` : ''}
@@ -21773,6 +22261,8 @@ function renderDomainRecon(data) {
       <div class="dr-card-title">Website Intelligence${_cardExpBtns('exportDrCard', 'org_site')}</div>
       ${_orgRow('Pages crawled', esc(String(orgSite.pages_crawled ?? 0)))}
       ${_orgRow('Indexed chunks', esc(String(orgSite.chunks_indexed ?? 0)))}
+      ${orgSite.chunks_translated != null && orgSite.chunks_translated !== ''
+        ? _orgRow('Chunks translated', esc(String(orgSite.chunks_translated))) : ''}
       ${orgSite.backend ? _orgRow('Fetched by',
           esc(orgSite.backend_label || 'tavily')
           + (orgSite.provider_credits
@@ -21854,7 +22344,10 @@ function renderDomainRecon(data) {
   `;
   el.style.display = '';
   const expEl = document.getElementById('dr-export');
-  if (expEl) expEl.innerHTML = _reportExpBtns('exportDrReport', 'Report');
+  if (expEl) expEl.innerHTML = _reportExpBtns('exportDrReport', 'Report')
+    + `<span class="card-exp" style="margin-left:8px;">`
+    + `<button class="xbtn" onclick="exportAttackSurfaceCsv()" title="Download a flat CSV of every discovered FQDN, IP, port and service — deduplicated across all sources">Attack Surface CSV</button>`
+    + `</span>`;
   const emptyEl = document.getElementById('dr-empty');
   const ndEl    = document.getElementById('dr-nodomain');
   if (emptyEl) emptyEl.style.display = 'none';

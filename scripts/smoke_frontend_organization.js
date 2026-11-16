@@ -926,7 +926,9 @@ w.fetchJson = async (url, opts) => {
     ok(/named on the company/.test(flat),
        'the export carries the evidence sentence, so a reader can judge each row');
   }
-  ok(pplSec.blocks[0].rows.some(r => r[0] === 'Dana Webb' && r[2] === 'Infrastructure / IT'),
+  ok(pplSec.blocks[0].columns.includes('Title (translated)'),
+     'people export keeps a translated-title column beside the original');
+  ok(pplSec.blocks[0].rows.some(r => r[0] === 'Dana Webb' && r[3] === 'Infrastructure / IT'),
      'the people export carries name and derived specialty', JSON.stringify(pplSec.blocks[0].rows[0]));
   const siteSec = rep.sections.find(s => s.key === 'org_site');
   ok(siteSec.blocks.some(b => b.type === 'note' && /Disallow rules were deliberately NOT applied/.test(b.text)),

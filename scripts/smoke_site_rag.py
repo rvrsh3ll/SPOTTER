@@ -202,8 +202,23 @@ def test_scoring():
     check("the homepage earns a slot", score_url("https://sample.test/") > 0)
     check("wp-admin is excluded", score_url("https://sample.test/wp-admin/") == -1)
     check("an image is excluded", score_url("https://sample.test/logo.png") == -1)
+    check("a pdf is excluded by default",
+          score_url("https://sample.test/brochure.pdf") == -1)
     check("a dated archive path is penalised",
           score_url("https://sample.test/blog/2019/some-old-post/") < 0)
+    prev_pdf = os.environ.get("SITE_FETCH_PDF")
+    os.environ["SITE_FETCH_PDF"] = "1"
+    try:
+        check("a pdf is fetchable when SITE_FETCH_PDF=1",
+              score_url("https://sample.test/brochure.pdf") == 3,
+              str(score_url("https://sample.test/brochure.pdf")))
+        check("an image is still excluded with PDF fetch on",
+              score_url("https://sample.test/logo.png") == -1)
+    finally:
+        if prev_pdf is None:
+            os.environ.pop("SITE_FETCH_PDF", None)
+        else:
+            os.environ["SITE_FETCH_PDF"] = prev_pdf
 
 
 def test_discovery_and_crawl():
@@ -904,6 +919,62 @@ class _NullIndexer:
         return len(docs)
 
 
+def test_bilingual_index():
+    section("Cyrillic chunks index as English and keep the original")
+    import spotter_translate as st
+    real = st.translate_text
+
+    def fake_tr(text, **kwargs):
+        blob = text or ""
+        if "Джейн" in blob or "техническ" in blob:
+            return {
+                "source_lang": "ru", "target_lang": "en", "original": blob,
+                "translated": "Jane Roe is the Chief Technology Officer of Sample.",
+                "skipped": "", "error": "",
+            }
+        return real(text, **kwargs)
+
+    st.translate_text = fake_tr
+    prev_on = os.environ.get("TRANSLATE_ON_INGEST")
+    os.environ["TRANSLATE_ENABLED"] = "1"
+    os.environ["TRANSLATE_ON_INGEST"] = "1"
+    os.environ["TRANSLATE_TARGET_LANG"] = "en"
+    try:
+        pages = [{
+            "url": "https://sample.test/o-kompanii/",
+            "title": "О компании",
+            "text": "Джейн Роу является техническим директором компании Sample.",
+            "kind": "html",
+        }]
+        docs, n = site_rag._docs_from_pages(
+            pages, sketch_id="sk-ru", crawled_at="t")
+        check("a Cyrillic chunk was translated", n >= 1, str(n))
+        check("index text is English",
+              any("Chief Technology Officer" in (d.get("text") or "") for d in docs),
+              str([d.get("text", "")[:80] for d in docs]))
+        check("original is kept in metadata",
+              any("Джейн" in ((d.get("metadata") or {}).get("original") or "")
+                  for d in docs))
+        ix = RAGIndexer()
+        col = site_rag.collection_name("sk-ru")
+        ix.reset_collection(col)
+        ix.index_documents(col, docs)
+        hits = site_rag.ask_site("chief technology officer", "sk-ru",
+                                 n_results=3, indexer=ix)
+        check("English query retrieves the translated chunk",
+              any("Chief Technology Officer" in (h.get("text") or "") for h in hits),
+              str([h.get("text", "")[:60] for h in hits]))
+        check("hit carries the original alongside",
+              any("Джейн" in (h.get("original") or "") for h in hits),
+              str(hits[:1]))
+    finally:
+        st.translate_text = real
+        if prev_on is None:
+            os.environ.pop("TRANSLATE_ON_INGEST", None)
+        else:
+            os.environ["TRANSLATE_ON_INGEST"] = prev_on
+
+
 def test_builtin_backend_is_unchanged():
     section("the default backend does not touch Tavily")
     seen = []
@@ -1077,6 +1148,7 @@ def main() -> int:
         test_tavily_map_extract_uses_our_ranking,
         test_extract_urls_offdomain_gate,
         test_extract_urls_needs_a_key,
+        test_bilingual_index,
         test_builtin_backend_is_unchanged,
         test_offline_clone_index,
     ):

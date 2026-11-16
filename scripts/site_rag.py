@@ -66,6 +66,7 @@ Environment:
     SITE_DELAY_MS            pause between requests        (default: 500)
     SITE_MAX_BYTES_PER_PAGE  bounded read per page         (default: 2 MiB)
     SITE_MAX_SECONDS         wall-clock ceiling            (default: 180)
+    SITE_FETCH_PDF           1 = also fetch in-scope PDFs  (default: 0)
     SITE_TIMEOUT             per-request timeout           (default: 20)
     SITE_PREFLIGHT_TIMEOUT   egress preflight, 0 to skip   (default: min(SITE_TIMEOUT, 10))
     SITE_CHUNK_CHARS         chunk size                    (default: 1500)
@@ -127,10 +128,34 @@ _PATH_SKIP = re.compile(
     r"cart|checkout|account|login|signin|register|privacy|terms|cookie|"
     r"sitemap[^/]*\.xml)(?:/|$)", re.I,
 )
+# Images, archives, fonts, media. PDF is gated separately by SITE_FETCH_PDF
+# so a brochure-heavy site cannot burn the page budget unless the operator
+# opted in.
 _EXT_SKIP = re.compile(
-    r"\.(?:jpe?g|png|gif|svg|webp|ico|css|js|mjs|json|xml|pdf|zip|gz|tar|"
+    r"\.(?:jpe?g|png|gif|svg|webp|ico|css|js|mjs|json|xml|zip|gz|tar|"
     r"mp4|mp3|avi|mov|woff2?|ttf|eot|dmg|exe|msi)(?:\?|$)", re.I,
 )
+_EXT_PDF = re.compile(r"\.pdf(?:\?|$)", re.I)
+_PDF_MARK = "\x00PDF\x00"
+
+
+def _pdf_fetch_enabled() -> bool:
+    raw = (os.environ.get("SITE_FETCH_PDF") or "").strip()
+    if raw:
+        return _as_int(raw, 0) != 0
+    try:
+        import spotter_settings as ss
+        return int(ss.resolve_int("SITE_FETCH_PDF")) != 0
+    except Exception:
+        return False
+
+
+def _ext_skip(path: str) -> bool:
+    if _EXT_SKIP.search(path):
+        return True
+    if _EXT_PDF.search(path) and not _pdf_fetch_enabled():
+        return True
+    return False
 
 # Blocks whose text is navigation furniture, not content.
 _DROP_TAGS = {"script", "style", "noscript", "nav", "footer", "header", "aside",
@@ -219,8 +244,12 @@ def score_url(url: str) -> int:
         path = (urlparse(url).path or "/").lower()
     except Exception:
         return 0
-    if _PATH_SKIP.search(path) or _EXT_SKIP.search(path):
+    if _PATH_SKIP.search(path) or _ext_skip(path):
         return -1
+    # In-scope PDFs are interesting (filings, brochures) but must not outrank
+    # /about or /team when the operator has opted into fetching them.
+    if _EXT_PDF.search(path):
+        return 3
 
     segments = [s for s in path.split("/") if s]
     score = 0
@@ -352,6 +381,92 @@ def extract_page(html_text: str) -> Dict[str, Any]:
         "links": p.links,
         "jsonld": p.jsonld,
     }
+
+
+def _extract_pdf_via_sidecar(data: bytes, url: str) -> Dict[str, Any]:
+    """The runner cannot import pypdf; the sidecar can. Never raises."""
+    try:
+        import spotter_translate as st
+        name = (urlparse(url).path or "/").rsplit("/", 1)[-1] or "page.pdf"
+        return st.extract_document_via_sidecar(data, name)
+    except Exception as exc:  # noqa: BLE001
+        return {"text": "", "error": repr(exc)[:160]}
+
+
+def _docs_from_pages(
+    pages: List[Dict[str, Any]],
+    *,
+    sketch_id: str,
+    crawled_at: str,
+    extra_meta: Optional[Any] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Chunk pages, index the translation, keep the original in metadata."""
+    size = _as_int(os.environ.get("SITE_CHUNK_CHARS"), _DEFAULT_CHUNK_CHARS)
+    overlap = _as_int(os.environ.get("SITE_CHUNK_OVERLAP"), _DEFAULT_CHUNK_OVERLAP)
+    budget = 80
+    try:
+        import spotter_translate as st
+        budget = st.max_chunks()
+    except Exception:
+        st = None  # type: ignore
+    translated_n = 0
+    docs: List[Dict[str, Any]] = []
+    for page in pages:
+        kind = page.get("kind") or "html"
+        for i, ch in enumerate(chunk_text(page.get("text") or "",
+                                          size=size, overlap=overlap)):
+            original = ch["text"]
+            index_text = original
+            lang = ""
+            translated = ""
+            if st is not None and budget > 0:
+                try:
+                    ib = st.index_body(original, for_ingest=True)
+                    index_text = ib.get("index_text") or original
+                    lang = str(ib.get("lang") or "")
+                    translated = str(ib.get("translated") or "")
+                    budget -= 1
+                except Exception:
+                    pass
+            if translated:
+                translated_n += 1
+            md: Dict[str, Any] = {
+                "url": page.get("url", ""),
+                "page_title": page.get("title", ""),
+                "heading": ch.get("heading", ""),
+                "sketch_id": str(sketch_id or ""),
+                "crawled_at": crawled_at,
+                "chunk_ix": i,
+                "lang": lang,
+                "kind": kind,
+            }
+            if translated:
+                md["original"] = original
+            if extra_meta:
+                extra = extra_meta(page) if callable(extra_meta) else extra_meta
+                if isinstance(extra, dict):
+                    md.update(extra)
+            docs.append({
+                "id": "%s#%d" % (page.get("url", ""), i),
+                "text": index_text,
+                "metadata": md,
+            })
+    return docs, translated_n
+
+
+def _translate_org_fields(profile: Dict[str, Any], people: List[Dict[str, Any]]) -> None:
+    """Short org facts. Originals stay; *_translated is additive."""
+    try:
+        import spotter_translate as st
+    except Exception:
+        return
+    try:
+        st.translate_fields(profile, ["description", "industry", "address"],
+                            for_ingest=True)
+        for p in people:
+            st.translate_fields(p, ["job_title", "title"], for_ingest=True)
+    except Exception:
+        pass
 
 
 def _strip_heading_marks(s: str) -> str:
@@ -680,9 +795,12 @@ class SiteCrawler:
 
         self._requests += 1
         try:
+            accept = "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8"
+            if _pdf_fetch_enabled():
+                accept += ",application/pdf;q=0.7"
             r = requests.get(url, headers={
                 "User-Agent": self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+                "Accept": accept,
                 "Accept-Language": "en-US,en;q=0.9",
             }, timeout=self.timeout, proxies=self.proxies,
                 allow_redirects=True, stream=True)
@@ -711,14 +829,28 @@ class SiteCrawler:
                 self._note("HTTP %s for %s" % (r.status_code, url[:120]))
                 return None
             ctype = (r.headers.get("Content-Type") or "").lower() if hasattr(r, "headers") else ""
+            path_pdf = bool(_EXT_PDF.search(urlparse(url).path or ""))
+            pdf_ok = _pdf_fetch_enabled() and (
+                "pdf" in ctype or (path_pdf and "octet-stream" in ctype) or path_pdf)
             if ctype and not any(t in ctype for t in ("html", "xml", "text/plain")):
-                return None
+                if not pdf_ok:
+                    return None
             body = b""
             for chunk in r.iter_content(64 * 1024):
                 body += chunk
                 if len(body) >= self.max_bytes:
                     body = body[: self.max_bytes]
                     break
+            if body[:5] == b"%PDF-" or (pdf_ok and path_pdf):
+                if not _pdf_fetch_enabled():
+                    return None
+                extracted = _extract_pdf_via_sidecar(body, url)
+                text = str(extracted.get("text") or "").strip()
+                if not text:
+                    self._note("pdf extract empty for %s: %s"
+                               % (url[:120], extracted.get("error") or "no text"))
+                    return None
+                return _PDF_MARK + text
             return body.decode("utf-8", "replace")
         finally:
             try:
@@ -877,7 +1009,17 @@ class SiteCrawler:
             if not body:
                 continue
             self.fetched.append(url)
-            page = extract_page(body)
+            if body.startswith(_PDF_MARK):
+                page = {
+                    "title": (urlparse(url).path or "/").rsplit("/", 1)[-1] or "document.pdf",
+                    "text": body[len(_PDF_MARK):],
+                    "links": [],
+                    "jsonld": [],
+                    "kind": "pdf",
+                }
+            else:
+                page = extract_page(body)
+                page["kind"] = "html"
             page["url"] = url
             pages.append(page)
 
@@ -1444,6 +1586,7 @@ def crawl_and_index(
         "empty_kind": "",
         "empty_message": "",
         "chunks_indexed": 0,
+        "chunks_translated": 0,
         "collection": "",
         # Additive, so a cached record written before the Tavily backend
         # existed still renders. `backend` answers the question an operator
@@ -1611,6 +1754,8 @@ def crawl_and_index(
     except Exception:
         pass
 
+    _translate_org_fields(profile, people)
+
     out["profile"] = profile
     out["people"] = people[:100]
 
@@ -1621,31 +1766,15 @@ def crawl_and_index(
         if indexer is None:
             from rag_indexer import RAGIndexer
             indexer = RAGIndexer()
-        size = _as_int(os.environ.get("SITE_CHUNK_CHARS"), _DEFAULT_CHUNK_CHARS)
-        overlap = _as_int(os.environ.get("SITE_CHUNK_OVERLAP"), _DEFAULT_CHUNK_OVERLAP)
         crawled_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-        docs: List[Dict[str, Any]] = []
-        for page in pages:
-            body = page.get("text") or ""
-            for i, ch in enumerate(chunk_text(body, size=size, overlap=overlap)):
-                docs.append({
-                    "id": "%s#%d" % (page.get("url", ""), i),
-                    "text": ch["text"],
-                    "metadata": {
-                        "url": page.get("url", ""),
-                        "page_title": page.get("title", ""),
-                        "heading": ch.get("heading", ""),
-                        "sketch_id": str(sketch_id or ""),
-                        "crawled_at": crawled_at,
-                        "chunk_ix": i,
-                    },
-                })
+        docs, translated_n = _docs_from_pages(
+            pages, sketch_id=str(sketch_id or ""), crawled_at=crawled_at)
         # Reset first: index_documents dedups by id and can never CHANGE a
         # document, so without this a re-crawl of an edited page keeps serving
         # the old text forever.
         indexer.reset_collection(col)
         out["chunks_indexed"] = indexer.index_documents(col, docs)
+        out["chunks_translated"] = translated_n
     except Exception as e:                            # noqa: BLE001
         crawler._note("site indexing failed: %r" % (e,))
     return out
@@ -1684,6 +1813,7 @@ def extract_urls(urls: List[str], *, sketch_id: str = "", base_domain: str = "",
         "refused_sample": [],
         "off_domain": 0,
         "chunks_indexed": 0,
+        "chunks_translated": 0,
         "collection": "",
         "errors": [],
     }
@@ -1761,32 +1891,19 @@ def extract_urls(urls: List[str], *, sketch_id: str = "", base_domain: str = "",
         if indexer is None:
             from rag_indexer import RAGIndexer
             indexer = RAGIndexer()
-        size = _as_int(os.environ.get("SITE_CHUNK_CHARS"), _DEFAULT_CHUNK_CHARS)
-        overlap = _as_int(os.environ.get("SITE_CHUNK_OVERLAP"), _DEFAULT_CHUNK_OVERLAP)
         read_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        docs: List[Dict[str, Any]] = []
-        for page in pages:
-            for i, ch in enumerate(chunk_text(page.get("text") or "",
-                                              size=size, overlap=overlap)):
-                docs.append({
-                    "id": "%s#%d" % (page.get("url", ""), i),
-                    "text": ch["text"],
-                    "metadata": {
-                        "url": page.get("url", ""),
-                        "page_title": page.get("title", ""),
-                        "heading": ch.get("heading", ""),
-                        "sketch_id": str(sketch_id or ""),
-                        "crawled_at": read_at,
-                        "chunk_ix": i,
-                        # The whole reason this path is separate. A passage from
-                        # somebody else's site must be attributable as such.
-                        "in_scope": bool(page.get("in_scope")),
-                    },
-                })
+        docs, translated_n = _docs_from_pages(
+            pages, sketch_id=str(sketch_id or ""), crawled_at=read_at,
+            extra_meta=lambda page: {
+                # The whole reason this path is separate. A passage from
+                # somebody else's site must be attributable as such.
+                "in_scope": bool(page.get("in_scope")),
+            })
         # NOT reset_collection(): this adds to whatever the crawl indexed rather
         # than replacing it. index_documents dedups by id, so re-reading the
         # same URL is idempotent.
         out["chunks_indexed"] = indexer.index_documents(col, docs)
+        out["chunks_translated"] = translated_n
     except Exception as e:                            # noqa: BLE001
         out["errors"].append("extract_urls indexing failed: %r" % (e,))
     return out
@@ -1807,6 +1924,9 @@ def ask_site(question: str, sketch_id: str, n_results: int = 5,
         md = h.get("metadata") or {}
         out.append({
             "text": h.get("document", ""),
+            "original": md.get("original") or "",
+            "lang": md.get("lang") or "",
+            "kind": md.get("kind") or "",
             "url": md.get("url", ""),
             "page_title": md.get("page_title", ""),
             "heading": md.get("heading", ""),

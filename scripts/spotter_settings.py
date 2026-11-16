@@ -181,6 +181,28 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
         "help": "Per-request timeout. The service is free and best-effort, so "
                 "treat slowness as expected rather than exceptional.",
     },
+    # --- OSINT third-party APIs (workflow 13) ---
+    # The campaign proxy is the default for every external lookup. Shodan and
+    # FOFA (and Censys / BinaryEdge on the same cards) can skip it when the
+    # vendor refuses that egress — Cloudflare 403 on Tor is the usual case.
+    # Target HTTP probes stay on the campaign proxy either way.
+    "SHODAN_BYPASS_PROXY": {
+        "type": "int", "default": 0, "lo": 0, "hi": 1,
+        "group": "OSINT egress", "label": "Shodan: Bypass Proxy",
+        "help": "On = query api.shodan.io, internetdb.shodan.io and Censys from "
+                "this host, skipping the campaign proxy. Shodan/Cloudflare refuse "
+                "most Tor exits (HTTP 403), which makes a proxied run look empty. "
+                "The host address is then visible to Shodan. Target probes stay "
+                "on the campaign proxy. Off = honour the campaign proxy.",
+    },
+    "FOFA_BYPASS_PROXY": {
+        "type": "int", "default": 0, "lo": 0, "hi": 1,
+        "group": "OSINT egress", "label": "FOFA: Bypass Proxy",
+        "help": "On = query fofa.info and BinaryEdge from this host, skipping "
+                "the campaign proxy. Use this when FOFA refuses the campaign "
+                "egress. The host address is then visible to FOFA. Off = honour "
+                "the campaign proxy.",
+    },
     # --- Flare.io domain breach export (workflow 13) ---
     # The domain credential search is paged to completion; these bound how much
     # it pulls and how much of it the default (masked) response carries. The
@@ -423,6 +445,77 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
                 "crawl is rate-limited, so a large page budget needs a matching "
                 "ceiling or it stops early and silently.",
     },
+    "SITE_FETCH_PDF": {
+        "type": "int", "default": 0, "lo": 0, "hi": 1,
+        "group": "Organization", "label": "Fetch in-scope PDFs",
+        "help": "1 = the website crawler also fetches in-scope .pdf URLs "
+                "(same domain lock, same per-page byte cap) and indexes the "
+                "extracted text. Off by default: a brochure-heavy site can "
+                "burn the page budget on filings.",
+    },
+    # --- Retrieved-content translation (website crawl, hh.ru, EyeWitness, PDFs) ---
+    "TRANSLATE_ENABLED": {
+        "type": "int", "default": 1, "lo": 0, "hi": 1,
+        "group": "Translation", "label": "Translate retrieved content",
+        "help": "Local translation of retrieved foreign-language text through "
+                "the analysis model. Originals stay stored; the translation is "
+                "a parallel field. Off = never call the model for this.",
+    },
+    "TRANSLATE_TARGET_LANG": {
+        "type": "str", "default": "en",
+        "choices": ["en", "ru", "uk", "zh", "ja", "ko", "ar"],
+        "group": "Translation", "label": "Target language",
+        "help": "Language retrieved content is translated into. The original "
+                "is always kept for citations and matching.",
+    },
+    "TRANSLATE_ON_INGEST": {
+        "type": "int", "default": 1, "lo": 0, "hi": 1,
+        "group": "Translation", "label": "Translate at ingest",
+        "help": "1 = translate short org fields and website RAG chunks during "
+                "the crawl. 0 = original only at ingest; the operator can still "
+                "request a translation from a card. Turning this off avoids "
+                "queueing vLLM behind a large Russian crawl.",
+    },
+    "TRANSLATE_OCR_ENABLED": {
+        "type": "int", "default": 1, "lo": 0, "hi": 1,
+        "group": "Translation", "label": "Screenshot OCR",
+        "help": "1 = the Web tab can OCR an EyeWitness screenshot and translate "
+                "the text. The PNG is left untouched; OCR lives in a sidecar "
+                "JSON next to it.",
+    },
+    "TRANSLATE_OCR_ON_INGEST": {
+        "type": "int", "default": 0, "lo": 0, "hi": 1,
+        "group": "Translation", "label": "OCR high-value shots at ingest",
+        "help": "1 = EyeWitness ingest OCRs high-value / default-cred "
+                "screenshots automatically. Off by default so a 200-host sweep "
+                "does not stall the upload ack.",
+    },
+    "TRANSLATE_MAX_CHARS": {
+        "type": "int", "default": 4000, "lo": 200, "hi": 20000,
+        "group": "Translation", "label": "Max characters per call",
+        "help": "Longer strings are clipped. Website chunks are already ~1500 "
+                "characters; this is the ceiling for a description or OCR dump.",
+    },
+    "TRANSLATE_MAX_CHUNKS": {
+        "type": "int", "default": 80, "lo": 0, "hi": 400,
+        "group": "Translation", "label": "Max translated crawl chunks",
+        "help": "How many website chunks one crawl may send through the model. "
+                "The rest stay original-only. 0 disables chunk translation "
+                "without turning off short-field translation.",
+    },
+    "TRANSLATE_TIMEOUT": {
+        "type": "int", "default": 60, "lo": 5, "hi": 180,
+        "group": "Translation", "label": "Per-call timeout (s)",
+        "help": "Seconds the analysis model may spend on one translation. A "
+                "timeout leaves the original in place and records "
+                "llm_unavailable.",
+    },
+    "TRANSLATE_OCR_MAX_PAGES": {
+        "type": "int", "default": 8, "lo": 1, "hi": 40,
+        "group": "Translation", "label": "Max OCR pages per PDF",
+        "help": "Scanned PDFs with no text layer are OCRed page by page up to "
+                "this cap. Text-layer PDFs ignore it.",
+    },
     # --- SEC EDGAR (workflow 13, `org` source) ---
     "EDGAR_MIN_SCORE": {
         "type": "int", "default": 72, "lo": 0, "hi": 100,
@@ -664,6 +757,7 @@ SETTINGS_SPEC: Dict[str, Dict[str, Any]] = {
 # Panel section order. Anything not listed falls to the end alphabetically.
 GROUP_ORDER = [
     "Organization",
+    "Translation",
     "Russian Corporate Intelligence",
     "Russian Leak DBs",
     "Telegram OSINT",
@@ -673,6 +767,7 @@ GROUP_ORDER = [
     "Super-Enrich",
     "Cloud bucket exposure",
     "Passive DNS (ip.thc.org)",
+    "OSINT egress",
     "Vulnerability scanning",
     "Exploit intelligence",
     "Attack path analysis",
@@ -762,7 +857,15 @@ def _coerce(spec: Dict[str, Any], raw: Any) -> Any:
     if spec.get("type") == "int":
         value = int(str(raw).strip())
         return max(spec["lo"], min(spec["hi"], value))
-    return str(raw).strip()
+    text = str(raw).strip()
+    choices = spec.get("choices") or []
+    if choices:
+        folded = {str(c).strip().lower(): str(c).strip() for c in choices}
+        hit = folded.get(text.lower())
+        if hit is None:
+            raise ValueError("value %r is not one of %s" % (text, list(choices)))
+        return hit
+    return text
 
 
 # ── Resolution ───────────────────────────────────────────────────────────────
@@ -799,10 +902,38 @@ def resolve_int(name: str, _stored: Optional[Dict[str, Any]] = None) -> int:
     return int(spec["default"])
 
 
-def resolve_many(names: List[str]) -> Dict[str, int]:
+def resolve_str(name: str, _stored: Optional[Dict[str, Any]] = None) -> str:
+    """Effective string value for `name`: SpotterMeta -> env -> default."""
+    stored = read_settings() if _stored is None else _stored
+    spec = SETTINGS_SPEC.get(name)
+    if spec is None:
+        for candidate in (stored.get(name), os.environ.get(name)):
+            if candidate is None or (isinstance(candidate, str) and not candidate.strip()):
+                continue
+            return str(candidate).strip()
+        return ""
+    for candidate in (stored.get(name), os.environ.get(name)):
+        if candidate is None or (isinstance(candidate, str) and not candidate.strip()):
+            continue
+        try:
+            return str(_coerce(spec, candidate))
+        except (TypeError, ValueError):
+            continue
+    return str(spec["default"])
+
+
+def resolve(name: str, _stored: Optional[Dict[str, Any]] = None) -> Any:
+    """Effective value, int or str, matching SETTINGS_SPEC[name]['type']."""
+    spec = SETTINGS_SPEC.get(name) or {}
+    if spec.get("type") == "str":
+        return resolve_str(name, _stored)
+    return resolve_int(name, _stored)
+
+
+def resolve_many(names: List[str]) -> Dict[str, Any]:
     """Resolve several settings against a single registry read."""
     stored = read_settings()
-    return {n: resolve_int(n, stored) for n in names}
+    return {n: resolve(n, stored) for n in names}
 
 
 def effective() -> List[Dict[str, Any]]:
@@ -822,10 +953,12 @@ def effective() -> List[Dict[str, Any]]:
             source = "default"
         out.append({
             "name": name,
-            "value": resolve_int(name, stored),
+            "value": resolve(name, stored),
             "source": source,
             "default": spec["default"],
-            "lo": spec["lo"], "hi": spec["hi"],
+            "type": spec.get("type") or "int",
+            "choices": list(spec.get("choices") or []),
+            "lo": spec.get("lo"), "hi": spec.get("hi"),
             "group": spec["group"], "label": spec["label"], "help": spec["help"],
             "env_value": (os.environ.get(name) or "").strip() or None,
         })

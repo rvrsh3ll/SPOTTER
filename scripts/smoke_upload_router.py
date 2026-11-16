@@ -240,6 +240,22 @@ def main() -> int:
         else:
             sys.modules["flowsint_client"] = real_flowsint
 
+    check(ur.detect_format(b"%PDF-1.4\n1 0 obj<<>>endobj\n", "filing.pdf") == "pdf",
+          "PDF magic is detected as pdf")
+    check(ur.detect_format(b"%PDF-1.7\n", "notes.txt") == "pdf",
+          "PDF magic wins over the filename")
+    docx_buf = io.BytesIO()
+    with zipfile.ZipFile(docx_buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<w:document/>")
+    check(ur.detect_format(docx_buf.getvalue(), "note.docx") == "docx",
+          "a DOCX zip is detected from word/document.xml")
+    pdf_route = ur.route_bytes(b"%PDF-1.4\n% empty\n", filename="memo.pdf", ingest=False)
+    check(pdf_route["format"] == "pdf", "route_bytes reports pdf", pdf_route["format"])
+    check(pdf_route["nodes_count"] >= 1, "a PDF still emits a document node",
+          pdf_route["nodes_count"])
+    check(pdf_route["format"] != "text_llm", "a PDF is not fed to the LLM text fallback")
+
     print()
     print("SMOKE " + ("OK" if ok else "FAILED"))
     return 0 if ok else 1

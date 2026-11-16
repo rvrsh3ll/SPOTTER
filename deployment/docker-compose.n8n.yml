@@ -126,6 +126,8 @@ services:
       THC_SUBDOMAIN_LIMIT: ${THC_SUBDOMAIN_LIMIT:-300}
       THC_RDNS_MAX_IPS: ${THC_RDNS_MAX_IPS:-8}
       THC_TIMEOUT: ${THC_TIMEOUT:-15}
+      SHODAN_BYPASS_PROXY: ${SHODAN_BYPASS_PROXY:-0}
+      FOFA_BYPASS_PROXY: ${FOFA_BYPASS_PROXY:-0}
       # --- Social enrichment ownership/orchestration ---
       # Default 'direct' works out of the box (WF03 calls the sidecars itself).
       # 'plugin' requires real SOCIAL_*_FLOW_ID values or WF03 is a silent no-op.
@@ -194,6 +196,7 @@ services:
       SITE_DELAY_MS: ${SITE_DELAY_MS:-500}
       SITE_MAX_BYTES_PER_PAGE: ${SITE_MAX_BYTES_PER_PAGE:-2097152}
       SITE_MAX_SECONDS: ${SITE_MAX_SECONDS:-180}
+      SITE_FETCH_PDF: ${SITE_FETCH_PDF:-0}
       SITE_TIMEOUT: ${SITE_TIMEOUT:-20}
       # One bounded request before the crawl commits its budget; 0 skips it.
       SITE_PREFLIGHT_TIMEOUT: ${SITE_PREFLIGHT_TIMEOUT:-10}
@@ -224,6 +227,16 @@ services:
       ORG_JOBS_MAX: ${ORG_JOBS_MAX:-60}
       # --- Titus credential scanner ---
       TITUS_API_URL: ${TITUS_API_URL:-http://titus-api:8051}
+      TRANSLATE_API_URL: ${TRANSLATE_API_URL:-http://translate-api:8052}
+      TRANSLATE_ENABLED: ${TRANSLATE_ENABLED:-1}
+      TRANSLATE_TARGET_LANG: ${TRANSLATE_TARGET_LANG:-en}
+      TRANSLATE_ON_INGEST: ${TRANSLATE_ON_INGEST:-1}
+      TRANSLATE_OCR_ENABLED: ${TRANSLATE_OCR_ENABLED:-1}
+      TRANSLATE_OCR_ON_INGEST: ${TRANSLATE_OCR_ON_INGEST:-0}
+      TRANSLATE_MAX_CHARS: ${TRANSLATE_MAX_CHARS:-4000}
+      TRANSLATE_MAX_CHUNKS: ${TRANSLATE_MAX_CHUNKS:-80}
+      TRANSLATE_TIMEOUT: ${TRANSLATE_TIMEOUT:-60}
+      TRANSLATE_OCR_MAX_PAGES: ${TRANSLATE_OCR_MAX_PAGES:-8}
       SPOTTER_CRED_ENRICHER_FLOW_ID: ${SPOTTER_CRED_ENRICHER_FLOW_ID}
       # --- Analysis LLM (via llm-gateway -> vLLM) ---
       # These fallbacks read qwen3:8b until 2026-08-14 while .env pinned a 27b model, so a
@@ -309,7 +322,7 @@ services:
       # /proc/<python-runner-pid>/environ instead. A module missing from the JSON is
       # blocked no matter what is listed here.
       N8N_RUNNERS_STDLIB_ALLOW: "*"
-      N8N_RUNNERS_EXTERNAL_ALLOW: "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,tuoni_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,spotter_proxy,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup,site_clone_ingest,site_clone_analyze,site_clone"
+      N8N_RUNNERS_EXTERNAL_ALLOW: "requests,urllib3,chardet,charset_normalizer,certifi,idna,cchardet,socks,sharphound_parser,pingcastle_parser,nessus_parser,nessus_context,flowsint_client,upload_router,llm_client,cobalt_normalizer,brc4_normalizer,adaptix_normalizer,tuoni_normalizer,c2_common,high_value_tech,asset_labels,asset_ownership,flare_client,spotter_campaign_acl,spotter_settings,spotter_notify,spotter_cache,spotter_proxy,analysis_history,cve_client,mitre_client,poc_client,rag_indexer,tech_context_engine,tech_enricher,hh_client,job_titles,serp_client,site_rag,edgar_client,employment_evidence,tavily_client,certcreep,individual_lookup,site_clone_ingest,site_clone_analyze,site_clone,spotter_translate"
       N8N_WEBHOOK_BASE_URL: http://n8n:5678
       # Must match the n8n service block above — the code nodes that call the Analysis LLM
       # run HERE, in the runner, so a value set only on n8n has no effect on WF10/WF12.
@@ -330,7 +343,7 @@ services:
       SPOTTER_PROXY_URL: ${SPOTTER_PROXY_URL:-}
       HTTP_PROXY: ${SPOTTER_PROXY_URL:-}
       HTTPS_PROXY: ${SPOTTER_PROXY_URL:-}
-      NO_PROXY: "site-clone-api,flowsint-api,flowsint-api-prod,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,127.0.0.1,localhost,.flowsint_net"
+      NO_PROXY: "site-clone-api,flowsint-api,flowsint-api-prod,flowsint-neo4j-prod,vllm,llm-gateway,maigret-api,linkedin-api,ssh-tunnel-api,spotter-auth,n8n,spotter-ui,spotter-caddy,titus-api,translate-api,127.0.0.1,localhost,.flowsint_net"
       FLOWSINT_API_URL: ${FLOWSINT_API_URL:-http://flowsint-api-prod:5001}
       SITE_CLONE_API_URL: ${SITE_CLONE_API_URL:-http://site-clone-api:7052}
       SITE_CLONE_DATA: ${SITE_CLONE_DATA:-/data/clones}
@@ -371,6 +384,8 @@ services:
       THC_SUBDOMAIN_LIMIT: ${THC_SUBDOMAIN_LIMIT:-300}
       THC_RDNS_MAX_IPS: ${THC_RDNS_MAX_IPS:-8}
       THC_TIMEOUT: ${THC_TIMEOUT:-15}
+      SHODAN_BYPASS_PROXY: ${SHODAN_BYPASS_PROXY:-0}
+      FOFA_BYPASS_PROXY: ${FOFA_BYPASS_PROXY:-0}
       # Workflow 04's "Score Attack Paths" and workflow 21's "Normalise Badger
       # Webhook" also run HERE, so these runtime values must be duplicated from
       # the n8n service above -- setting them only there cannot reach a code node.
@@ -391,6 +406,16 @@ services:
       SOCIAL_MAIGRET_FLOW_ID: ${SOCIAL_MAIGRET_FLOW_ID:-}
       SOCIAL_LINKEDIN_FLOW_ID: ${SOCIAL_LINKEDIN_FLOW_ID:-}
       TITUS_API_URL: ${TITUS_API_URL:-http://titus-api:8051}
+      TRANSLATE_API_URL: ${TRANSLATE_API_URL:-http://translate-api:8052}
+      TRANSLATE_ENABLED: ${TRANSLATE_ENABLED:-1}
+      TRANSLATE_TARGET_LANG: ${TRANSLATE_TARGET_LANG:-en}
+      TRANSLATE_ON_INGEST: ${TRANSLATE_ON_INGEST:-1}
+      TRANSLATE_OCR_ENABLED: ${TRANSLATE_OCR_ENABLED:-1}
+      TRANSLATE_OCR_ON_INGEST: ${TRANSLATE_OCR_ON_INGEST:-0}
+      TRANSLATE_MAX_CHARS: ${TRANSLATE_MAX_CHARS:-4000}
+      TRANSLATE_MAX_CHUNKS: ${TRANSLATE_MAX_CHUNKS:-80}
+      TRANSLATE_TIMEOUT: ${TRANSLATE_TIMEOUT:-60}
+      TRANSLATE_OCR_MAX_PAGES: ${TRANSLATE_OCR_MAX_PAGES:-8}
       SPOTTER_CRED_ENRICHER_FLOW_ID: ${SPOTTER_CRED_ENRICHER_FLOW_ID}
       # Domain-breach export caps for WF13's Flare.io path. These are also
       # runtime-tunable from the Configuration panel through spotter_settings.
@@ -462,6 +487,7 @@ services:
       SITE_DELAY_MS: ${SITE_DELAY_MS:-500}
       SITE_MAX_BYTES_PER_PAGE: ${SITE_MAX_BYTES_PER_PAGE:-2097152}
       SITE_MAX_SECONDS: ${SITE_MAX_SECONDS:-180}
+      SITE_FETCH_PDF: ${SITE_FETCH_PDF:-0}
       SITE_TIMEOUT: ${SITE_TIMEOUT:-20}
       # One bounded request before the crawl commits its budget; 0 skips it.
       SITE_PREFLIGHT_TIMEOUT: ${SITE_PREFLIGHT_TIMEOUT:-10}

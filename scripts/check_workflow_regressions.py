@@ -835,6 +835,8 @@ def run_checks() -> List[str]:
     require_contains("13", "FOFA field entitlements", n13,
                      "'host,ip,port,protocol,title,server,os,country,region,city,link,domain,icp',", failures)
     require_contains("13", "FOFA field entitlements", n13, "result['fofa_status']", failures)
+    require_contains("13", "FOFA key paste", n13, "def _normalize_fofa_key(raw):", failures)
+    require_contains("13", "FOFA key paste", n13, "FOFA_KEY = _normalize_fofa_key(FOFA_KEY)", failures)
     require_contains("13", "FOFA field entitlements", n13,
                      "'fofa':   ['fofa_results', 'fofa_total', 'fofa_ports', 'fofa_products', 'fofa_status'],",
                      failures)
@@ -846,6 +848,14 @@ def run_checks() -> List[str]:
                      failures)
     require_contains("13", "Shodan status", n13, "proxies=THC_PROXIES", failures)
     require_contains("13", "Shodan status", n13, "headers=_shodan_headers", failures)
+    require_contains("13", "Shodan status", n13, "_note_shodan('blocked'", failures)
+    require_contains("13", "Shodan status", n13, "def _shodan_blocked_detail(http_status, where):", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "SHODAN_BYPASS_PROXY", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "FOFA_BYPASS_PROXY", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "SHODAN_PROXIES = {}", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "FOFA_PROXIES = {}", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "proxies=SHODAN_PROXIES", failures)
+    require_contains("13", "OSINT proxy bypass", n13, "proxies=FOFA_PROXIES", failures)
 
     # ── Perimeter technologies ───────────────────────────────────────────────
     # WF13 must create first-class Technology nodes from perimeter recon. Before
@@ -1096,6 +1106,23 @@ def check_title_match_ordering(nodes: Dict[str, Dict[str, str]],
             failures.append(
                 f"13/{node_name}: {bad} -- open roles must stay card data; an "
                 "unregistered nodeType 500s the entire sketch")
+
+    # Retrieved-content translation. site_rag / hh_client write *_translated
+    # siblings; a whitelist that copies only the original keys makes the
+    # dashboard look like translation never ran.
+    require_contains("13", node_name, code,
+                     "'chunks_translated': _site.get('chunks_translated', 0)",
+                     failures)
+    require_contains("13", node_name, code,
+                     "'job_title_translated': p.get('job_title_translated', '')",
+                     failures)
+    require_contains("13", node_name, code,
+                     "'job_title_translated': _p.get('job_title_translated', '')",
+                     failures)
+    require_contains("13", node_name, code, "SITE_FETCH_PDF", failures)
+    require_contains("13", node_name, code,
+                     "os.environ['SITE_FETCH_PDF'] = str(SITE_FETCH_PDF)",
+                     failures)
 
 
 def check_job_title_rules(failures: List[str]) -> None:
@@ -2265,6 +2292,12 @@ def check_task_runner_env(failures: List[str]) -> None:
                 "SITE_ENABLED", "SITE_MAX_PAGES", "SITE_MAX_DEPTH",
                 "SITE_DELAY_MS", "SITE_MAX_BYTES_PER_PAGE", "SITE_MAX_SECONDS",
                 "SITE_TIMEOUT", "SITE_CHUNK_CHARS", "SITE_CHUNK_OVERLAP",
+                "SITE_FETCH_PDF",
+                "TRANSLATE_API_URL", "TRANSLATE_ENABLED", "TRANSLATE_TARGET_LANG",
+                "TRANSLATE_ON_INGEST", "TRANSLATE_OCR_ENABLED",
+                "TRANSLATE_OCR_ON_INGEST", "TRANSLATE_MAX_CHARS",
+                "TRANSLATE_MAX_CHUNKS", "TRANSLATE_TIMEOUT",
+                "TRANSLATE_OCR_MAX_PAGES",
                 # Unlisted, the egress preflight falls back to its module
                 # default and an operator who set it to 0 to skip it would
                 # never see that take effect.
@@ -2329,7 +2362,10 @@ def check_task_runner_env(failures: List[str]) -> None:
                 "site_clone", "site_clone_analyze", "site_clone_ingest",
                 # Imported directly by WF05 and WF08. A missing entry is a
                 # security violation before line 1; try/except does not save it.
-                "individual_lookup"):
+                "individual_lookup",
+                # Imported by site_rag / hh_client / eyewitness_parser at
+                # ingest time so a Russian crawl indexes English chunks.
+                "spotter_translate"):
         if mod not in external:
             failures.append(f"n8n-task-runners.json: {mod} missing from N8N_RUNNERS_EXTERNAL_ALLOW")
     _check_certcreep_ru_source(failures)

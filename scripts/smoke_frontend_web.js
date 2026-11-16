@@ -170,6 +170,8 @@ setTimeout(() => {
      'modal shows the full screenshot', shot && shot.getAttribute('src'));
   ok(d.getElementById('webdm-body').textContent.includes('root/calvin'),
      'modal surfaces the identified default credentials');
+  ok(d.getElementById('web-ocr-btn'),
+     'a screenshot endpoint offers OCR & translate');
   w.closeWebDetail();
   ok(modal.classList.contains('hidden'), 'closeWebDetail hides the modal again');
 
@@ -177,6 +179,8 @@ setTimeout(() => {
   w.openWebDetail(1);
   ok(!d.querySelector('#webdm-body img.web-shot'),
      'a screenshot-less endpoint shows no <img> in the modal');
+  ok(!d.getElementById('web-ocr-btn'),
+     'a screenshot-less endpoint has no OCR button');
   ok(d.getElementById('webdm-body').textContent.includes('host9.corp.local'),
      'modal surfaces the FQDN derived from the URL');
   ok(d.getElementById('webdm-host').textContent.includes('host9.corp.local'),
