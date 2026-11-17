@@ -77,6 +77,14 @@ function makeStub(w, calls, overrides = {}) {
                                                           entry_countries: body?.entry_countries || [], exit_countries: body?.exit_countries || [],
                                                           strict_nodes: !!body?.strict_nodes, bootstrap_percent: 5, bootstrapped: false, uptime_seconds: 0 } });
     if (/tor\/stop$/.test(url))      return reply({ ok: true, running: false, tor: null, error: '' });
+    if (/tor\/newnym$/.test(url))    return reply(overrides.torNewnym || {
+      ok: true, running: true, newnym: true, circuits_ready: true,
+      cooldown_seconds: 10, exit_fingerprint: 'A1B2C3D4', error: '',
+      last_log: 'SIGNAL NEWNYM accepted',
+      tor: { id: 't1', pid: 42, socks_host: 'ssh-tunnel-api', socks_port: 9050,
+             entry_countries: [], exit_countries: [], strict_nodes: false,
+             bootstrap_percent: 100, bootstrapped: true, uptime_seconds: 12 },
+    });
     if (/tunnel\/egress$/.test(url)) return reply(overrides.egress || {
       ok: true, error: '', ip: '198.51.100.7',
       geo: { country: 'Netherlands', country_code: 'NL', city: 'Amsterdam', asn: 'AS64500', org: 'Example B.V.' },
@@ -167,6 +175,10 @@ async function main() {
   ok(values.includes('tor'), 'proxy type offers "tor"', values.join(','));
 
   ok(!!d.getElementById('infra-tor-block'), '#infra-tor-block exists');
+  ok(!!d.getElementById('infra-tor-newnym-btn'), 'New TOR Circuit button exists');
+  ok(d.getElementById('infra-tor-newnym-btn').textContent.trim() === 'New TOR Circuit',
+     'New TOR Circuit button uses that label',
+     d.getElementById('infra-tor-newnym-btn').textContent);
   ok(d.getElementById('infra-tor-block').style.display === 'none', 'tor block starts hidden');
   ok(!!d.getElementById('infra-tor-entry'), 'entry country select exists');
   ok(d.getElementById('infra-tor-entry').multiple === true, 'entry select is multi-select');
@@ -487,6 +499,8 @@ async function main() {
      'an unbootstrapped Tor is not reported as ready', torBar.textContent);
   ok(torBar.className === 'wbar', 'and is amber until circuits exist', torBar.className);
   ok(d.getElementById('infra-tor-start-btn').disabled === true, 'start button disables while running');
+  ok(d.getElementById('infra-tor-newnym-btn').disabled === true,
+     'New TOR Circuit stays disabled until circuits exist');
 
   // Strict with no countries is refused before it reaches the sidecar.
   const before = calls3.length;
@@ -503,6 +517,40 @@ async function main() {
      'a tor-less sidecar is named explicitly', d.getElementById('infra-tor-status').textContent);
   ok(d.getElementById('infra-tor-start-btn').disabled === true,
      'and the start button is disabled');
+  ok(d.getElementById('infra-tor-newnym-btn').disabled === true,
+     'and New TOR Circuit is disabled on a tor-less sidecar');
+
+  // A bootstrapped Tor is the only state where rotating the circuit can work.
+  w.infraRenderTorStatus({
+    ok: true, available: true, running: true, error: '', last_log: '',
+    tor: { id: 't1', pid: 42, socks_host: 'ssh-tunnel-api', socks_port: 9050,
+           entry_countries: ['de'], exit_countries: ['nl'], strict_nodes: false,
+           bootstrap_percent: 100, bootstrapped: true, uptime_seconds: 12 },
+  });
+  ok(d.getElementById('infra-tor-newnym-btn').disabled === false,
+     'New TOR Circuit enables once circuits are ready');
+
+  const callsNym = [];
+  w.fetch = makeStub(w, callsNym, {
+    torStatus: {
+      ok: true, available: true, running: true, error: '', last_log: 'SIGNAL NEWNYM accepted',
+      tor: { id: 't1', pid: 42, socks_host: 'ssh-tunnel-api', socks_port: 9050,
+             entry_countries: ['de'], exit_countries: ['nl'], strict_nodes: false,
+             bootstrap_percent: 100, bootstrapped: true, uptime_seconds: 12 },
+    },
+  });
+  await w.infraTorNewCircuit();
+  const nym = callsNym.find(c => /tor\/newnym$/.test(c.url));
+  ok(!!nym, 'New TOR Circuit POSTs /tunnel/tor/newnym');
+  ok(callsNym.some(c => /tunnel\/egress$/.test(c.url)),
+     'and rechecks egress so the operator can see the new exit',
+     JSON.stringify(callsNym.map(c => c.url)));
+  ok(/New Tor circuit is ready/.test(d.getElementById('infra-tor-status').textContent) ||
+     /rechecking egress|circuits ready|bootstrap 100%/.test(d.getElementById('infra-tor-status').textContent),
+     'status bar reports the rotation',
+     d.getElementById('infra-tor-status').textContent);
+  ok(d.getElementById('infra-tor-newnym-btn').disabled === true,
+     'the button cools down after NEWNYM so a double-click cannot outrun Tor');
 
 
   /* ── Step 10: key discovery reconciles a stale saved path ──────────
@@ -801,6 +849,7 @@ async function main() {
      'with the passphrase box live, from the upload response rather than the stale listing');
 
   w.eval('clearTimeout(_infraTorPoll)');   // stop the bootstrap watcher
+  w.eval('clearTimeout(_infraTorNewnymCool)');
 
   console.log(`\n${failures ? 'FAILED' : 'PASSED'} — ${checks - failures}/${checks} checks`);
   process.exit(failures ? 1 : 0);

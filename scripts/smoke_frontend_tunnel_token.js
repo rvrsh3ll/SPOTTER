@@ -69,6 +69,7 @@ const calls = [];
 
   const bar = () => d.getElementById('infra-tor-status');
   const stop = () => d.getElementById('infra-tor-stop-btn');
+  const nym = () => d.getElementById('infra-tor-newnym-btn');
 
   console.log('\n── the field is gone');
   ok(d.getElementById('infra-tunnel-token') === null, 'Managed Tunnel API Token input removed from the DOM');
@@ -80,6 +81,7 @@ const calls = [];
   ok(/Tor running on ssh-tunnel-api:9050/.test(bar().textContent), 'Tor bar shows the live tunnel',
      bar().textContent.trim().slice(0, 90));
   ok(stop().disabled === false, 'Stop button is live');
+  ok(nym() && nym().disabled === false, 'New TOR Circuit is live when circuits are ready');
 
   console.log('\n── leave the tab and come back (the reported failure)');
   w.sw('targets'); await sleep(60);

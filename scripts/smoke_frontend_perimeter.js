@@ -485,6 +485,21 @@ setTimeout(() => {
   ok(/No Shodan data found/.test(shEmpty) && !/rate-limited/.test(shEmpty),
      'an empty Shodan status with no rows still uses the empty sentence',
      (shEmpty.match(/Shodan[\s\S]{0,220}/) || [''])[0]);
+  const shBlocked = drShodan({
+    shodan_api_status: { state: 'blocked', detail: '', http_status: 403, rate_limited: false },
+  });
+  ok(/403/.test(shBlocked) && /Bypass Proxy/.test(shBlocked)
+     && !/No Shodan data found/.test(shBlocked),
+     'a proxied Shodan 403 points at Configuration → Bypass Proxy instead of "no data"',
+     (shBlocked.match(/Shodan[\s\S]{0,280}/) || [''])[0]);
+  const shBypass = drShodan({
+    shodan_results: [{ ip: '203.0.113.11', ports: [443], vulns: [], product: 'Apache httpd' }],
+    shodan_open_ports: [443],
+    shodan_api_status: { state: 'ok', bypass_proxy: true, http_status: 200, rate_limited: false },
+  });
+  ok(/Bypass Proxy is on/.test(shBypass) && /203\.0\.113\.11/.test(shBypass),
+     'a successful Shodan run with Bypass Proxy on says it queried directly',
+     (shBypass.match(/Shodan[\s\S]{0,280}/) || [''])[0]);
 
   // ── Attack-surface value tags ─────────────────────────────────────────────
   // A port, a country or a CVE used to be dead text: the operator could see that

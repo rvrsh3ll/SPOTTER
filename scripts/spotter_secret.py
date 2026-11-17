@@ -171,6 +171,10 @@ def cmd_set(args) -> int:
             return _fail("values did not match; nothing written")
     if not value:
         return _fail("empty value; nothing written")
+    if key == "FOFA_API_KEY":
+        value = se.normalize_fofa_key(value)
+        if not value:
+            return _fail("empty value; nothing written")
 
     path = se.set_value(key, value, tier=tier)
     print(f"wrote {key} -> {os.path.relpath(path, se.REPO)}")

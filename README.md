@@ -3174,6 +3174,13 @@ Start returns as soon as the SOCKS port answers, *not* at 100% bootstrap (a list
 accepts connections and then hangs), so the UI polls `/tunnel/tor/status` and reports the bootstrap
 percentage until circuits exist.
 
+**New TOR Circuit.** `SIGNAL NEWNYM` on the running client: subsequent SOCKS connections get a new
+exit, existing streams keep the circuit they were built on. The egress strip is rechecked automatically
+so the operator can confirm the IP a sweep will present. Tor rate-limits this to once every 10 seconds;
+the button cools down to match. The control channel is a unix socket inside the sidecar (not a TCP
+`ControlPort` on the compose network). A Tor process started before that socket existed is SIGHUP'd
+on the first rotation so it opens one; if that still fails, Stop + Start Tor and retry.
+
 **OPSEC User-Agent.** A pinned list of known User-Agents, or your own string. Presets include common
 Western browsers plus regional options (Yandex Browser for RU; 360 / QQBrowser / Sogou / UC for CN).
 `Workflow default` sends no override at all. It ships independently of the proxy toggle — you can

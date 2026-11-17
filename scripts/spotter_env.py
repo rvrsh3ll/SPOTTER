@@ -138,6 +138,29 @@ _SECRET_SHAPED_RE = re.compile(
 CONFIG = "config"
 UNKNOWN_SECRET = "unknown-secret"
 
+# FOFA's personal-center page shows "API Key: <32-hex>" next to an avatar URL.
+# Pasting that whole line as FOFA_API_KEY makes every search return
+# [-700] 账号无效. The API key itself is 32 hex; pull it out of the common
+# paste shapes so a labelled dump still authenticates.
+_FOFA_KEY_RE = re.compile(r"[0-9a-fA-F]{32}")
+_FOFA_QUERY_KEY_RE = re.compile(r"(?:[?&](?:key|api_key)=)([0-9a-fA-F]{32})", re.I)
+
+
+def normalize_fofa_key(raw: str) -> str:
+    """Return a 32-hex FOFA key from a raw secret, or the stripped input."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if _FOFA_KEY_RE.fullmatch(s):
+        return s
+    m = _FOFA_QUERY_KEY_RE.search(s)
+    if m:
+        return m.group(1)
+    m = _FOFA_KEY_RE.search(s)
+    if m:
+        return m.group(0)
+    return s
+
 
 def classify(key: str) -> str:
     """Return 'machine' | 'vendors' | 'engagement' | 'config' | 'unknown-secret'.

@@ -5,7 +5,11 @@ Covers the three things that have no visible failure mode in the UI:
 
   * torrc generation — a country code carrying a newline would append arbitrary
     Tor directives, and a torrc that quietly drops ExitNodes looks exactly like
-    one that honours it;
+    one that honours it. ControlSocket must be a unix socket (never a TCP
+    ControlPort on the compose network) so SIGNAL NEWNYM stays in-process;
+  * SIGNAL NEWNYM — /tunnel/tor/newnym refuses a Tor that is down or still
+    bootstrapping, rate-limits to Tor's own 10s cooldown, and talks the
+    control protocol (cookie auth, 250+/250- replies, PURPOSE=GENERAL hops);
   * proxy-spec resolution — socks5 vs socks5h decides whether DNS resolves at
     the proxy or leaks to the local resolver, and both "work";
   * egress response parsing — no egress source's shape is contractually stable,
@@ -29,15 +33,22 @@ from __future__ import annotations
 
 import io
 import os
+import socket
 import stat
 import sys
 import tempfile
+import threading
+import time
 
 _TMP = tempfile.mkdtemp(prefix="spotter-tor-smoke-")
 # Must be set BEFORE the import: app.py resolves its config at module load.
 os.environ.setdefault("TOR_DATA_DIR", _TMP)
 os.environ.setdefault("TOR_GEOIP_FILE", os.path.join(_TMP, "missing-geoip"))
 os.environ.setdefault("TOR_GEOIP6_FILE", os.path.join(_TMP, "missing-geoip6"))
+# Match compose: both the read-only mount and the writable upload root are
+# allowed, otherwise /tunnel/start refuses a key the tab just uploaded.
+os.environ.setdefault("TUNNEL_KEY_ROOTS", "/ssh-keys-uploaded,/ssh-keys")
+os.environ.setdefault("TUNNEL_UPLOAD_KEY_ROOT", "/ssh-keys-uploaded")
 # A real token, not "": /tunnel/* now fails closed when it is unset, so an
 # empty value here would 503 every route below instead of exercising it.
 _SMOKE_TOKEN = "smoke-tunnel-token"
@@ -118,11 +129,46 @@ ok("ClientOnly 1" in body, "runs client-only — never a relay")
 ok(any(l.startswith("SocksPolicy") for l in body.splitlines()),
    "a SocksPolicy is always written", body)
 ok("reject *" in body, "the policy ends in a reject", body)
+ok("ControlSocket " in body and "/control" in body,
+   "a unix ControlSocket is written for NEWNYM", body)
+ok("CookieAuthentication 1" in body, "control auth is cookie-based", body)
+ok("ControlPort" not in body, "no TCP ControlPort — that would be reachable on the compose net", body)
 
 path = app._tor_write_torrc(9050, [], [], True)
 body = open(path, encoding="utf-8").read()
 ok("StrictNodes" not in body, "strict alone is dropped — it means nothing without nodes", body)
 ok("EntryNodes" not in body and "ExitNodes" not in body, "no node lines when nothing is selected")
+ok("ControlSocket " in body, "ControlSocket is still written with no country pins", body)
+
+# ── control protocol parser ────────────────────────────────────────────────
+section("control protocol")
+code, lines = app._tor_control_read_reply(io.BytesIO(b"250 OK\r\n"))
+ok(code == 250 and lines == ["OK"], "reads a single-line 250 OK", (code, lines))
+
+code, lines = app._tor_control_read_reply(io.BytesIO(
+    b"250-circuit-status=1 BUILT $AA~g,$BB~m,$CC~e PURPOSE=GENERAL\r\n"
+    b"250 OK\r\n"))
+ok(code == 250 and any("BUILT" in ln for ln in lines),
+   "reads a 250- mid-line GETINFO", lines)
+
+code, lines = app._tor_control_read_reply(io.BytesIO(
+    b"250+circuit-status=\r\n"
+    b"1 BUILT $AA~g,$BB~m,$DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF~exit PURPOSE=GENERAL\r\n"
+    b".\r\n"
+    b"250 OK\r\n"))
+ok(code == 250 and any("DEADBEEF" in ln for ln in lines),
+   "reads a 250+ multiline GETINFO", lines)
+
+p = app._parse_general_circuit(
+    "1 BUILT $AA~g,$BB~m,$DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF~exit PURPOSE=GENERAL")
+ok(p == ("1", "DEADBEEF"), "extracts the short exit fingerprint", p)
+p = app._parse_general_circuit(
+    "2 BUILT $AA~g,$BB~m,$CC~e BUILD_FLAGS=IS_INTERNAL,NEED_CAPACITY PURPOSE=GENERAL")
+ok(p is None, "skips IS_INTERNAL circuits", p)
+p = app._parse_general_circuit("3 BUILT $AA~g PURPOSE=HS_CLIENT_HSDIR")
+ok(p is None, "skips non-GENERAL circuits", p)
+p = app._parse_general_circuit("circuit-status=")
+ok(p is None, "empty circuit-status is not a circuit", p)
 
 # ── proxy spec resolution ───────────────────────────────────────────────────
 section("proxy spec")
@@ -264,7 +310,10 @@ def run_egress(handler, body):
     sys.modules["requests"] = fake
     try:
         with _client() as client:
-            resp = client.post("/tunnel/egress", json=body)
+            # Egress is a write: the sidecar's before_request gate requires
+            # X-Spotter-Admin (stamped by nginx in production).
+            resp = client.post("/tunnel/egress", json=body,
+                               headers={"X-Spotter-Admin": "1"})
             return resp.get_json(), fake
     finally:
         sys.modules.pop("requests", None)
@@ -923,6 +972,183 @@ ok(not v.get("ok") and "Upload one" in v.get("error", ""),
    "an empty root points at the uploader", v.get("error"))
 
 app._ALLOWED_KEY_ROOTS = _saved_roots
+
+# ── SIGNAL NEWNYM (/tunnel/tor/newnym) ──────────────────────────────────────
+section("/tunnel/tor/newnym")
+
+_NEWNYM_ADMIN = {"X-Spotter-Admin": "1"}
+
+
+class _FakeTorProc:
+    def __init__(self):
+        self.pid = 4242
+        self.signals = []
+
+    def poll(self):
+        return None
+
+    def send_signal(self, sig):
+        self.signals.append(sig)
+
+
+def _mark_tor_running(bootstrap=100, last_newnym_at=0.0):
+    app._tor_state.update({
+        "id": "t-smoke",
+        "pid": 4242,
+        "proc": _FakeTorProc(),
+        "socks_port": 9050,
+        "entry_countries": ["us"],
+        "exit_countries": ["nl"],
+        "strict_nodes": True,
+        "started_at": time.time(),
+        "bootstrap": bootstrap,
+        "error": "",
+        "last_log": "",
+        "torrc_path": "",
+        "last_newnym_at": last_newnym_at,
+        "newnym_busy": False,
+    })
+
+
+def _post_newnym():
+    with _client() as c:
+        r = c.post("/tunnel/tor/newnym", json={}, headers=_NEWNYM_ADMIN)
+        return r.status_code, (r.get_json() or {})
+
+
+app._tor_reset_nolock()
+status, body = _post_newnym()
+ok(status == 409 and body.get("code") == "not_running",
+   "refuses NEWNYM when Tor is down", (status, body))
+
+_mark_tor_running(bootstrap=40)
+status, body = _post_newnym()
+ok(status == 409 and body.get("code") == "not_bootstrapped",
+   "refuses NEWNYM while circuits are still building", (status, body))
+
+_mark_tor_running(bootstrap=100, last_newnym_at=time.time())
+status, body = _post_newnym()
+ok(status == 429 and body.get("code") == "newnym_cooldown",
+   "rate-limits to Tor's own NEWNYM cooldown", (status, body))
+ok(int(body.get("retry_after_seconds") or 0) >= 1,
+   "and says how long to wait", body.get("retry_after_seconds"))
+
+_saved_ensure = app._tor_ensure_control
+_saved_signal = app._tor_signal_newnym
+try:
+    app._tor_ensure_control = lambda: ""
+    app._tor_signal_newnym = lambda: (
+        {"newnym": True, "circuits_ready": True,
+         "exit_fingerprint": "DEADBEEF", "cooldown_seconds": 10},
+        "",
+    )
+    _mark_tor_running(bootstrap=100)
+    status, body = _post_newnym()
+    ok(status == 200 and body.get("ok") is True and body.get("newnym") is True,
+       "a ready Tor accepts NEWNYM", (status, body))
+    ok(body.get("exit_fingerprint") == "DEADBEEF",
+       "and reports the new exit fingerprint", body.get("exit_fingerprint"))
+    ok(body.get("tor", {}).get("bootstrapped") is True,
+       "and still includes the public tor status", body.get("tor"))
+finally:
+    app._tor_ensure_control = _saved_ensure
+    app._tor_signal_newnym = _saved_signal
+    app._tor_reset_nolock()
+
+# Live control protocol against a fake unix socket — no tor binary.
+section("control socket")
+_data = os.path.join(_TMP, "data")
+os.makedirs(_data, exist_ok=True)
+_cookie = os.urandom(32)
+_cookie_path = os.path.join(_data, "control_auth_cookie")
+_sock_path = os.path.join(_data, "control")
+with open(_cookie_path, "wb") as fh:
+    fh.write(_cookie)
+try:
+    os.unlink(_sock_path)
+except OSError:
+    pass
+
+_circ = {"n": 1}
+_stop = threading.Event()
+
+
+def _circ_line():
+    n = _circ["n"]
+    # Fingerprint changes with n so a second NEWNYM is observable too.
+    fp = ("DEADBEEF" if n > 1 else "AAAAAAAA") + "DEAD"
+    return f"{n} BUILT $AA~g,$BB~m,${fp}~exit PURPOSE=GENERAL"
+
+
+def _fake_ctrl():
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(_sock_path)
+    srv.listen(8)
+    srv.settimeout(0.4)
+    while not _stop.is_set():
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        def _handle(c=conn):
+            f = c.makefile("rwb", buffering=0)
+            try:
+                while True:
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    cmd = raw.decode("utf-8", "replace").strip()
+                    if cmd.startswith("AUTHENTICATE"):
+                        got = cmd.split(" ", 1)[-1].strip().lower()
+                        f.write(b"250 OK\r\n" if got == _cookie.hex() else b"515 Authentication failed\r\n")
+                    elif cmd == "SIGNAL NEWNYM":
+                        _circ["n"] += 1
+                        f.write(b"250 OK\r\n")
+                    elif cmd.startswith("GETINFO circuit-status"):
+                        payload = _circ_line().encode("ascii")
+                        f.write(b"250+circuit-status=\r\n" + payload + b"\r\n.\r\n250 OK\r\n")
+                    elif cmd == "QUIT":
+                        f.write(b"250 closing connection\r\n")
+                        break
+                    else:
+                        f.write(b"510 Unrecognized command\r\n")
+                    f.flush()
+            finally:
+                try:
+                    c.close()
+                except OSError:
+                    pass
+
+        threading.Thread(target=_handle, daemon=True).start()
+    try:
+        srv.close()
+    except OSError:
+        pass
+
+
+_thr = threading.Thread(target=_fake_ctrl, daemon=True)
+_thr.start()
+deadline = time.time() + 2
+while time.time() < deadline and not os.path.exists(_sock_path):
+    time.sleep(0.05)
+
+replies, err = app._tor_control(["SIGNAL NEWNYM"])
+ok(not err and replies and replies[0][0] == 250,
+   "AUTHENTICATE + SIGNAL NEWNYM against a fake ControlSocket", (err, replies))
+
+payload, err = app._tor_signal_newnym()
+ok(not err and payload.get("newnym") is True,
+   "_tor_signal_newnym talks the fake controller", (err, payload))
+ok(payload.get("circuits_ready") is True,
+   "and notices the new GENERAL circuit", payload)
+ok(payload.get("exit_fingerprint") == "DEADBEEF",
+   "and reports its short fingerprint", payload.get("exit_fingerprint"))
+
+_stop.set()
+app._tor_reset_nolock()
 
 # ── the token gate fails closed ─────────────────────────────────────────────
 section("API token gate")

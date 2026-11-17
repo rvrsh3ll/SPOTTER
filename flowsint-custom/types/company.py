@@ -100,6 +100,27 @@ class Company(BaseModel):
         default=None, description="When this record was first written"
     )
 
+    # ── LinkedIn override / false positive management ─────────────────────────
+    # These fields let operators correct wrong LinkedIn profiles pulled by WF13.
+    # When linkedin_url_override is set, WF13 uses it instead of searching.
+    # When linkedin_url_fp is true, WF13 skips LinkedIn pull entirely.
+    linkedin_url_override: Optional[str] = Field(
+        default=None,
+        description="Manual correction: the correct LinkedIn company URL (overrides auto-pulled value)"
+    )
+    linkedin_url_fp: Optional[bool] = Field(
+        default=None,
+        description="True = current linkedin_company_url is a false positive; skip LinkedIn pull"
+    )
+    linkedin_override_note: Optional[str] = Field(
+        default=None,
+        description="Operator note explaining why the override was set"
+    )
+    linkedin_override_at: Optional[datetime] = Field(
+        default=None,
+        description="When the override was set"
+    )
+
     # ── Undeclared on purpose (see the module docstring) ──────────────────────
     # open_vacancies: int        employee_count: int       rating: float
     # it_accredited: bool        trusted: bool             has_divisions: bool

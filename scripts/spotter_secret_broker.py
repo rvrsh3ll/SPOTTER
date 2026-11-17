@@ -184,6 +184,11 @@ def _set(key: str, value: str) -> dict:
     err = check_vendor_key(key) or check_value(value)
     if err:
         return {"ok": False, "error": err}
+    if key == "FOFA_API_KEY":
+        value = se.normalize_fofa_key(value)
+        err = check_value(value)
+        if err:
+            return {"ok": False, "error": err}
     try:
         se.set_value(key, value, tier="vendors")
         _scrub_env(key)

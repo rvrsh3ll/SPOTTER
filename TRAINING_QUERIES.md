@@ -164,7 +164,7 @@ read the same WF12/WF25 data from the campaign cache.
 - After WF30/WF13 runs, results are graph nodes — ask chat: *"What do we know
   about {company}?"* / *"Show PEPs linked to {INN}"*.
 
-### LinkedIn override (WF31) — see [LINKEDIN_OVERRIDE.md](LINKEDIN_OVERRIDE.md)
+### LinkedIn override (WF33) — see [LINKEDIN_OVERRIDE.md](LINKEDIN_OVERRIDE.md)
 
 Mark LinkedIn false positives from the UI; the override webhook suppresses them
 in enrichment. This is a button-driven workflow, not a chat query.
@@ -227,5 +227,5 @@ report the `empty_reason`.
 - [INSTALL.md](INSTALL.md) §11 — install and enable the trained model
 - [README.md](README.md) — platform overview, workflows, Open WebUI tool list
 - [RUSSIAN_OSINT_IMPLEMENTATION.md](RUSSIAN_OSINT_IMPLEMENTATION.md) — WF30/WF13 RU capabilities
-- [LINKEDIN_OVERRIDE.md](LINKEDIN_OVERRIDE.md) — WF31 false-positive override
+- [LINKEDIN_OVERRIDE.md](LINKEDIN_OVERRIDE.md) — WF33 false-positive override
 - `llm/system-prompt.md` — the full routing table, Cypher library, and OpSec matrix the model works from

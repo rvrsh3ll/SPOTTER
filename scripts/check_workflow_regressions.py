@@ -758,6 +758,19 @@ def run_checks() -> List[str]:
     # edge's far end is another component rather than a host.
     require_contains("12", "Build Tech Inventory", n12_build,
                      "['USES_TECH', 'EXPOSES_SERVICE']", failures)
+    # Clicking a Vulnerable Technology card has to name the host, the ports and
+    # the service. `port` is only the first port WF13 stamped; the rest live in
+    # `ports` (JSON) and `hostnames`. nmap's EXPOSES_SERVICE far end is an IP,
+    # so the affected-host loop has to accept that type or every nmap row ships
+    # with an empty host list.
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "_jlist(_tprops.get('hostnames'))", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "_jlist(_tprops.get('ports'))", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'service_name': str(_tprops.get('name') or '')", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "_otype in ('device', 'ip')", failures)
 
     # Workflow 13 checks - open cloud storage discovery
     n13 = nodes["13"].get("Run Domain OSINT + Breach Correlation", "")

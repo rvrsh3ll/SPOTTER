@@ -503,6 +503,12 @@ def test_identifier_parsing() -> None:
     # A slash is NOT a separator: "AC/DC Industries" is one company.
     check("a slash is left alone", ee.split_identifiers("AC/DC Industries")
           == ("AC/DC Industries",))
+    # The Objectives placeholder separates values with a middle dot. Without
+    # this, a second domain in Additional Identifiers is one name and never
+    # reaches identity.domains.
+    check("a middle-dot Additional Identifiers field splits",
+          ee.split_identifiers("aerokon.su · other.com · OOO Primer")
+          == ("aerokon.su", "other.com", "OOO Primer"))
     check("an email yields its registrable domain",
           ee.registrable_domain("info@mail.example.co.uk") == "example.co.uk")
     check("a URL yields its registrable domain",
@@ -510,6 +516,10 @@ def test_identifier_parsing() -> None:
     check("a company name is not a domain", ee.registrable_domain("Example Inc") == "")
     check("a two-label TLD is not mistaken for the registration",
           ee.registrable_domain("a.example.co.uk") == "example.co.uk")
+    check("a CIDR is not a domain",
+          ee.registrable_domain("192.168.1.0/24") == "")
+    check("an IPv4 address is not a domain",
+          ee.registrable_domain("10.0.0.1") == "")
 
 
 def test_build_identity() -> None:
@@ -523,6 +533,16 @@ def test_build_identity() -> None:
     check("a domain-shaped identifier is a DOMAIN, not a name",
           "maket-aero.test" in ident["domains"] and
           not any("maket-aero.test" == n for n in ident["names"]), str(ident))
+    dotted = ee.build_identity(
+        primary_name="Aerokon",
+        additional_ids="other.com · third.ru · 192.168.1.0/24",
+        company_email="info@aerokon.su")
+    check("middle-dot additional domains all reach identity.domains",
+          set(dotted["domains"]) >= {"aerokon.su", "other.com", "third.ru"},
+          str(dotted["domains"]))
+    check("a CIDR in Additional Identifiers is not adopted as a domain",
+          "1.0" not in dotted["domains"] and "192.168.1.0" not in dotted["domains"],
+          str(dotted["domains"]))
     check("a Cyrillic legal entity survives as a name",
           any("\u041e\u0411\u0420\u0410\u0417\u0415\u0426" in n for n in ident["names"]), str(ident["names"]))
     check("the operator's own identifiers are marked as theirs",

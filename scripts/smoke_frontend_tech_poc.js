@@ -19,6 +19,13 @@
  *   3. Clicking a PoC link does not also fire the card's drilldown handler. The
  *      links sit inside a clickable card; without the closest() guard the panel
  *      opens behind the new tab every time.
+ *   3b. Clicking the card body opens the ASSET drilldown (hostname, ports,
+ *      services) rather than the catalog's user list. A Service from recon has
+ *      no users in tech_user_map, so tiShowTech would render "No records found"
+ *      and hide the one thing the operator clicked for.
+ *   3c. The "N CVE" badge is a drill handle: it opens the CVE list as NVD
+ *      links, and the ports those CVEs were seen on. A count that does not
+ *      open anything is the bug this pins.
  *   4. The empty state offers a working "Run enrichment" button. That text used
  *      to say "run enrichment" while no code path existed to do it.
  *
@@ -61,6 +68,13 @@ const FIXTURE = {
   vulnerable_tech: [{
     name: 'Apache HTTP Server', vendor: 'Apache', version: '2.4.41',
     cve_count: 5, composite_risk: 12,
+    cves: [
+      { cve_id: 'CVE-2021-41773', severity: 'CRITICAL', base_score: 7.5, exploit_available: true, match: 'cpe' },
+      { cve_id: 'CVE-2021-42013', severity: 'CRITICAL', base_score: 9.8, exploit_available: true, match: 'cpe' },
+      { cve_id: 'CVE-2019-0211', severity: 'HIGH', base_score: 7.8, exploit_available: false, match: 'keyword' },
+      { cve_id: 'CVE-2018-1312', severity: 'MEDIUM', base_score: 5.3, exploit_available: false, match: 'cpe' },
+      { cve_id: 'evil"><img src=x onerror=window.__cvePwned=1>', severity: 'LOW', base_score: 1, exploit_available: false, match: 'keyword' },
+    ],
     exploit_available: true, poc_count: 7,
     mitre_techniques: [{ id: 'T1190', technique_id: 'T1190', name: 'Exploit Public-Facing Application' }],
     affected_users: ['ALICE@EXAMPLE'],
@@ -87,9 +101,10 @@ const w = dom.window;
 setTimeout(() => {
   console.log('Vulnerable Technology / exploit availability');
 
-  // tiShowTech is a top-level function declaration, so it IS on window and can
-  // be stubbed. (Top-level `let` in this file is not -- see the jsdom memo.)
-  w.eval('window.__tiShown = null; tiShowTech = function (t) { window.__tiShown = t; };');
+  // tiShowVuln / tiShowTech are top-level function declarations, so they ARE on
+  // window and can be stubbed. (Top-level `let` in this file is not -- see the
+  // jsdom memo.) Keep the original so a later check can open the real panel.
+  w.eval('window.__tiShown = null; window.__origTiShowVuln = tiShowVuln; tiShowVuln = function (i) { window.__tiShown = i; };');
 
   w.renderTechIntel(FIXTURE);
   const card = w.document.querySelector('.ti-vuln-card');
@@ -131,32 +146,109 @@ setTimeout(() => {
 
   w.__tiShown = null;
   card.querySelector('.ti-vuln-name').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  ok(w.__tiShown === 'Apache HTTP Server',
-     'clicking the card body still opens the tech drilldown', w.__tiShown);
+  ok(w.__tiShown === 0,
+     'clicking the card body opens the vulnerable-tech asset drilldown', w.__tiShown);
+
+  const cveBadge = card.querySelector('.ti-cve-badge[data-ovf-open]');
+  ok(!!cveBadge, 'the CVE count badge is a drill handle',
+     card.querySelector('.ti-cve-badge') && card.querySelector('.ti-cve-badge').outerHTML);
+  w.__tiShown = null;
+  if (cveBadge) cveBadge.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  ok(w.__tiShown === null,
+     'clicking the CVE badge does not also open the asset drilldown', w.__tiShown);
+  const ovf = w.document.getElementById('ovf-modal');
+  const ovfBody = (w.document.getElementById('ovf-body') || {}).innerHTML || '';
+  ok(ovf && !ovf.classList.contains('hidden'),
+     'clicking the CVE badge opens the CVE list');
+  ok(/nvd\.nist\.gov\/vuln\/detail\/CVE-2021-41773/.test(ovfBody),
+     'each CVE is an NVD link', ovfBody.slice(0, 400));
+  const nvd = w.document.querySelector('#ovf-body a.ti-cve-link');
+  ok(nvd && nvd.getAttribute('target') === '_blank' &&
+     /noopener/.test(nvd.getAttribute('rel') || '') &&
+     /noreferrer/.test(nvd.getAttribute('rel') || ''),
+     'NVD links are target=_blank with noopener noreferrer',
+     nvd && nvd.getAttribute('rel'));
+  ok(!w.__cvePwned && !w.document.querySelector('#ovf-body img'),
+     'a hostile CVE id is escaped, not parsed as markup');
+  if (typeof w.ovfClose === 'function') w.ovfClose();
 
   // --- external-service marker ---
   // A Service entry is external attack surface from domain recon, not software on
   // a workstation. Without the marker the card reads as "an endpoint runs this".
-  w.renderTechIntel({ ...FIXTURE, vulnerable_tech: [{
+  const svcFixture = { ...FIXTURE, vulnerable_tech: [{
     ...FIXTURE.vulnerable_tech[0], kind: 'service',
-    host: '203.0.113.10', port: '[443]', name: 'AkamaiGHost',
+    host: '203.0.113.10', port: 443, ports: [80, 443],
+    hostnames: ['www.example.com'], protocol: 'tcp',
+    service_name: 'https', product: 'AkamaiGHost', name: 'AkamaiGHost',
     }, {
      ...FIXTURE.vulnerable_tech[0], kind: 'service',
-     host: '203.0.113.11', port: '[8443]', name: 'AkamaiGHost', composite_risk: 14,
-    }] });
+     host: '203.0.113.11', port: 8443, ports: [8443],
+     hostnames: ['origin.example.com'], protocol: 'tcp',
+     service_name: 'https', product: 'AkamaiGHost', name: 'AkamaiGHost',
+     composite_risk: 14,
+    }] };
+  w.renderTechIntel(svcFixture);
   const svcCard = w.document.querySelector('.ti-vuln-card');
     ok(w.document.querySelectorAll('.ti-vuln-card').length === 1,
       'duplicate service entries are grouped by product',
       w.document.querySelectorAll('.ti-vuln-card').length);
   ok(!!svcCard.querySelector('.ti-kind-tag'), 'service entries are tagged as external');
-  ok(/203\.0\.113\.10/.test(svcCard.textContent), 'service entries show their host',
-     svcCard.textContent.slice(0, 90));
-    ok(/203\.0\.113\.11/.test(svcCard.textContent), 'grouped service entries preserve additional hosts',
-      svcCard.textContent.slice(0, 140));
+  ok(/203\.0\.113\.10/.test(svcCard.textContent) || /www\.example\.com/.test(svcCard.textContent),
+     'service entries show their host', svcCard.textContent.replace(/\s+/g, ' ').slice(0, 220));
+    ok(/203\.0\.113\.11/.test(svcCard.textContent) || /origin\.example\.com/.test(svcCard.textContent),
+      'grouped service entries preserve additional hosts',
+      svcCard.textContent.replace(/\s+/g, ' ').slice(0, 280));
+  ok(/80/.test(svcCard.textContent) && /443/.test(svcCard.textContent),
+     'service entries show their ports on the card',
+     svcCard.textContent.replace(/\s+/g, ' ').slice(0, 280));
+  const portTag = [...svcCard.querySelectorAll('.ti-port-tag[data-ovf-open]')]
+    .find(el => el.textContent.trim() === '443');
+  ok(!!portTag, 'each port on the card is a drill handle',
+     [...svcCard.querySelectorAll('.ti-port-tag')].map(e => e.textContent.trim()).join(','));
+  w.__tiShown = null;
+  if (portTag) portTag.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  ok(w.__tiShown === null,
+     'clicking a port tag does not also open the asset drilldown', w.__tiShown);
+  const portOvf = (w.document.getElementById('ovf-body') || {}).textContent || '';
+  ok(/www\.example\.com/.test(portOvf) || /203\.0\.113\.10/.test(portOvf),
+     'clicking a port lists the hosts seen on it', portOvf.slice(0, 240));
+  if (typeof w.ovfClose === 'function') w.ovfClose();
+
+  // Restore the real drilldown and click the grouped service card. The catalog
+  // user list (tiShowTech) would be empty here — there is no tech_user_map row
+  // for AkamaiGHost — so this is the regression the operator actually hits.
+  w.eval('tiShowVuln = window.__origTiShowVuln; window.__tiShown = null;');
+  w.renderTechIntel(svcFixture);
+  w.document.querySelector('.ti-vuln-card .ti-vuln-name')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const dm = w.document.getElementById('ti-dm');
+  const dmBody = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+  ok(dm && !dm.classList.contains('hidden'), 'clicking a vuln card opens the detail panel');
+  ok(/www\.example\.com/.test(dmBody) && /203\.0\.113\.10/.test(dmBody),
+     'asset drilldown names the hostname and IP', dmBody.slice(0, 240));
+  ok(/80/.test(dmBody) && /443/.test(dmBody) && /8443/.test(dmBody),
+     'asset drilldown names the ports found on the hosts', dmBody.slice(0, 240));
+  ok(/https/i.test(dmBody) && /AkamaiGHost/.test(dmBody),
+     'asset drilldown names the service found on the host', dmBody.slice(0, 240));
+  ok(/origin\.example\.com/.test(dmBody) && /203\.0\.113\.11/.test(dmBody),
+     'asset drilldown lists every grouped host, not just the first', dmBody.slice(0, 320));
 
   w.renderTechIntel(FIXTURE);
   ok(!w.document.querySelector('.ti-vuln-card .ti-kind-tag'),
      'technology entries are NOT tagged as external');
+
+  // Endpoint software still has to name the people who run it. The asset
+  // drilldown replaced tiShowTech for these cards, so a row with users and no
+  // host/port must not open empty.
+  w.document.querySelector('.ti-vuln-card .ti-vuln-name')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const userBody = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+  ok(/ALICE@EXAMPLE/.test(userBody),
+     'a technology card with no host still lists affected users', userBody.slice(0, 200));
+  const dmNvd = w.document.querySelector('#ti-dm-body a.ti-cve-link');
+  ok(dmNvd && /nvd\.nist\.gov\/vuln\/detail\/CVE-2021-41773/.test(dmNvd.getAttribute('href') || ''),
+     'the asset drilldown links each CVE to NVD',
+     dmNvd && dmNvd.getAttribute('href'));
 
   // --- weak-match labelling ---
   // A keyword-derived CVE set must not read with the same confidence as a CPE

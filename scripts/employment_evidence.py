@@ -515,8 +515,10 @@ _TWO_LABEL_TLDS: Tuple[str, ...] = (
 # Separators an operator actually types into a one-line Additional Identifiers
 # field. Slash is NOT here: "Example Avionics / Example Aerospace" is one
 # reading, but so is "AC/DC Industries", and splitting on it silently halves a
-# legitimate name.
-_ID_SPLIT = re.compile(r"[,;\n\r|]+")
+# legitimate name. Middle dot / bullet ARE here: the Objectives placeholder
+# separates values with " · ", and without this a second domain in that field
+# is treated as part of one name.
+_ID_SPLIT = re.compile(r"[,;\n\r|·•∙]+")
 
 
 def split_identifiers(raw: Any) -> Tuple[str, ...]:
@@ -556,7 +558,13 @@ def registrable_domain(value: Any) -> str:
     text = re.sub(r"^www\.", "", text)
     if not re.fullmatch(r"[a-z0-9.\-]+", text) or "." not in text:
         return ""
+    # IPv4 / CIDR host — Additional Identifiers also holds ranges like
+    # 192.168.1.0/24, and without this they register as the domain "1.0".
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", text):
+        return ""
     parts = [p for p in text.split(".") if p]
+    if parts and not re.search(r"[a-z]", parts[-1]):
+        return ""
     if len(parts) < 2:
         return ""
     if len(parts) >= 3 and ".".join(parts[-2:]) in _TWO_LABEL_TLDS:

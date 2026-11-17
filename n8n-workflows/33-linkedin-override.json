@@ -1,0 +1,97 @@
+{
+  "name": "33 - LinkedIn Override (FP Correction)",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0b1c2d3-0033-0033-0033-ffffffffffff",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "POST /webhook/linkedin-override \u2014 Manual correction endpoint for false positive LinkedIn company profiles. Accepts campaign_id, company_name/company_id, linkedin_url (correct URL), mark_fp (boolean), and note. Creates or updates the Company node with linkedin_url_override, linkedin_url_fp, linkedin_override_note, and linkedin_override_at. When WF13 re-runs, it checks for these fields and respects the override instead of pulling from Tavily/SerpAPI."
+  },
+  "id": "spotter-workflow-33",
+  "tags": [
+    {
+      "name": "SPOTTER"
+    },
+    {
+      "name": "LinkedIn"
+    },
+    {
+      "name": "Override"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "a0b1c2d3-0031-0031-0031-000000000001",
+      "name": "LinkedIn Override Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "linkedin-override",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "linkedin-override"
+    },
+    {
+      "id": "a0b1c2d3-0031-0031-0031-000000000002",
+      "name": "Process LinkedIn Override",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "python",
+        "pythonCode": "import sys, os, json, uuid\nfrom datetime import datetime, timezone\nsys.path.insert(0, '/data/scripts')\nimport requests as req\n\nFLOWSINT_URL = os.environ.get('FLOWSINT_API_URL', 'http://flowsint-api-prod:5001').rstrip('/')\nFLOWSINT_KEY = os.environ.get('FLOWSINT_API_KEY', '')\nHJ = {'Authorization': f'Bearer {FLOWSINT_KEY}', 'Content-Type': 'application/json'}\n\nitem = _items[0].get('json', {}) if _items else {}\nbody = item.get('body', item) if isinstance(item.get('body'), dict) else item\nif not isinstance(body, dict):\n    body = {}\n\ncampaign_id = str(body.get('campaign_id') or '').strip()\ncompany_name = str(body.get('company_name') or '').strip()\ncompany_id = str(body.get('company_id') or '').strip()\nlinkedin_url = str(body.get('linkedin_url') or '').strip()\nmark_fp = bool(body.get('mark_fp', False))\nnote = str(body.get('note') or '').strip()\n\n# Initialize debug log early so validation errors can reference it\n_debug_log = []\ndef _dbg(msg):\n    _debug_log.append(str(msg))\n\nif not campaign_id:\n    return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': 'campaign_id required'}}}]\n\nif not company_name and not company_id:\n    return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': 'company_name or company_id required'}}}]\n\nif not linkedin_url and not mark_fp:\n    return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': 'linkedin_url required (or set mark_fp=true to clear)'}}}]\n\nsketch_id = campaign_id\nnow = datetime.now(timezone.utc).isoformat()\n\n# \u2500\u2500 DEBUG LOGGING (inline, returned in error responses) \u2500\u2500\nimport traceback as _tb\n\n_dbg(f\"=== WF31 called at {now} ===\")\n_dbg(f\"campaign_id={campaign_id!r}, company_name={company_name!r}, company_id={company_id!r}\")\n_dbg(f\"linkedin_url={linkedin_url!r}, mark_fp={mark_fp!r}, note={note!r}\")\n_dbg(f\"sketch_id={sketch_id!r}\")\n_dbg('Variables initialized OK')\n_dbg(f\"FLOWSINT_URL={FLOWSINT_URL!r}\")\n\n# Validate sketch_id is a valid UUID before calling Flowsint\ntry:\n    import uuid as _uuid_mod\n    _uuid_mod.UUID(sketch_id)\nexcept (ValueError, AttributeError):\n    _dbg(f'INVALID sketch_id (not a UUID): {sketch_id!r}')\n    return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': f'Invalid campaign_id: not a valid UUID: {sketch_id!r}. The recon data may be stale \u2014 try re-running Domain Recon first.', 'debug': _debug_log}}}]\n\n# Get existing node by ID if provided, otherwise create/find by name\nnode = None\nnode_id = None\nnode_label = None\n\nif company_id:\n    try:\n        r = req.get(f'{FLOWSINT_URL}/api/sketches/{sketch_id}/nodes/{company_id}', headers=HJ, timeout=10)\n        if r.ok:\n            node = r.json().get('node')\n            node_id = node.get('id')\n            node_label = node.get('nodeLabel', '')\n    except Exception as e:\n        pass\n\n# If no node found by ID, create it (Flowsint MERGEs on nodeLabel)\nif not node:\n    try:\n        create_payload = {\n            'id': str(uuid.uuid4()),\n            'nodeLabel': company_name or 'Unknown Company',\n            'nodeType': 'Company',\n            'nodeMetadata': {},\n            'nodeProperties': {\n                'name': company_name or 'Unknown Company',\n                'relationship': 'target',\n                'source': 'manual-override',\n                'discovered_at': now\n            }\n        }\n        cr = req.post(f'{FLOWSINT_URL}/api/sketches/{sketch_id}/nodes/add', headers=HJ,\n                      json=create_payload, timeout=10)\n        if cr.ok:\n            node = (cr.json().get('node') or cr.json())\n            node_id = node.get('id')\n            node_label = node.get('nodeLabel', '')\n        else:\n            _dbg(f'Create failed: HTTP {cr.status_code} - {cr.text}'); return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': f'Failed to create Company node: HTTP {cr.status_code} - {cr.text}', 'debug': _debug_log}}}]\n    except Exception as e:\n        _dbg(f'Create exception: {e}\\n{_tb.format_exc()}'); return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': f'Failed to create Company node: {e}', 'debug': _debug_log}}}]\n\nif not node_id:\n    _dbg(f'No node_id after creation'); return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': 'Failed to get node ID after creation', 'debug': _debug_log}}}]\n\n# Update the node with override fields\nupdates = {\n    'nodeProperties.linkedin_url_override': linkedin_url,\n    'nodeProperties.linkedin_override_at': now,\n}\n\nif mark_fp:\n    updates['nodeProperties.linkedin_url_fp'] = True\n    updates['nodeProperties.linkedin_company_url'] = ''\n    updates['nodeProperties.linkedin_company_name'] = ''\n\nif note:\n    updates['nodeProperties.linkedin_override_note'] = note\n\ntry:\n    r = req.put(f'{FLOWSINT_URL}/api/sketches/{sketch_id}/nodes/edit', headers=HJ,\n                json={'nodeId': node_id, 'updates': updates}, timeout=10)\n    if r.ok:\n        return [{'json': {\n            'statusCode': 200,\n            'body': {\n                'status': 'ok', 'debug': _debug_log,\n                'message': f'Updated node {node_id} with LinkedIn override',\n                'node_id': node_id,\n                'node_label': node_label,\n                'linkedin_url_override': linkedin_url,\n                'linkedin_url_fp': mark_fp,\n                'linkedin_override_note': note\n            }\n        }}]\n    else:\n        _dbg(f'Update failed: HTTP {r.status_code} - {r.text}'); return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': f'Update failed: HTTP {r.status_code} - {r.text}', 'debug': _debug_log}}}]\nexcept Exception as e:\n    _dbg(f'Update exception: {e}\\n{_tb.format_exc()}'); return [{'json': {'statusCode': 200, 'body': {'status': 'error', 'error': f'Update failed: {e}', 'debug': _debug_log}}}]\n"
+      }
+    },
+    {
+      "id": "a0b1c2d3-0031-0031-0031-000000000003",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "LinkedIn Override Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process LinkedIn Override",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process LinkedIn Override": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

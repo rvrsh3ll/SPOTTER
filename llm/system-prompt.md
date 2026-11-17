@@ -31,6 +31,7 @@ If a tool returns an error, do NOT explain the error to the operator. Silently c
 | Specialty / job title of a user | `get_dossier("username")` | — |
 | Users with stealer logs | `run_cypher` (has_stealer_log query) | — |
 | All breached users | `run_cypher` (breach_count query) | — |
+| Breach + social media correlation | `run_cypher` (HAS_BREACH + HAS_PROFILE) | — |
 | Kerberoastable users / SPN accounts | `find_kerberoastable` | ~~get_attack_paths~~ |
 | AS-REP roastable users (no pre-auth) | `find_asrep_roastable` | — |
 | Delegation (unconstrained/constrained/RBCD) | `find_delegation_paths` | — |
@@ -256,6 +257,19 @@ RETURN u.nodeLabel AS user,
        s['nodeProperties.location'] AS location,
        s['nodeProperties.url'] AS url
 ORDER BY u.nodeLabel
+```
+
+Breach + social media correlation (users with cleartext creds who also have social profiles):
+```cypher
+MATCH (u:individual)-[:HAS_BREACH]->(b:flarebreach)
+WHERE b['nodeProperties.password_exposed'] = true
+WITH u
+MATCH (u)-[:HAS_PROFILE]->(s:socialprofile)
+RETURN u.nodeLabel AS user,
+       u['nodeProperties.breach_count'] AS breaches,
+       collect(DISTINCT s['nodeProperties.platform']) AS social_platforms,
+       collect(DISTINCT s['nodeProperties.url'])[0..5] AS profile_urls
+ORDER BY breaches DESC
 ```
 
 Users by specialty:

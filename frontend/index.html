@@ -1635,6 +1635,26 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
   text-transform: uppercase; padding: 1px 5px; border-radius: 1px; margin-left: 5px;
   background: rgba(184,58,74,.15); color: var(--accent); border: 1px solid rgba(184,58,74,.3);
 }
+.ti-cve-badge.tag-drill { cursor: pointer; border-style: dashed; }
+.ti-cve-badge.tag-drill:hover, .ti-cve-badge.tag-drill:focus {
+  border-color: var(--accent); outline: none;
+}
+.ti-cve-link {
+  font-family: var(--mono); font-size: 9px; color: rgba(61,143,188,.95);
+  text-decoration: none;
+}
+.ti-cve-link:hover { text-decoration: underline; }
+.ti-port-tag {
+  display: inline-block; font-family: var(--mono); font-size: 7px; letter-spacing: .06em;
+  padding: 1px 5px; border-radius: 1px; margin-left: 4px; vertical-align: middle;
+  background: rgba(61,143,188,.12); color: rgba(61,143,188,.95);
+  border: 1px dashed rgba(61,143,188,.4);
+}
+.ti-port-tag.tag-drill { cursor: pointer; }
+.ti-port-tag.tag-drill:hover, .ti-port-tag.tag-drill:focus {
+  color: var(--accent); border-color: var(--accent); outline: none;
+}
+.ti-vuln-asset { margin-right: 6px; }
 .ti-mitre-tag {
   display: inline-block; font-family: var(--mono); font-size: 7px; letter-spacing: .08em;
   text-transform: uppercase; padding: 1px 5px; border-radius: 1px; margin: 2px 4px 2px 0;
@@ -2241,8 +2261,13 @@ ROE: No destructive actions. C2 callbacks limited to business hours. Notify clie
         <div class="obj-save-row" style="flex-wrap:wrap;">
           <button class="btn" id="infra-tor-start-btn" onclick="infraTorStart()">Start Tor</button>
           <button class="btn" id="infra-tor-stop-btn" onclick="infraTorStop()">Stop Tor</button>
+          <button class="btn" id="infra-tor-newnym-btn" onclick="infraTorNewCircuit()">New TOR Circuit</button>
           <button class="btn" onclick="infraTorRefresh().catch(() => {})">Refresh Tor status</button>
         </div>
+        <span class="infra-note" style="display:block;margin-top:6px;">
+          New TOR Circuit asks the client for a fresh exit. Existing connections keep their
+          circuit; the egress strip is rechecked so you can confirm the IP a new sweep will present.
+        </span>
 
         <div id="infra-tor-status" class="wbar" style="margin-top:10px;">
           Tor status unknown — click Refresh Tor status.
@@ -5260,6 +5285,8 @@ function infraEnsureCountries(force = false) {
 
 /* ── managed Tor client ────────────────────────────────────────────────── */
 let _infraTorPoll = null;
+let _infraTorNewnymUntil = 0;
+let _infraTorNewnymCool = null;
 
 function infraSetTorStatusBar(message, level = 'warn') {
   const el = document.getElementById('infra-tor-status');
@@ -5268,11 +5295,39 @@ function infraSetTorStatusBar(message, level = 'warn') {
   el.textContent = message;
 }
 
-function infraSetTorButtons(running, available = true) {
+function infraSetTorButtons(running, available = true, bootstrapped = false) {
   const start = document.getElementById('infra-tor-start-btn');
   const stop = document.getElementById('infra-tor-stop-btn');
+  const neu = document.getElementById('infra-tor-newnym-btn');
   if (start) start.disabled = !available || !!running;
   if (stop) stop.disabled = !available || !running;
+  const cooling = Date.now() < _infraTorNewnymUntil;
+  if (neu) {
+    neu.disabled = !available || !running || !bootstrapped || cooling;
+    if (!cooling) neu.textContent = 'New TOR Circuit';
+  }
+}
+
+function infraTorArmNewnymCooldown(seconds) {
+  clearTimeout(_infraTorNewnymCool);
+  const secs = Math.max(0, Number(seconds) || 0);
+  _infraTorNewnymUntil = Date.now() + secs * 1000;
+  const tick = () => {
+    const btn = document.getElementById('infra-tor-newnym-btn');
+    const left = Math.ceil((_infraTorNewnymUntil - Date.now()) / 1000);
+    if (!btn) return;
+    if (left > 0) {
+      btn.textContent = 'New TOR Circuit (' + left + 's)';
+      btn.disabled = true;
+      _infraTorNewnymCool = setTimeout(tick, 250);
+      return;
+    }
+    btn.textContent = 'New TOR Circuit';
+    _infraTorNewnymCool = null;
+    _infraTorNewnymUntil = 0;
+    infraTorRefresh(true).catch(() => {});
+  };
+  tick();
 }
 
 function infraRenderTorStatus(data) {
@@ -5288,7 +5343,7 @@ function infraRenderTorStatus(data) {
     const pct = Number(t.bootstrap_percent || 0);
     const entry = (t.entry_countries || []).join('/').toUpperCase() || 'any';
     const exit = (t.exit_countries || []).join('/').toUpperCase() || 'any';
-    infraSetTorButtons(true);
+    infraSetTorButtons(true, true, !!t.bootstrapped);
     infraSetTorStatusBar(
       `Tor running on ${t.socks_host}:${t.socks_port} — bootstrap ${pct}%` +
       (t.bootstrapped ? ' (circuits ready)' : ' (still building)') +
@@ -5394,6 +5449,8 @@ async function infraTorStart() {
 
 async function infraTorStop() {
   clearTimeout(_infraTorPoll);
+  clearTimeout(_infraTorNewnymCool);
+  _infraTorNewnymUntil = 0;
   infraSetTorStatusBar('Stopping Tor...', 'warn');
   infraSetTorButtons(false);
   try {
@@ -5408,6 +5465,35 @@ async function infraTorStop() {
   } catch (e) {
     infraSetTorStatusBar('Tor stop failed: ' + e.message, 'err');
     toast('Tor stop failed: ' + e.message, 'err');
+  }
+}
+
+async function infraTorNewCircuit() {
+  const btn = document.getElementById('infra-tor-newnym-btn');
+  if (btn) btn.disabled = true;
+  infraSetTorStatusBar('Requesting a new Tor circuit...', 'warn');
+  try {
+    const data = await fetchTunnelJson('tunnel/tor/newnym', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const ready = !!data.circuits_ready;
+    const msg = ready ? 'New Tor circuit is ready' : 'New Tor circuit requested';
+    infraSetTorStatusBar(msg, 'ok');
+    toast(msg + ' — rechecking egress', 'ok');
+    infraTorArmNewnymCooldown(Number(data.cooldown_seconds) || 10);
+    // A ready circuit still needs a beat before SOCKS uses it; an accepted
+    // NEWNYM that has not built yet needs longer.
+    await new Promise(r => setTimeout(r, ready ? 400 : 2000));
+    await infraRefreshEgress(true);
+    await infraTorRefresh(true);
+  } catch (e) {
+    infraSetTorStatusBar('New circuit failed: ' + e.message, 'err');
+    toast('New TOR Circuit failed: ' + e.message, 'err');
+    const m = /Retry in (\d+)s/.exec(e.message || '');
+    if (m) infraTorArmNewnymCooldown(Number(m[1]));
+    else infraTorRefresh(true).catch(() => {});
   }
 }
 
@@ -8292,6 +8378,75 @@ function _companyDomain() {
   return at >= 0 ? ce.slice(at + 1).toLowerCase() : ce.toLowerCase();
 }
 
+/* Multi-label public suffixes, mirrored from employment_evidence._TWO_LABEL_TLDS
+   so "example.co.uk" is one domain rather than "co.uk". Not a full PSL. */
+const OBJ_TWO_LABEL_TLDS = new Set([
+  'co.uk','org.uk','ac.uk','gov.uk','me.uk','net.uk',
+  'com.au','net.au','org.au','edu.au','gov.au',
+  'co.jp','or.jp','ne.jp','com.br','com.mx','com.ar','com.co',
+  'co.nz','com.tr','co.za','com.sg','com.hk','com.cn','net.cn',
+  'org.cn','co.kr','co.in','com.ua','net.ua','org.ua','com.pl',
+  'com.ru','net.ru','org.ru','com.kz','com.by','co.il','com.tw',
+]);
+
+/* Additional Identifiers is a one-line field. The Objectives placeholder
+   separates values with a middle dot (·), and operators also type commas,
+   semicolons, pipes and bullets. Slash is left alone: "AC/DC Industries"
+   is one name, and a CIDR keeps its mask. */
+function _splitIdentifiers(raw) {
+  const out = [], seen = new Set();
+  String(raw || '').split(/[,;\n\r|·•∙]+/).forEach(part => {
+    const item = String(part || '').trim().replace(/^['"]+|['"]+$/g, '');
+    if (!item) return;
+    const key = item.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(item);
+  });
+  return out;
+}
+
+/* Registrable domain inside a host, URL or email, or ''. IPv4 and CIDR
+   values are rejected so "192.168.1.0/24" in Additional Identifiers is
+   not treated as the domain "1.0". */
+function _registrableDomain(value) {
+  let text = String(value || '').toLowerCase().trim().replace(/\.+$/, '');
+  if (!text) return '';
+  if (text.includes('@')) text = text.split('@').pop();
+  text = text.replace(/^[a-z][a-z0-9+.\-]*:\/\//, '');
+  text = text.split('/')[0].split('?')[0].split('#')[0].split(':')[0];
+  text = text.replace(/^www\./, '');
+  if (!/^[a-z0-9.\-]+$/.test(text) || !text.includes('.')) return '';
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(text)) return '';
+  const parts = text.split('.').filter(Boolean);
+  if (parts.length < 2) return '';
+  if (!/[a-z]/.test(parts[parts.length - 1])) return '';
+  if (parts.length >= 3 && OBJ_TWO_LABEL_TLDS.has(parts.slice(-2).join('.'))) {
+    return parts.slice(-3).join('.');
+  }
+  return parts.slice(-2).join('.');
+}
+
+/* Every domain the operator typed in Objectives: company email, a domain-shaped
+   Primary Target, and domain-shaped Additional Identifiers. This is the list
+   the Prompt tab must query — _companyDomain() is only the email-column host
+   and was the reason a campaign with several domains still searched one. */
+function _objectiveDomains(obj) {
+  const o = obj || (getActiveCamp() && getActiveCamp().objectives) || {};
+  const out = [], seen = new Set();
+  const add = (v) => {
+    const d = _registrableDomain(v);
+    if (!d || seen.has(d)) return;
+    seen.add(d);
+    out.push(d);
+  };
+  add(o.companyEmail);
+  add(o.companyDomain);   // older bundles used this field name
+  add(o.targetName);
+  _splitIdentifiers(o.additionalIds).forEach(add);
+  return out;
+}
+
 function _deriveCompanyEmail(r, domain) {
   if (!domain) return r.email || '';
   let local = '';
@@ -11009,7 +11164,7 @@ function ovfCsv() {
 /* Delegated so chips work inside any innerHTML the tabs rebuild, and so they are
    keyboard-reachable without an inline handler on every chip.
    CAPTURE phase on purpose: chips sit inside elements that already have their
-   own click handlers (a Tech Intel vuln card opens tiShowTech, a bucket row is
+   own click handlers (a Tech Intel vuln card opens tiShowVuln, a bucket row is
    clickable). Bubbling here would run the container's handler first and stack a
    second modal behind this one — capturing lets stopPropagation actually win. */
 document.addEventListener('click', e => {
@@ -12234,6 +12389,11 @@ function _capField(v, limit) {
    A var (not let) so the binding is visible on window for the picker and tests. */
 var _drFocusDomain = '';
 
+function _activeRecons() {
+  const ac = getActiveCamp();
+  if (!ac) return [];
+  return getDomainRecons().filter(r => r.campaignId === ac.id);
+}
 function _activeRecon() {
   return (typeof _currentDomainRecon === 'function') ? _currentDomainRecon() : null;
 }
@@ -12317,7 +12477,11 @@ function spotterDataInventory() {
      list_targets that returns 496 invites the model to go hunting for the missing
      four. See the "Operator exclusions" item at the end, which is what stops the
      shortfall reading as missing data. */
-  const recon   = _scrubRecon(_activeRecon());
+  const reconRecs = _activeRecons().map(_scrubRecon).filter(Boolean);
+  const recon     = reconRecs[0] || null;
+  const objDomains = _objectiveDomains();
+  const reconDomains = reconRecs.map(r => r.domain).filter(Boolean);
+  const reconMissing = objDomains.filter(d => !reconDomains.includes(d));
   const tech    = _activeTechIntel();
   const anals   = _activeAnalyses();
   const tc      = _scrubTargets(_persistedTargets());
@@ -12332,20 +12496,27 @@ function spotterDataInventory() {
     status: recon ? 'AVAILABLE' : 'EMPTY',
     detail: recon
       ? [
-          'domain ' + (recon.domain || '?'),
-          (typeof _drCampaignRecons === 'function' && _drCampaignRecons().length > 1
-            ? (_drCampaignRecons().length + ' domains cached: ' + _drCampaignRecons().map(r => r.domain).filter(Boolean).join(', '))
-            : null),
+          (reconRecs.length > 1 ? reconRecs.length + ' domains ' : 'domain ')
+            + (reconDomains.join(', ') || recon.domain || '?'),
+          ...(objDomains.length > 1
+            ? ['objectives name ' + objDomains.join(', ') + ' — query ALL of them']
+            : []),
+          ...(reconMissing.length
+            ? [reconMissing.length + ' objective domain(s) not yet recon\'d: ' + reconMissing.join(', ')]
+            : []),
           'collected ' + (age(recon.timestamp) || 'unknown'),
-          (recon.subdomains || []).length + ' subdomains',
-          (recon.ct_total || 0) + ' CT certs',
-          (recon.shodan_open_ports || []).length + ' open ports',
-          (recon.fofa_total || 0) + ' FOFA hosts',
-          (recon.flare_exposed_creds || 0) + ' exposed creds',
-          _credMatchCount(recon).total + ' credential matches',
-          ((recon.web_assets || []).length + (recon.cloud_assets || []).length) + ' external assets',
-        ].filter(Boolean).join(', ')
-      : 'No domain recon has been run for this campaign — the operator runs it from the Analysis tab (DOMAIN RECON button) or ENRICH DOMAIN on a primary or additional organization in Objectives.',
+          reconRecs.reduce((n, r) => n + (r.subdomains || []).length, 0) + ' subdomains',
+          reconRecs.reduce((n, r) => n + (r.ct_total || 0), 0) + ' CT certs',
+          reconRecs.reduce((n, r) => n + (r.shodan_open_ports || []).length, 0) + ' open ports',
+          reconRecs.reduce((n, r) => n + (r.fofa_total || 0), 0) + ' FOFA hosts',
+          reconRecs.reduce((n, r) => n + (r.flare_exposed_creds || 0), 0) + ' exposed creds',
+          reconRecs.reduce((n, r) => n + _credMatchCount(r).total, 0) + ' credential matches',
+          reconRecs.reduce((n, r) => n + (r.web_assets || []).length + (r.cloud_assets || []).length, 0) + ' external assets',
+        ].join(', ')
+      : (objDomains.length
+          ? 'No domain recon has been run yet. Objectives name: ' + objDomains.join(', ')
+            + ' — the operator runs DOMAIN RECON from the Analysis tab for each. Query every named domain; do not restrict searches to the company-email host.'
+          : 'No domain recon has been run for this campaign — the operator runs it from the Analysis tab (DOMAIN RECON button) or ENRICH DOMAIN on a primary or additional organization in Objectives.'),
   });
 
   items.push({
@@ -12509,6 +12680,64 @@ function spotterDataInventory() {
   return { campaign: ac ? { id: ac.id, name: ac.name, sketch_id: ac.sketchId || '' } : null, items };
 }
 
+/* Campaign objectives for the system prompt. Used to be gated on
+   missionStatement, which dropped every identifier — including extra
+   domains in Additional Identifiers — from the Prompt tab whenever the
+   operator had not filled in the ROE box. Domain list is first-class so
+   the model cannot treat the company-email host as the only in-scope
+   domain. */
+function _objectivesPromptBlock() {
+  const ac  = getActiveCamp();
+  const obj = ac && ac.objectives ? ac.objectives : null;
+  if (!obj) return '';
+  const domains = _objectiveDomains(obj);
+  const regions = objNormaliseRegions(obj.socialRegions);
+  const hasAny = obj.targetType || obj.targetName || obj.additionalIds
+    || obj.companyEmail || obj.missionStatement || domains.length || regions.length;
+  if (!hasAny) return '';
+  const lines = ['', '## Campaign Objectives'];
+  lines.push('- Target Type: ' + (obj.targetType || 'Not specified'));
+  lines.push('- Primary Target: ' + (obj.targetName || 'Not specified'));
+  if (obj.additionalIds) lines.push('- Additional Identifiers: ' + obj.additionalIds);
+  if (obj.companyEmail)  lines.push('- Company Email Address: ' + obj.companyEmail);
+  if (domains.length) {
+    lines.push('- Campaign domains: ' + domains.join(', '));
+    if (domains.length > 1) {
+      lines.push('- Domain scope: Query EVERY domain listed above. Do not restrict OSINT, graph searches, credential lookups or website intelligence to the company-email host ('
+        + (_companyDomain() || domains[0]) + ').');
+    }
+  }
+  if (regions.length) {
+    lines.push('- Social Enrichment Regions: ' + regions.map(r => r.toUpperCase()).join(', ')
+      + ' (regional social platforms swept in addition to global ones)');
+  }
+  if (typeof objAllOrganizations === 'function') {
+    const _allOrgs = objAllOrganizations(obj);
+    if (_allOrgs.length > 1) {
+      lines.push('', '## Target Organizations');
+      lines.push('This is a multi-organization campaign. Look for useful links and relationships between these organizations, their people and their technologies:');
+      _allOrgs.forEach((o, i) => {
+        const bits = [(i + 1) + '. ' + (o.name || '(unnamed)') + (o.primary ? ' (primary target)' : '')];
+        if (o.domains) bits.push('domains: ' + o.domains);
+        if (o.emails) bits.push('emails: ' + o.emails);
+        if (o.urls) bits.push('URLs: ' + o.urls);
+        if (o.tech) bits.push('tech: ' + o.tech);
+        if (o.notes) bits.push('notes: ' + o.notes);
+        lines.push(bits.join(' - '));
+      });
+    }
+  }
+  if (obj.missionStatement) {
+    lines.push('', '## Mission Statement, Goals, and Rules of Engagement', obj.missionStatement, '');
+    lines.push('Use the mission statement and ROE above to:');
+    lines.push('1. Prioritize targets that align with the stated objectives.');
+    lines.push('2. Suggest attack scenarios that achieve the mission goals.');
+    lines.push('3. Flag any potential ROE violations before recommending a technique.');
+    lines.push('4. Score and rank targets against mission alignment in addition to raw AD privilege scores.');
+  }
+  return '\n' + lines.join('\n');
+}
+
 /* Markdown block appended to the system prompt every turn. */
 function _inventoryPromptBlock() {
   const inv = spotterDataInventory();
@@ -12540,39 +12769,12 @@ const OSINT_SECTIONS = {
   errors:       ['errors'],
 };
 
-function _toolOsintRecon(args) {
-  // Out-of-scope and false-positive entities are stripped before the model ever
-  // sees the store — see the _scopeIndex block. This tool returned the raw recon
-  // record verbatim until 2026-09-07, so an OoS bucket reached the LLM through it
-  // even though list_targets had excluded the same asset.
-  const ac    = getActiveCamp();
-  if (!ac) return { error: 'No active campaign. The operator must select or create one in the Ingest tab.' };
-  const recs = getDomainRecons().filter(r => r.campaignId === ac.id);
-  const want = String((args && args.domain) || _drFocusDomain || '').replace(/^www\./i, '').toLowerCase().trim();
-  const picked = want ? recs.find(r => String(r.domain || '').toLowerCase() === want) : null;
-  const recon = _scrubRecon(picked || (typeof _currentDomainRecon === 'function' ? _currentDomainRecon() : recs[0] || null));
-  const cachedDomains = recs.map(r => r.domain).filter(Boolean);
-  if (!recon) {
-    return {
-      status: 'empty',
-      campaign: ac.name,
-      configured_domain: (typeof _drActiveDomain === 'function' ? _drActiveDomain() : _companyDomain()) || null,
-      configured_domains: (typeof objCampaignDomains === 'function' ? objCampaignDomains(ac.objectives || {}) : []).slice(0, 25),
-      cached_domains: cachedDomains,
-      message: 'No OSINT / domain recon data is cached for this campaign yet. It is produced by workflow 13 when the operator clicks DOMAIN RECON in the Analysis tab, or ENRICH DOMAIN on the primary company email or an additional organization in Objectives. Tell the operator that — do not report it as "no access".',
-    };
-  }
-
-  const section = String(args.section || 'summary').toLowerCase();
-  const limit   = Math.max(1, Math.min(200, parseInt(args.limit, 10) || TOOL_DEFAULT_LIMIT));
-  const query   = String(args.query || '').toLowerCase().trim();
-
+function _osintReconPayload(recon, section, limit, query) {
   const skip = new Set(['id','campaignId','_excluded']);
   const allKeys = Object.keys(recon).filter(k => !skip.has(k));
   const keys = (section === 'all' || section === 'raw')
     ? allKeys
     : (OSINT_SECTIONS[section] || OSINT_SECTIONS.summary);
-
   const out = {};
   keys.forEach(k => {
     let v = recon[k];
@@ -12583,16 +12785,120 @@ function _toolOsintRecon(args) {
     }
     out[k] = _capField(v, limit);
   });
+  return { allKeys, data: out };
+}
 
+function _toolOsintRecon(args) {
+  // Out-of-scope and false-positive entities are stripped before the model ever
+  // sees the store — see the _scopeIndex block. This tool returned the raw recon
+  // record verbatim until 2026-09-07, so an OoS bucket reached the LLM through it
+  // even though list_targets had excluded the same asset.
+  //
+  // A campaign can name several domains in Objectives (company email + Additional
+  // Identifiers). This used to return only recs[0], so a second domain the
+  // operator typed was invisible here even when its recon record existed.
+  const ac = getActiveCamp();
+  if (!ac) return { error: 'No active campaign. The operator must select or create one in the Ingest tab.' };
+
+  const section = String(args.section || 'summary').toLowerCase();
+  const limit   = Math.max(1, Math.min(200, parseInt(args.limit, 10) || TOOL_DEFAULT_LIMIT));
+  const query   = String(args.query || '').toLowerCase().trim();
+  const want    = String(args.domain || '').toLowerCase().trim().replace(/^www\./, '');
+  const objDomains = _objectiveDomains();
+  const recs = _activeRecons().map(_scrubRecon).filter(Boolean);
+  const have = recs.map(r => String(r.domain || '').toLowerCase()).filter(Boolean);
+  const missing = objDomains.filter(d => !have.includes(d));
+  const emptyMsg = (domain) => {
+    const named = objDomains.length
+      ? ' Objectives name these domains: ' + objDomains.join(', ') + '.'
+      : '';
+    const cached = have.length ? ' Cached recon: ' + have.join(', ') + '.' : '';
+    const rest = missing.length
+      ? ' No recon yet for: ' + missing.join(', ') + ' — the operator runs DOMAIN RECON (Analysis tab) or ENRICH DOMAIN (Objectives) per domain.'
+      : ' It is produced by workflow 13 when the operator clicks DOMAIN RECON in the Analysis tab (or ENRICH DOMAIN in Objectives).';
+    return (domain ? 'No OSINT recon is cached for ' + domain + '.' : 'No OSINT / domain recon data is cached for this campaign yet.')
+      + named + cached + rest
+      + ' Tell the operator that — do not report it as "no access". Query every named domain (search_entities / run_cypher); do not restrict searches to the company-email host.';
+  };
+
+  if (want) {
+    const recon = recs.find(r => String(r.domain || '').toLowerCase() === want)
+      || recs.find(r => String(r.domain || '').toLowerCase().includes(want));
+    if (!recon) {
+      return {
+        status: 'empty',
+        campaign: ac.name,
+        domain: want,
+        configured_domain: _companyDomain() || null,
+        objective_domains: objDomains,
+        domains_with_recon: have,
+        domains_without_recon: missing,
+        message: emptyMsg(want),
+      };
+    }
+    const slice = _osintReconPayload(recon, section, limit, query);
+    return {
+      status: 'ok',
+      section,
+      domain: recon.domain,
+      collected: recon.timestamp,
+      data: slice.data,
+      objective_domains: objDomains,
+      domains_without_recon: missing,
+      available_sections: Object.keys(OSINT_SECTIONS).concat(['all']),
+      keys_present: slice.allKeys,
+    };
+  }
+
+  if (!recs.length) {
+    return {
+      status: 'empty',
+      campaign: ac.name,
+      configured_domain: _companyDomain() || null,
+      objective_domains: objDomains,
+      domains_without_recon: missing,
+      message: emptyMsg(),
+    };
+  }
+
+  if (recs.length === 1 && missing.length === 0) {
+    const recon = recs[0];
+    const slice = _osintReconPayload(recon, section, limit, query);
+    return {
+      status: 'ok',
+      section,
+      domain: recon.domain,
+      collected: recon.timestamp,
+      data: slice.data,
+      objective_domains: objDomains,
+      available_sections: Object.keys(OSINT_SECTIONS).concat(['all']),
+      keys_present: slice.allKeys,
+    };
+  }
+
+  const by_domain = {};
+  recs.forEach(recon => {
+    const slice = _osintReconPayload(recon, section, limit, query);
+    by_domain[recon.domain || '(unknown)'] = {
+      collected: recon.timestamp,
+      data: slice.data,
+      keys_present: slice.allKeys,
+    };
+  });
   return {
     status: 'ok',
     section,
-    domain: recon.domain,
-    collected: recon.timestamp,
-    cached_domains: cachedDomains,
-    data: out,
+    domain: recs[0].domain,
+    domains: have,
+    objective_domains: objDomains,
+    domains_without_recon: missing,
+    collected: recs[0].timestamp,
+    by_domain,
+    data: _osintReconPayload(recs[0], section, limit, query).data,
+    note: 'This campaign has multiple domains. Results are grouped under by_domain. Query ALL of them — do not report only '
+      + (recs[0].domain || 'the first') + '. Re-call with domain="<name>" for one domain in full.'
+      + (missing.length ? ' No recon yet for: ' + missing.join(', ') + '.' : ''),
     available_sections: Object.keys(OSINT_SECTIONS).concat(['all']),
-    keys_present: allKeys,
   };
 }
 
@@ -12850,6 +13156,7 @@ function _toolCampaignContext() {
       additional_identifiers: obj.additionalIds || '',
       company_email:          obj.companyEmail || '',
       company_domain:         _companyDomain() || '',
+      company_domains:        _objectiveDomains(obj),
       mission_statement:      obj.missionStatement || '',
       social_regions:         objNormaliseRegions(obj.socialRegions),
       organizations:          objAllOrganizations(obj),
@@ -13139,12 +13446,12 @@ const SPOTTER_TOOLS = [
     type: 'function',
     function: {
       name: 'get_osint_recon',
-      description: 'OSINT / external recon for a campaign domain (workflow 13): DNS records, WHOIS/registrar, subdomains, certificate transparency, Shodan ports and vulns, FOFA hosts, Flare breach intel and exposed credentials, LinkedIn company data, discovered web/cloud assets and their owners. A campaign may have one cached record per domain (primary company email and any additional organizations that were enriched). Pass "domain" to read a specific one; otherwise the Domain Recon panel\'s focused domain is used. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
+      description: 'OSINT / external recon for the campaign domain(s) (workflow 13): DNS records, WHOIS/registrar, subdomains, certificate transparency, Shodan ports and vulns, FOFA hosts, Flare breach intel and exposed credentials, LinkedIn company data, discovered web/cloud assets and their owners. Objectives may name several domains (company email + Additional Identifiers); this tool returns all of them, grouped under by_domain, and lists objective domains that have no recon yet. Pass domain= to read one. Query every campaign domain — do not restrict to the company-email host. Entities the operator marked Out of Scope or False Positive are already removed from what this returns.',
       parameters: {
         type: 'object',
         properties: {
           section: { type: 'string', description: 'summary | dns | subdomains | certificates | shodan | fofa | breaches | credentials | company | assets | social | errors | all' },
-          domain:  { type: 'string', description: 'Optional domain whose cached recon to read (defaults to the focused Domain Recon domain)' },
+          domain:  { type: 'string', description: 'Optional: restrict to one campaign domain (e.g. a subsidiary from Additional Identifiers). Omit to receive every cached recon.' },
           query:   { type: 'string', description: 'Optional keyword filter applied to list entries' },
           limit:   { type: 'integer', description: 'Max entries per list (default 25)' },
         },
@@ -14192,31 +14499,9 @@ async function sendChat() {
     return true;
   };
 
-  const obj = ac && ac.objectives ? ac.objectives : null;
-  const _allOrgs = obj ? objAllOrganizations(obj) : [];
-  const orgsBlock = _allOrgs.length > 1 ? `
-
-## Target Organizations
-This is a multi-organization campaign. Look for useful links and relationships between these organizations, their people and their technologies:
-${_allOrgs.map((o, i) => `${i + 1}. ${o.name || '(unnamed)'}${o.primary ? ' (primary target)' : ''}${o.domains ? ' - domains: ' + o.domains : ''}${o.emails ? ' - emails: ' + o.emails : ''}${o.urls ? ' - URLs: ' + o.urls : ''}${o.tech ? ' - tech: ' + o.tech : ''}${o.notes ? ' - notes: ' + o.notes : ''}`).join('\n')}` : '';
-  const missionBlock = (obj && obj.missionStatement) ? `
-
-## Campaign Objectives
-- Target Type: ${obj.targetType || 'Not specified'}
-- Primary Target: ${obj.targetName || 'Not specified'}${obj.additionalIds ? '\n- Additional Identifiers: ' + obj.additionalIds : ''}${obj.companyEmail ? '\n- Company Email Address: ' + obj.companyEmail + ' (domain: ' + (obj.companyEmail.includes('@') ? obj.companyEmail.split('@')[1] : obj.companyEmail) + ')' : ''}${objNormaliseRegions(obj.socialRegions).length ? '\n- Social Enrichment Regions: ' + objNormaliseRegions(obj.socialRegions).map(r => r.toUpperCase()).join(', ') + ' (regional social platforms swept in addition to global ones)' : ''}${orgsBlock}
-
-## Mission Statement, Goals, and Rules of Engagement
-${obj.missionStatement}
-
-Use the mission statement and ROE above to:
-1. Prioritize targets that align with the stated objectives.
-2. Suggest attack scenarios that achieve the mission goals.
-3. Flag any potential ROE violations before recommending a technique.
-4. Score and rank targets against mission alignment in addition to raw AD privilege scores.` : '';
-
   const sysContent = `You are SPOTTER — an AI-powered red team intelligence analyst with access to this campaign's full intelligence picture: a live Active Directory graph ingested from BloodHound/SharpHound and Cobalt Strike, plus the OSINT, technology and analysis data collected for the campaign.
 
-You assist authorized red team operators during legitimate, scoped engagements under documented Rules of Engagement.${ac ? `\n\nActive campaign: ${ac.name} (ID: ${ac.id})` : ''}${missionBlock}${_inventoryPromptBlock()}
+You assist authorized red team operators during legitimate, scoped engagements under documented Rules of Engagement.${ac ? `\n\nActive campaign: ${ac.name} (ID: ${ac.id})` : ''}${_objectivesPromptBlock()}${_inventoryPromptBlock()}
 
 ## Tools
 
@@ -18945,13 +19230,21 @@ function buildTechIntelReport(data) {
   if (vulnTechs.length) {
     sections.push({ key: 'vulnerable', title: `Vulnerable Technology · ${vulnTechs.length}`,
       blocks: [{ type: 'table',
-        columns: ['Technology', 'Vendor', 'Version', 'CVEs', 'Composite risk', 'MITRE techniques', 'Affected users', 'Affected hosts'],
-        rows: vulnTechs.map(v => [
-          v.name || '?', v.vendor || '', v.version || '', String(v.cve_count || 0),
-          (v.composite_risk || 0).toFixed(1),
-          (v.mitre_techniques || []).map(m => m.id || m).join(', '),
-          (v.affected_users || []).join(', '),
-          (v.affected_hosts || []).join(', ') || (v.service_instances || []).map(s => [s.host, s.port ? `port ${s.port}` : ''].filter(Boolean).join(' ')).join(', ')]) }] });
+        columns: ['Technology', 'Vendor', 'Version', 'CVEs', 'Composite risk', 'MITRE techniques', 'Affected users', 'Hosts', 'Ports', 'Services'],
+        rows: vulnTechs.map(v => {
+          const assets = _tiVulnAssets(v);
+          return [
+            v.name || '?', v.vendor || '', v.version || '', String(v.cve_count || 0),
+            (v.composite_risk || 0).toFixed(1),
+            (v.mitre_techniques || []).map(m => m.id || m).join(', '),
+            (v.affected_users || []).join(', '),
+            assets.map(a => (a.hostnames && a.hostnames[0]) || a.host || a.ip || '').filter(Boolean).join(', ')
+              || (v.affected_hosts || []).join(', '),
+            assets.map(a => _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, '')).filter(Boolean).join('; '),
+            assets.map(a => [a.service_name, a.product || v.name].filter(Boolean).join(' ')).filter(Boolean)
+              .filter((x, i, arr) => arr.indexOf(x) === i).join(', '),
+          ];
+        }) }] });
   }
 
   // The estate as seen from outside. Same columns and same caveat text as the
@@ -22829,6 +23122,237 @@ function _tiMergeList(left, right, keyFn) {
   return out;
 }
 
+/* ports / hostnames arrive as an array, a JSON string, a CSV, or a single
+   scalar. WF12 used to put json.dumps(ports) into `port` when `port` was empty,
+   and still ships `port` as the first port even when `ports` holds the rest. */
+function _tiScalarList(raw) {
+  if (raw === null || raw === undefined || raw === '') return [];
+  if (typeof raw === 'number' && Number.isFinite(raw)) return [String(raw)];
+  if (Array.isArray(raw)) {
+    return raw.flatMap(x => _tiScalarList(x)).filter(Boolean);
+  }
+  const parsed = _tiList(raw);
+  if (parsed.length) return parsed.flatMap(x => _tiScalarList(x)).filter(Boolean);
+  const s = String(raw).trim();
+  if (!s) return [];
+  return s.replace(/^\[|\]$/g, '').split(/[,\s]+/)
+    .map(x => x.replace(/^['"]|['"]$/g, '').trim())
+    .filter(Boolean);
+}
+
+function _tiFmtPorts(ports, protocol) {
+  const list = _tiScalarList(ports);
+  if (!list.length) return '';
+  const proto = String(protocol || '').trim();
+  const body = list.map(p => (proto && !String(p).includes('/')) ? `${p}/${proto}` : String(p)).join(', ');
+  return (list.length === 1 ? 'port ' : 'ports ') + body;
+}
+
+function _tiVulnInstance(v) {
+  const ip = String((v && v.ip) || '').trim();
+  const hostnames = _tiScalarList(v && v.hostnames);
+  const portsRaw = (v && v.ports !== undefined && v.ports !== null && v.ports !== '')
+    ? v.ports : (v && v.port);
+  let host = String((v && (v.host || v.ip)) || '').trim();
+  // nmap Service nodeLabel looks like "443/tcp (https nginx 1.18.0)" — not a host.
+  if (/^\d{1,5}\//.test(host)) host = '';
+  if (!host && hostnames.length) host = hostnames[0];
+  return {
+    host,
+    ip,
+    hostnames,
+    ports: _tiScalarList(portsRaw),
+    protocol: String((v && v.protocol) || '').trim(),
+    service_name: String((v && v.service_name) || '').trim(),
+    product: String((v && v.product) || '').trim(),
+  };
+}
+
+function _tiVulnInstanceLabel(inst, fallbackProduct) {
+  const where = (inst.hostnames && inst.hostnames[0]) || inst.host || inst.ip || '';
+  const ipBit = [inst.ip, inst.host].filter(x => x && x !== where)
+    .filter((x, i, arr) => arr.indexOf(x) === i)[0] || '';
+  const ports = _tiFmtPorts(inst.ports, inst.protocol);
+  const svc = [inst.service_name, inst.product || fallbackProduct].filter(Boolean)
+    .filter((x, i, arr) => arr.indexOf(x) === i).join(' ');
+  return [where, ipBit, ports, svc ? `svc ${svc}` : ''].filter(Boolean).join(' · ');
+}
+
+function _tiVulnInstanceShort(inst) {
+  const where = (inst.hostnames && inst.hostnames[0]) || inst.host || inst.ip || '';
+  const ports = _tiScalarList(inst.ports).join(',');
+  return ports ? `${where}:${ports}` : where;
+}
+
+function _tiMergeVulnInstance(into, extra) {
+  if (!extra) return into;
+  if (!into.host) into.host = extra.host;
+  if (!into.ip) into.ip = extra.ip;
+  if (!into.protocol) into.protocol = extra.protocol;
+  if (!into.service_name) into.service_name = extra.service_name;
+  if (!into.product) into.product = extra.product;
+  into.hostnames = _tiMergeList(into.hostnames, extra.hostnames);
+  into.ports = _tiMergeList(into.ports, extra.ports);
+  return into;
+}
+
+function _tiVulnAssets(v) {
+  const instances = [];
+  const push = inst => {
+    if (!inst) return;
+    const key = String(inst.host || inst.ip || '').toLowerCase();
+    if (key) {
+      const existing = instances.find(s => String(s.host || s.ip || '').toLowerCase() === key);
+      if (existing) { _tiMergeVulnInstance(existing, inst); return; }
+    }
+    if (inst.host || inst.ip || inst.ports.length || inst.hostnames.length) instances.push(inst);
+  };
+  _tiList(v && v.service_instances).forEach(s => push(_tiVulnInstance(s)));
+  // The grouped row still carries the FIRST instance's host/port. Re-reading it
+  // after service_instances exist would attach every merged port onto that one
+  // host. Only fall back to the row when grouping did not produce instances.
+  if (!instances.length) push(_tiVulnInstance(v));
+  _tiList(v && v.affected_hosts).forEach(h => {
+    const host = String(h || '').trim();
+    // Same nmap-label guard as _tiVulnInstance: "443/tcp (https nginx)" is a
+    // service fingerprint, not a hostname.
+    if (host && !/^\d{1,5}\//.test(host)) {
+      push({ host, ip: '', hostnames: [], ports: [], protocol: '', service_name: '', product: '' });
+    }
+  });
+  return instances;
+}
+
+function _tiCveId(c) {
+  if (c == null) return '';
+  if (typeof c === 'string' || typeof c === 'number') return String(c).trim();
+  return String((c && (c.cve_id || c.id || c.name)) || '').trim();
+}
+
+function _tiCveList(v) {
+  const seen = new Set();
+  const out = [];
+  _tiList(v && v.cves).forEach(c => {
+    const id = _tiCveId(c);
+    if (!id) return;
+    const key = id.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const obj = (c && typeof c === 'object' && !Array.isArray(c)) ? c : {};
+    out.push({
+      id,
+      severity: obj.severity || '',
+      score: (obj.base_score != null && obj.base_score !== '') ? obj.base_score : '',
+      exploit: !!obj.exploit_available,
+      match: obj.match || '',
+    });
+  });
+  return out;
+}
+
+function _tiNvdHref(id) {
+  return 'https://nvd.nist.gov/vuln/detail/' + encodeURIComponent(String(id || '').trim());
+}
+
+function _tiNvdLink(id) {
+  const safe = String(id || '').trim();
+  if (!safe) return '';
+  return `<a class="ti-cve-link" href="${esc(_tiNvdHref(safe))}" target="_blank" rel="noopener noreferrer">${esc(safe)}</a>`;
+}
+
+function _tiVulnPorts(v) {
+  const seen = new Set();
+  const out = [];
+  _tiVulnAssets(v).forEach(a => {
+    _tiScalarList(a.ports).forEach(p => {
+      const key = String(p);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push(key);
+    });
+  });
+  return out;
+}
+
+function _tiPortSpec(v, port) {
+  const want = String(port);
+  const assets = _tiVulnAssets(v).filter(a => _tiScalarList(a.ports).map(String).includes(want));
+  return {
+    title: `Port ${want} · ${v.name || 'technology'}`,
+    subtitle: `${assets.length} host${assets.length !== 1 ? 's' : ''} where this component was seen on port ${want}`,
+    noun: 'hosts',
+    layout: 'list',
+    columns: ['Host', 'Hostnames', 'Ports', 'Service'],
+    items: assets.map(a => ({
+      text: _tiVulnInstanceLabel(a, v.name),
+      csv: [
+        a.host || a.ip || '',
+        (a.hostnames || []).join(' '),
+        _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, ''),
+        [a.service_name, a.product || v.name].filter(Boolean).join(' '),
+      ],
+    })),
+  };
+}
+
+function _tiPortTag(v, port) {
+  const spec = _tiPortSpec(v, port);
+  const label = String(port);
+  if (!spec.items.length) {
+    return `<span class="ti-port-tag" title="Port ${esc(label)}">${esc(label)}</span>`;
+  }
+  const id = _ovfPut('ti', spec);
+  return `<span class="ti-port-tag tag-drill" role="button" tabindex="0" data-ovf-open="${esc(id)}"`
+    + ` title="Hosts where ${esc(v.name || 'this component')} was seen on port ${esc(label)}">${esc(label)}</span>`;
+}
+
+function _tiCveSpec(v) {
+  const cves = _tiCveList(v);
+  const assets = _tiVulnAssets(v);
+  const ports = _tiVulnPorts(v);
+  const hostStr = assets.map(a => (a.hostnames && a.hostnames[0]) || a.host || a.ip).filter(Boolean).join(', ');
+  const note = [
+    hostStr ? `<div>Hosts: ${esc(hostStr)}</div>` : '',
+    ports.length ? `<div>Ports: ${ports.map(p => _tiPortTag(v, p)).join('')}</div>` : '',
+    v.cve_match_basis === 'keyword'
+      ? '<div>Matched on the product NAME, not a CPE — treat the set as soft.</div>'
+      : '',
+  ].filter(Boolean).join('');
+  return {
+    title: `CVEs · ${v.name || 'technology'}`,
+    subtitle: `${cves.length} CVE${cves.length !== 1 ? 's' : ''}`
+      + (ports.length ? ` · port${ports.length !== 1 ? 's' : ''} ${ports.join(', ')}` : '')
+      + (hostStr ? ` · ${hostStr}` : ''),
+    noun: 'CVEs',
+    layout: 'table',
+    columns: ['CVE', 'Severity', 'Score', 'Exploit', 'Match'],
+    noteHtml: note,
+    items: cves.map(c => ({
+      text: c.id,
+      html: `<td>${_tiNvdLink(c.id)}</td>`
+        + `<td>${esc(c.severity || '—')}</td>`
+        + `<td>${c.score !== '' ? esc(String(c.score)) : '—'}</td>`
+        + `<td>${c.exploit ? 'public PoC' : '—'}</td>`
+        + `<td>${esc(c.match || '')}</td>`,
+      csv: [c.id, c.severity, String(c.score), c.exploit ? 'yes' : '', c.match],
+    })),
+  };
+}
+
+function _tiCveBadge(v) {
+  const cves = _tiCveList(v);
+  const count = Number(v.cve_count) || cves.length;
+  if (!count) return '';
+  const label = `${count} CVE`;
+  if (!cves.length) {
+    return `<span class="ti-cve-badge" title="${count} known CVEs — the IDs were not shipped with this record. Re-run Tech Inventory after enrichment.">${esc(label)}</span>`;
+  }
+  const id = _ovfPut('ti', _tiCveSpec(v));
+  return `<span class="ti-cve-badge tag-drill" role="button" tabindex="0" data-ovf-open="${esc(id)}"`
+    + ` title="Show ${cves.length} CVE${cves.length !== 1 ? 's' : ''} at NVD, and the ports they were seen on">`
+    + `${esc(label)}<span class="tag-drill-car">&#9656;</span></span>`;
+}
+
 function _tiGroupVulnerableTech(rows) {
   const groups = new Map();
   const normal = v => String(v || '').trim().toLowerCase();
@@ -22838,11 +23362,11 @@ function _tiGroupVulnerableTech(rows) {
       return;
     }
     const key = ['service', v.name, v.vendor, v.version, v.cve_match_basis].map(normal).join('|');
-    const host = String(v.host || '').trim();
-    const port = String(v.port || '').trim();
-    const serviceInstance = host ? { host, port } : null;
+    const serviceInstance = _tiVulnInstance(v);
+    const hasInstance = !!(serviceInstance.host || serviceInstance.ip
+      || serviceInstance.ports.length || serviceInstance.hostnames.length);
     if (!groups.has(key)) {
-      const copy = { ...v, service_instances: serviceInstance ? [serviceInstance] : [] };
+      const copy = { ...v, service_instances: hasInstance ? [serviceInstance] : [] };
       groups.set(key, copy);
       return;
     }
@@ -22856,8 +23380,14 @@ function _tiGroupVulnerableTech(rows) {
     g.top_pocs = _tiMergeList(g.top_pocs, v.top_pocs, p => String((p && (p.url || p.full_name)) || p));
     g.affected_users = _tiMergeList(g.affected_users, v.affected_users);
     g.affected_hosts = _tiMergeList(g.affected_hosts, v.affected_hosts);
-    if (serviceInstance && !(g.service_instances || []).some(s => s.host === host && String(s.port || '') === port)) {
-      g.service_instances.push(serviceInstance);
+    g.hostnames = _tiMergeList(g.hostnames, v.hostnames);
+    g.ports = _tiMergeList(g.ports, _tiScalarList(v.ports || v.port));
+    if (hasInstance) {
+      const existing = (g.service_instances || []).find(s =>
+        String(s.host || s.ip || '').toLowerCase() === String(serviceInstance.host || serviceInstance.ip || '').toLowerCase()
+        && (s.host || s.ip || serviceInstance.host || serviceInstance.ip));
+      if (existing) _tiMergeVulnInstance(existing, serviceInstance);
+      else g.service_instances.push(serviceInstance);
     }
   });
   return [...groups.values()].sort((a, b) => (Number(b.composite_risk || 0) - Number(a.composite_risk || 0)) || String(a.name || '').localeCompare(String(b.name || '')));
@@ -23824,7 +24354,7 @@ function renderTechIntel(data) {
 
   document.getElementById('ti-vulnerable').innerHTML = vulnTechs.length
     ? `<div class="ti-vuln-grid">
-        ${vulnTechs.map(v => {
+        ${vulnTechs.map((v, i) => {
           const mAll = _tiList(v.mitre_techniques);
           const mitreTags = mAll.slice(0, 4).map(m =>
             `<span class="ti-mitre-tag" title="${esc(m.name || m.id || m)}">${esc(m.id || m)}</span>`
@@ -23877,18 +24407,31 @@ function renderTechIntel(data) {
           const weakMatch = (v.cve_match_basis === 'keyword' && (v.cve_count || 0) > 0)
             ? `<span class="ti-kind-tag" title="CVEs matched on product name only — may include CVEs belonging to other products whose description mentions it. A CPE or scanner match would be exact.">name-matched</span>`
             : '';
-          const svcAll = v.service_instances || (isSvc && v.host ? [{ host: v.host, port: v.port }] : []);
-          const svcLabels = svcAll.map(s => [s.host, s.port ? `port ${s.port}` : ''].filter(Boolean).join(' '));
-          const hostLine = isSvc && svcLabels.length
-            ? `<div class="ti-vuln-meta">External services: ${esc(svcLabels.slice(0, 2).join(', '))}${_ovfChip('ti', {
-                title: `External service instances · ${v.name || 'technology'}`, noun: 'services', layout: 'list',
-                columns: ['Host', 'Port'],
-                items: svcAll.map(s => ({ text: [s.host, s.port ? `port ${s.port}` : ''].filter(Boolean).join(' '), csv: [s.host || '', s.port || ''] })),
-              }, { shown: 2, cls: 'ovf-inline', label: `+${svcAll.length - 2}` })}</div>`
+          const assets = _tiVulnAssets(v);
+          const assetBits = assets.slice(0, 2).map(a => {
+            const where = (a.hostnames && a.hostnames[0]) || a.host || a.ip || '';
+            const portTags = _tiScalarList(a.ports).map(p => _tiPortTag(v, p)).join('');
+            return `<span class="ti-vuln-asset">${esc(where)}${portTags}</span>`;
+          }).filter(h => h && !/^<span class="ti-vuln-asset"><\/span>$/.test(h));
+          const hostLine = (assetBits.length || assets.length)
+            ? `<div class="ti-vuln-meta">${isSvc ? 'External services' : 'Hosts'}: ${assetBits.join('')}${_ovfChip('ti', {
+                title: `${isSvc ? 'External service instances' : 'Affected hosts'} · ${v.name || 'technology'}`,
+                noun: isSvc ? 'services' : 'hosts', layout: 'list',
+                columns: ['Host', 'Hostnames', 'Ports', 'Service'],
+                items: assets.map(a => ({
+                  text: _tiVulnInstanceLabel(a, v.name),
+                  csv: [
+                    a.host || a.ip || '',
+                    (a.hostnames || []).join(' '),
+                    _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, ''),
+                    [a.service_name, a.product || v.name].filter(Boolean).join(' '),
+                  ],
+                })),
+              }, { shown: 2, cls: 'ovf-inline', label: `+${assets.length - 2}` })}</div>`
             : '';
-          return `<div class="ti-vuln-card" data-tech="${esc(v.name || '')}">
+          return `<div class="ti-vuln-card" data-vuln="${i}">
             <div class="ti-vuln-name">${esc(v.name || '?')}${kindTag}${weakMatch}
-              <span class="ti-cve-badge" title="${v.cve_count || 0} known CVEs">${v.cve_count || 0} CVE</span>
+              ${_tiCveBadge(v)}
               ${pocBadge}
             </div>
             <div class="ti-vuln-meta">Risk ${(v.composite_risk || 0).toFixed(1)} &nbsp;|&nbsp; ${esc(v.vendor || 'unknown vendor')} &nbsp;|&nbsp; ${esc(v.version || '')}</div>
@@ -23903,11 +24446,11 @@ function renderTechIntel(data) {
          <button id="ti-enrich" class="btn-sm" style="margin-left:8px;">Run enrichment</button>
          <span class="dim" style="margin-left:6px;">Resolves CVEs, MITRE techniques and public exploit availability for every Technology and Service node, then writes them back to the graph.</span>
        </div>`;
-  // Clicking a PoC link must not also open the tech drilldown behind it.
-  document.querySelectorAll('.ti-vuln-card[data-tech]').forEach(el =>
+  // Clicking a PoC link must not also open the asset drilldown behind it.
+  document.querySelectorAll('.ti-vuln-card[data-vuln]').forEach(el =>
     el.addEventListener('click', (ev) => {
-      if (ev.target.closest('.ti-poc-block')) return;
-      tiShowTech(el.dataset.tech);
+      if (ev.target.closest('.ti-poc-block, [data-ovf-open], a')) return;
+      tiShowVuln(Number(el.dataset.vuln));
     })
   );
   const enrichBtn = document.getElementById('ti-enrich');
@@ -24211,8 +24754,10 @@ function tiOpenDetail(title, subtitle, rows) {
       const div = document.createElement('div');
       div.className = 'ti-dm-row' + (r.onclick ? '' : ' no-click');
       div.innerHTML = `
-        <div class="ti-dm-primary">${esc(r.primary)}</div>
-        ${r.secondary ? `<div class="ti-dm-secondary">${esc(r.secondary)}</div>` : '<div class="ti-dm-secondary"></div>'}
+        <div class="ti-dm-primary">${r.htmlPrimary || esc(r.primary)}</div>
+        ${r.htmlSecondary || r.secondary
+          ? `<div class="ti-dm-secondary">${r.htmlSecondary || esc(r.secondary)}</div>`
+          : '<div class="ti-dm-secondary"></div>'}
         ${badge}`;
       if (r.onclick) div.addEventListener('click', r.onclick);
       body.appendChild(div);
@@ -24315,6 +24860,123 @@ function tiShowTech(techName) {
 
   const cnt = (_tiData.tech_catalog || {})[techName] || rows.length;
   tiOpenDetail(techName, `${cnt} user${cnt !== 1 ? 's' : ''}${isHV ? ' — High-Value Tech' : ''}`, rows);
+}
+
+/* One Vulnerable Technology card. Catalog pills still open tiShowTech (users of
+   the software). These cards are assets — a Service from recon, or a Technology
+   with CVEs — so the drilldown has to name the host, the ports, and the service
+   fingerprint rather than looking the product name up in tech_user_map, which
+   is empty for anything the estate does not run as a logged-in user. */
+function tiShowVuln(idx) {
+  if (!_tiData) return;
+  const v = _tiGroupVulnerableTech(_tiData.vulnerable_tech || [])[idx];
+  if (!v) return;
+
+  const assets = _tiVulnAssets(v);
+  const ddMap = _tiData.device_dossier_map || {};
+  const rows = [];
+  const kv = (k, val, extra) => {
+    if (val === null || val === undefined || val === '') return;
+    rows.push({ primary: k, secondary: String(val), ...(extra || {}) });
+  };
+
+  kv('Kind', v.kind === 'service'
+    ? 'External service — seen on an open port'
+    : 'Installed software');
+  kv('Vendor', v.vendor);
+  kv('Version', v.version);
+  kv('Category', v.category);
+
+  assets.forEach(a => {
+    const title = (a.hostnames && a.hostnames[0]) || a.host || a.ip || '(unknown host)';
+    const loc = [
+      a.ip && a.ip !== title ? a.ip : null,
+      a.host && a.host !== title && a.host !== a.ip ? a.host : null,
+      (a.hostnames || []).filter(h => h && h !== title).join(', ') || null,
+    ].filter(Boolean);
+    const svcBits = [a.service_name, a.product || (v.kind === 'service' ? v.name : '')]
+      .filter(Boolean)
+      .filter((x, i, arr) => arr.indexOf(x) === i);
+    const portTags = _tiScalarList(a.ports).map(p => _tiPortTag(v, p)).join('');
+    const secondary = [
+      loc.length ? loc.join(' · ') : null,
+      svcBits.length ? `service ${svcBits.join(' · ')}` : null,
+    ].filter(Boolean).join(' — ') || 'Affected host';
+    const lookup = a.host || a.ip || (a.hostnames && a.hostnames[0]) || '';
+    rows.push({
+      primary: title,
+      secondary,
+      htmlSecondary: [loc.length ? esc(loc.join(' · ')) : '',
+                      portTags || '',
+                      svcBits.length ? esc('service ' + svcBits.join(' · ')) : '']
+        .filter(Boolean).join(' — ') || esc(secondary),
+      badge: (a.ports || []).length
+        ? ((a.ports.length === 1 ? 'PORT ' : a.ports.length + ' PORTS ') + a.ports[0])
+        : null,
+      badgeClass: 'risk-high',
+      onclick: lookup && ddMap[lookup] ? () => openDeviceDossier(lookup) : null,
+    });
+  });
+
+  const techList = (_tiData.tech_user_map || {})[v.name];
+  const seenUsers = new Set();
+  const addUser = (user, hostname, department, is_admin) => {
+    const key = `${user || ''}|${hostname || ''}`;
+    if (seenUsers.has(key)) return;
+    seenUsers.add(key);
+    const dd = hostname ? ddMap[hostname] : null;
+    const wsName = dd?.samaccountname || hostname || '';
+    rows.push({
+      primary: user || '(unknown)',
+      secondary: [wsName ? `Workstation: ${wsName}` : null, department || null].filter(Boolean).join(' — ') || undefined,
+      badge: is_admin ? 'ADMIN' : (HIGH_VALUE_TECH_SET.has(v.name) ? 'HIGH VALUE' : null),
+      badgeClass: 'risk-critical',
+      onclick: hostname && ddMap[hostname] ? () => openDeviceDossier(hostname) : null,
+    });
+  };
+  _tiList(v.affected_users).forEach(u => addUser(u, '', '', false));
+  if (techList?.length) {
+    techList.forEach(u => addUser(u.user, u.hostname, u.department, u.is_admin));
+  } else {
+    (_tiData.user_tech_profiles || [])
+      .filter(p => (p.tech_stack || []).includes(v.name) || (p.hv_tech || []).includes(v.name))
+      .forEach(p => addUser(p.user, p.primary_device?.hostname || '', p.department || p.job_title, p.is_admin));
+  }
+
+  const cves = _tiCveList(v);
+  const cveCount = Number(v.cve_count) || cves.length;
+  if (cves.length) {
+    const ovfId = _ovfPut('ti', _tiCveSpec(v));
+    rows.push({
+      primary: `${cves.length} CVE${cves.length !== 1 ? 's' : ''}`,
+      secondary: 'Open NVD records and the ports they were seen on',
+      badge: 'NVD',
+      badgeClass: 'risk-high',
+      onclick: () => ovfOpen(ovfId),
+    });
+    cves.forEach(c => {
+      rows.push({
+        primary: c.id,
+        htmlPrimary: _tiNvdLink(c.id),
+        secondary: [c.severity, c.score !== '' ? 'CVSS ' + c.score : '',
+                    c.exploit ? 'public PoC' : '', c.match].filter(Boolean).join(' · '),
+      });
+    });
+  } else if (cveCount) {
+    kv(`${cveCount} CVE${cveCount !== 1 ? 's' : ''}`,
+       'IDs were not shipped with this record — re-run Tech Inventory after enrichment');
+  }
+  const mitre = _tiList(v.mitre_techniques).map(m => [m.id || m.technique_id, m.name].filter(Boolean).join(' ')).filter(Boolean);
+  if (mitre.length) kv('MITRE', mitre.join(', '));
+  if (v.composite_risk) kv('Composite risk', Number(v.composite_risk).toFixed(1));
+
+  const hostCount = assets.length;
+  const subtitle = [
+    v.kind === 'service' ? 'External service' : 'Vulnerable technology',
+    hostCount ? `${hostCount} host${hostCount !== 1 ? 's' : ''}` : null,
+    cveCount ? `${cveCount} CVE${cveCount !== 1 ? 's' : ''}` : null,
+  ].filter(Boolean).join(' · ');
+  tiOpenDetail([v.name || '?', v.version].filter(Boolean).join(' '), subtitle, rows);
 }
 
 /* One internet-facing component, addressed by its index in the shipped array —

@@ -78,7 +78,7 @@ def build_fake_requests(thc_mode: str = "normal",
                         flare_creds: int = 0,
                         fofa_mode: str = "normal",
                         shodan_mode: str = "normal") -> Tuple[types.ModuleType, Dict[str, Any]]:
-    state: Dict[str, Any] = {"gets": [], "posts": [], "fofa_fields": []}
+    state: Dict[str, Any] = {"gets": [], "posts": [], "fofa_fields": [], "fofa_keys": []}
     fake = types.ModuleType("requests")
 
     def get(url: str, **kwargs: Any) -> FakeResponse:
@@ -114,6 +114,8 @@ def build_fake_requests(thc_mode: str = "normal",
         if parsed.netloc == "internetdb.shodan.io":
             if shodan_mode == "idb_429":
                 return FakeResponse(status_code=429, text="rate limited")
+            if shodan_mode == "403":
+                return FakeResponse(status_code=403, text="<!DOCTYPE html> cloudflare")
             return FakeResponse(payload={
                 "ports": [443],
                 "vulns": ["CVE-2024-0001"],
@@ -128,6 +130,7 @@ def build_fake_requests(thc_mode: str = "normal",
             fields = str((kwargs.get("params") or {}).get("fields") or "")
             cols = [c for c in fields.split(",") if c]
             state["fofa_fields"].append(fields)
+            state["fofa_keys"].append((kwargs.get("params") or {}).get("key"))
 
             # An account tier that forbids a field rejects the WHOLE query with
             # HTTP 200 + error, naming one offending field.
@@ -166,6 +169,8 @@ def build_fake_requests(thc_mode: str = "normal",
         if parsed.netloc == "api.shodan.io":
             if shodan_mode == "429":
                 return FakeResponse(status_code=429, text="rate limited")
+            if shodan_mode == "403":
+                return FakeResponse(status_code=403, text="<!DOCTYPE html> cloudflare")
             if shodan_mode == "empty":
                 return FakeResponse(payload={"matches": []})
             return FakeResponse(payload={"matches": [{
@@ -810,11 +815,11 @@ def build_fake_edgar(matched: bool = True, fail: bool = False
     return fake, state
 
 
-def build_fake_settings() -> types.ModuleType:
+def build_fake_settings(overrides: Dict[str, int] | None = None) -> types.ModuleType:
     fake = types.ModuleType("spotter_settings")
 
     def resolve_many(_names: List[str]) -> Dict[str, int]:
-        return {
+        vals = {
             "BUCKET_PROBE_MAX_CANDIDATES": 0,
             "BUCKET_PROBE_CONCURRENCY": 1,
             "BUCKET_PROBE_TIMEOUT": 1,
@@ -840,7 +845,11 @@ def build_fake_settings() -> types.ModuleType:
             "SITE_MAX_SECONDS": 180,
             "EDGAR_MAX_REQUESTS": 12,
             "EDGAR_TIMEOUT": 20,
+            "SHODAN_BYPASS_PROXY": 0,
+            "FOFA_BYPASS_PROXY": 0,
         }
+        vals.update(overrides or {})
+        return vals
 
     fake.resolve_many = resolve_many  # type: ignore[attr-defined]
     return fake
@@ -993,6 +1002,7 @@ def run_smoke_case(code: str, payload: Dict[str, Any], thc_mode: str = "normal",
                    tavily_fail: bool = False,
                    tavily_matched: bool = True,
                    tavily_key: bool = True,
+                   extra_settings: Dict[str, int] | None = None,
                    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     fake_requests, request_state = build_fake_requests(
         thc_mode, flare_creds, fofa_mode, shodan_mode)
@@ -1010,7 +1020,7 @@ def run_smoke_case(code: str, payload: Dict[str, Any], thc_mode: str = "normal",
     fake_certcreep.collect = _collect
     fake_flowsint, flowsint_state = build_fake_flowsint(seed_tech, individuals,
                                                         titled_people, ownership)
-    fake_settings = build_fake_settings()
+    fake_settings = build_fake_settings(extra_settings)
     fake_hh, hh_state = build_fake_hh(hh_fail)
     fake_serp, serp_state = build_fake_serp(serp_fail, serp_unreliable, serp_jobs)
     fake_site, site_state = build_fake_site(site_fail, site_unreachable)
@@ -1265,6 +1275,38 @@ def main() -> None:
     assert_true(all(g["kwargs"].get("proxies", {}).get("https") == "socks5h://proxy.local:1080"
                     for g in shodan_gets),
                 "Shodan lookups must use the campaign proxy", shodan_gets)
+
+    shodan_bypass, shodan_bypass_reqs, _ = run_smoke_case(
+        code, payload, extra_settings={"SHODAN_BYPASS_PROXY": 1})
+    bypass_gets = [g for g in shodan_bypass_reqs["gets"]
+                   if urlparse(g["url"]).netloc in {"api.shodan.io", "internetdb.shodan.io"}]
+    assert_true(bypass_gets and all(g["kwargs"].get("proxies") == {}
+                                    for g in bypass_gets),
+                "Shodan Bypass Proxy must send an empty proxies dict (direct egress)",
+                bypass_gets)
+    assert_true((shodan_bypass.get("shodan_api_status") or {}).get("bypass_proxy") is True,
+                "shodan_api_status.bypass_proxy must be true when the toggle is on",
+                shodan_bypass.get("shodan_api_status"))
+    title_gets = [g for g in shodan_bypass_reqs["gets"]
+                  if "example.com" in g["url"] and urlparse(g["url"]).scheme in {"http", "https"}
+                  and urlparse(g["url"]).netloc.endswith("example.com")]
+    if title_gets:
+        assert_true(all(g["kwargs"].get("proxies", {}).get("https") == "socks5h://proxy.local:1080"
+                        for g in title_gets),
+                    "target HTTP probes must stay on the campaign proxy when Shodan bypasses it",
+                    title_gets)
+
+    fofa_bypass, fofa_bypass_reqs, _ = run_smoke_case(
+        code, dict(payload, sources=["fofa"]), extra_settings={"FOFA_BYPASS_PROXY": 1})
+    fofa_bypass_gets = [g for g in fofa_bypass_reqs["gets"]
+                        if urlparse(g["url"]).netloc == "fofa.info"]
+    assert_true(fofa_bypass_gets and all(g["kwargs"].get("proxies") == {}
+                                         for g in fofa_bypass_gets),
+                "FOFA Bypass Proxy must send an empty proxies dict (direct egress)",
+                fofa_bypass_gets)
+    assert_true((fofa_bypass.get("fofa_status") or {}).get("bypass_proxy") is True,
+                "fofa_status.bypass_proxy must be true when the toggle is on",
+                fofa_bypass.get("fofa_status"))
     assert_true(all((g["kwargs"].get("headers") or {}).get("User-Agent") == "SPOTTER-Smoke/1.0"
                     for g in shodan_gets),
                 "Shodan lookups must send the campaign user-agent", shodan_gets)
@@ -1331,6 +1373,13 @@ def main() -> None:
     # as a version tail, so the canonical name is empty and the observation must be
     # DROPPED rather than written with a blank name.
     fofa_run, fofa_reqs, fofa_state = run_smoke_case(code, dict(payload, sources=["shodan", "fofa"]))
+    _fofa_default_gets = [g for g in fofa_reqs["gets"]
+                          if urlparse(g["url"]).netloc == "fofa.info"]
+    assert_true(_fofa_default_gets and all(
+        g["kwargs"].get("proxies", {}).get("https") == "socks5h://proxy.local:1080"
+        for g in _fofa_default_gets),
+                "FOFA lookups must use the campaign proxy by default",
+                _fofa_default_gets)
     _ft = [n for n in fofa_state["nodes"] if n["node_type"] == "Technology"]
     assert_true(_ft, "the fofa case should still create Technology nodes", fofa_state["nodes"])
     assert_true(all((n["properties"].get("name") or "").strip() for n in _ft),
@@ -1465,6 +1514,20 @@ def main() -> None:
                 "FOFA no-key should NOT call the FOFA API",
                 _fofa_api_calls)
 
+    # Personal-center paste ("API Key: <32-hex> URL: https://i.nosec.org/...")
+    # used to go to FOFA as the whole key and come back [-700] 账号无效.
+    _paste_hex = "a" * 32
+    _paste = f"API Key: {_paste_hex} URL: https://i.nosec.org/missing.jpg"
+    _fofa_paste, _fp_reqs, _ = run_smoke_case(
+        code, dict(payload, sources=["fofa"]),
+        extra_env={"FOFA_API_KEY": _paste})
+    assert_true(_fp_reqs["fofa_keys"] and all(k == _paste_hex for k in _fp_reqs["fofa_keys"]),
+                "a labelled FOFA paste must send only the 32-hex key",
+                _fp_reqs["fofa_keys"])
+    assert_true((_fofa_paste.get("fofa_status") or {}).get("state") == "ok",
+                "a labelled FOFA paste must still authenticate",
+                _fofa_paste.get("fofa_status"))
+
     shodan_limited, shodan_limited_reqs, _ = run_smoke_case(code, payload, shodan_mode="429")
     _sl = shodan_limited.get("shodan_api_status") or {}
     assert_true(_sl.get("state") == "rate_limited" and _sl.get("rate_limited") is True,
@@ -1485,6 +1548,17 @@ def main() -> None:
     _si = shodan_idb.get("shodan_api_status") or {}
     assert_true(_si.get("rate_limited") is True,
                 "an InternetDB 429 stays visible even when the paid API returns rows", _si)
+
+    shodan_blocked, _, _ = run_smoke_case(code, payload, shodan_mode="403")
+    _s403 = shodan_blocked.get("shodan_api_status") or {}
+    assert_true(_s403.get("state") == "blocked" and _s403.get("http_status") == 403,
+                "Shodan HTTP 403 is a blocked egress, not an empty result", _s403)
+    assert_true("403" in str(_s403.get("detail") or ""),
+                "the blocked status must carry HTTP 403 in the operator-facing detail",
+                _s403)
+    assert_true(not shodan_blocked.get("shodan_results"),
+                "a blocked Shodan returns no host rows",
+                shodan_blocked.get("shodan_results"))
 
     rate_limited, _, _ = run_smoke_case(code, payload, thc_mode="429")
     assert_true(rate_limited.get("thc_rate_limited") is True,
