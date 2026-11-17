@@ -90,6 +90,13 @@ const FIXTURE = {
           devices: ['VPN01.corp.example.test'], evidence: 'shodan:203.0.113.21:443' },
         { ip: '203.0.113.31', port: 80, evidence: 'fofa:203.0.113.31:80' },
       ] },
+    // A Technology node: WF13 never stamped ip/port on it (those live on the
+    // Service via IMPLEMENTED_IN). The popout used to be vendor/CPE/CVE only.
+    { name: 'Oracle Mysql', version: '5.7.44-48', vendor: 'Oracle',
+      category: 'unknown', kind: 'technology',
+      cpe: 'cpe:/a:oracle:mysql:5.7.44-48', confidence: 'high',
+      platform_basis: '', ip: '', is_high_value: false,
+      cve_count: 10, cve_match_basis: 'cpe', exploit_available: false, poc_count: 0 },
   ],
   cloud_exposure: [
     { asset: 's3:example-payroll', endpoint: 'example-payroll.s3.amazonaws.com',
@@ -347,15 +354,64 @@ setTimeout(() => {
   const origCamp = w.getActiveCamp;
   const origRecons = w.getDomainRecons;
   w.getActiveCamp = () => ({ id: 'camp-ti', name: 'Example' });
-  w.getDomainRecons = () => [{ ...DR, campaignId: 'camp-ti' }];
+  w.getDomainRecons = () => [{
+    ...DR, campaignId: 'camp-ti',
+    technologies: [...DR.technologies, {
+      name: 'Oracle Mysql', version: '5.7.44-48', vendor: 'Oracle',
+      hosts: [{ ip: '31.31.198.54', port: 3310, hostnames: ['hosting.reg.ru'],
+                devices: [], evidence: 'shodan:31.31.198.54:3310' }],
+    }],
+  }];
   w.eval('renderTechIntel(window.__fx);');
   const joinedMx = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
     .find(e => /Microsoft 365/.test(e.textContent));
   ok(joinedMx && /apex/.test(joinedMx.textContent),
      'a DNS-inferred platform says apex rather than leaving the host blank',
      joinedMx && joinedMx.textContent.replace(/\s+/g, ' ').slice(0, 240));
+  const oracleCard = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
+    .find(e => /Oracle Mysql/.test(e.textContent));
+  ok(oracleCard && /31\.31\.198\.54|hosting\.reg\.ru/.test(oracleCard.textContent),
+     'a Technology with no ip on the inventory row still names the recon host',
+     oracleCard && oracleCard.textContent.replace(/\s+/g, ' ').slice(0, 280));
+  if (oracleCard) {
+    oracleCard.querySelector('.ti-perim-name')
+      .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    const oracleDm = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+    ok(/31\.31\.198\.54/.test(oracleDm),
+       'the Oracle Mysql popout names the IP', oracleDm.slice(0, 400));
+    ok(/3310/.test(oracleDm),
+       'the Oracle Mysql popout names the port', oracleDm.slice(0, 400));
+    if (typeof w.tiCloseDetail === 'function') w.tiCloseDetail();
+  }
   w.getActiveCamp = origCamp;
   w.getDomainRecons = origRecons;
+
+  // WF12 hopped IMPLEMENTED_IN and shipped ip/hostnames/port on the Technology
+  // row itself — the popout has to print them even with no Domain Recon cache.
+  w.eval('renderTechIntel(' + JSON.stringify({
+    ...FIXTURE,
+    perimeter_tech: [{
+      name: 'Oracle Mysql', version: '5.7.44-48', vendor: 'Oracle',
+      kind: 'technology', cpe: 'cpe:/a:oracle:mysql:5.7.44-48',
+      ip: '31.31.198.54', host: '31.31.198.54',
+      hostnames: ['hosting.reg.ru'], port: 3310, ports: [3310],
+      cve_count: 10, cve_match_basis: 'cpe',
+    }],
+  }) + ');');
+  const hopped = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
+    .find(e => /Oracle Mysql/.test(e.textContent));
+  ok(hopped, 'a hopped Technology row still renders as a card');
+  if (hopped) {
+    hopped.querySelector('.ti-perim-name')
+      .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    const hoppedDm = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+    ok(/31\.31\.198\.54/.test(hoppedDm) && /hosting\.reg\.ru/.test(hoppedDm),
+       'the popout names IP and hostname from the inventory row', hoppedDm.slice(0, 400));
+    ok(/3310/.test(hoppedDm),
+       'the popout names the port from the inventory row', hoppedDm.slice(0, 400));
+    if (typeof w.tiCloseDetail === 'function') w.tiCloseDetail();
+  }
+  w.eval('renderTechIntel(window.__fx);');
 
   console.log('Domain Recon panel');
   let threw3 = '';

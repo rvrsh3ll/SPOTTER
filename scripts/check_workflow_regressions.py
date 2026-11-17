@@ -757,7 +757,14 @@ def run_checks() -> List[str]:
     # names the device, with IMPLEMENTED_IN alone it names nothing, because that
     # edge's far end is another component rather than a host.
     require_contains("12", "Build Tech Inventory", n12_build,
-                     "['USES_TECH', 'EXPOSES_SERVICE']", failures)
+                     "['USES_TECH', 'EXPOSES_SERVICE', 'IMPLEMENTED_IN']", failures)
+    # IMPLEMENTED_IN is Service -> Technology. The affected-host loop still
+    # ignores it; perimeter_tech hops it to copy the Service IP onto a
+    # Technology node that WF13 did not stamp ip/port on.
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "_otype == 'service'", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "_psvc_ips", failures)
     # Clicking a Vulnerable Technology card has to name the host, the ports and
     # the service. `port` is only the first port WF13 stamped; the rest live in
     # `ports` (JSON) and `hostnames`. nmap's EXPOSES_SERVICE far end is an IP,
@@ -910,6 +917,10 @@ def run_checks() -> List[str]:
     # single-hop affected-host loop can resolve.
     require_contains("13", "perimeter technology", n13, "'IMPLEMENTED_IN')", failures)
     require_contains("13", "perimeter technology", n13, "'USES_TECH')", failures)
+    # Flat ip/port on the Technology node: WF12's perimeter_tech reads these
+    # so the Tech Intel popout can name the host without a Domain Recon cache.
+    require_contains("13", "perimeter technology", n13, "_tprops['ip'] = _ob['ip']", failures)
+    require_contains("13", "perimeter technology", n13, "_tprops['port'] = _ob['port']", failures)
     # Dedup must see BOTH spellings: fc.add_node preserves PascalCase
     # (WF01/13/21/28), batch_import lowercases (nmap / Nessus / process-list), and
     # get_nodes_by_type interpolates the label into a case-sensitive MATCH.

@@ -23267,7 +23267,11 @@ function _tiVulnAssets(v) {
 }
 
 function _tiNormName(s) {
-  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  // Same rule WF13 uses for Technology MERGE keys: strip a trailing dotted
+  // version so "Oracle Mysql 5.7.44-48" and "Oracle Mysql" are one product.
+  // Bare years stay ("Windows Server 2019") — they are different products.
+  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    .replace(/[\s/_-]*v?\d+(?:[._]\d+)+[a-z0-9._-]*\s*$/i, '').trim();
 }
 
 function _tiReconTechRows() {
@@ -24719,10 +24723,13 @@ function renderTechIntel(data) {
       items: perim.map(t => {
         const cveCount = Number(t.cve_count) || 0;
         const pocCount = Number(t.poc_count) || 0;
+        const where = _tiVulnAssets(t)
+          .map(a => _tiVulnInstanceShort(a) || a.host || a.ip)
+          .filter(Boolean).join(', ') || t.ip || '—';
         const cell = [
           [t.name || '?', t.version].filter(Boolean).join(' '),
           [t.vendor, t.category].filter(Boolean).join(' / '),
-          t.ip || '—',
+          where,
           t.platform_basis
             ? `via ${String(t.platform_basis).toUpperCase()} · keyword-only`
             : (t.cpe ? 'CPE' : 'banner'),
@@ -25195,6 +25202,27 @@ function tiShowPerimeter(idx) {
       badgeClass: 'risk-high',
     });
   });
+  // A Technology node from recon often has no ip/port of its own — those live
+  // on the Service via IMPLEMENTED_IN. If grouping produced nothing, still
+  // print whatever the inventory row itself carried so the popout is not just
+  // vendor / CPE / CVE count.
+  if (!assets.length) {
+    const ports = _tiScalarList(t.ports && t.ports.length ? t.ports : t.port);
+    const hostnames = _tiScalarList(t.hostnames);
+    const where = hostnames[0] || t.host || t.ip || '';
+    if (where || t.ip || ports.length) {
+      rows.push({
+        primary: where || t.ip || '(unknown host)',
+        secondary: [t.ip && t.ip !== where ? t.ip : null,
+                    hostnames.filter(h => h && h !== where).join(', ') || null]
+          .filter(Boolean).join(' · ') || 'Observed host',
+        badge: ports.length
+          ? ((ports.length === 1 ? 'PORT ' : ports.length + ' PORTS ') + ports[0])
+          : null,
+        badgeClass: 'risk-high',
+      });
+    }
+  }
 
   if (cves.length) {
     const ovfId = _ovfPut('ti', _tiCveSpec(t));
