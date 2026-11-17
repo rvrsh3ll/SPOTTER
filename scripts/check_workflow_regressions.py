@@ -771,6 +771,19 @@ def run_checks() -> List[str]:
                      "'service_name': str(_tprops.get('name') or '')", failures)
     require_contains("12", "Build Tech Inventory", n12_build,
                      "_otype in ('device', 'ip')", failures)
+    # Perimeter Technology is the same object as Vulnerable Technology: host,
+    # ports, CVE IDs, matched AD devices. Without these the Tech Intel card
+    # only has a name and a dead CVE count.
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'cves': _jlist(_pprops.get('cves'))", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'hostnames': _phostnames[:10]", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'ports': _pports[:40]", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'devices': sorted(set(_pdevices))[:10]", failures)
+    require_contains("12", "Build Tech Inventory", n12_build,
+                     "'devices': sorted(set(_affected_devices))[:10]", failures)
 
     # Workflow 13 checks - open cloud storage discovery
     n13 = nodes["13"].get("Run Domain OSINT + Breach Correlation", "")

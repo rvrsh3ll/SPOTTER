@@ -1614,6 +1614,12 @@ details.ti-collapse:not([open]) > summary.ti-section .ti-chev::before { content:
 .ti-perim-card::before { background: var(--border); }
 .ti-vuln-name { font-family: var(--mono); font-size: 10px; color: var(--text); margin-bottom: 4px; }
 .ti-vuln-meta { font-family: var(--mono); font-size: 8px; color: var(--dim); }
+.ti-vuln-meta[data-ovf-open],
+.ti-perim-meta[data-ovf-open] { cursor: pointer; }
+.ti-vuln-meta[data-ovf-open]:hover,
+.ti-perim-meta[data-ovf-open]:hover,
+.ti-vuln-meta[data-ovf-open]:focus,
+.ti-perim-meta[data-ovf-open]:focus { color: var(--text); outline: none; }
 .ti-perim-name {
   font-family: var(--mono); font-size: 10px; color: var(--text);
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -23165,6 +23171,8 @@ function _tiVulnInstance(v) {
     protocol: String((v && v.protocol) || '').trim(),
     service_name: String((v && v.service_name) || '').trim(),
     product: String((v && v.product) || '').trim(),
+    devices: _tiList(v && (v.devices || v.matched_devices)).map(String).filter(Boolean),
+    evidence: String((v && v.evidence) || '').trim(),
   };
 }
 
@@ -23175,36 +23183,66 @@ function _tiVulnInstanceLabel(inst, fallbackProduct) {
   const ports = _tiFmtPorts(inst.ports, inst.protocol);
   const svc = [inst.service_name, inst.product || fallbackProduct].filter(Boolean)
     .filter((x, i, arr) => arr.indexOf(x) === i).join(' ');
-  return [where, ipBit, ports, svc ? `svc ${svc}` : ''].filter(Boolean).join(' · ');
+  const devs = (inst.devices || []).filter(Boolean).join(' / ');
+  return [where, ipBit, ports, svc ? `svc ${svc}` : '',
+          devs ? '→ ' + devs : '', inst.evidence || ''].filter(Boolean).join(' · ');
 }
 
 function _tiVulnInstanceShort(inst) {
-  const where = (inst.hostnames && inst.hostnames[0]) || inst.host || inst.ip || '';
+  const hn = (inst.hostnames && inst.hostnames[0]) || '';
+  const host = inst.host || '';
+  // Prefer the hostname, but keep a host string that already qualifies it
+  // (the Domain Recon platform row is "example.test (apex)").
+  const where = (hn && host && host.indexOf(hn) !== -1) ? host
+    : (hn || host || inst.ip || '');
   const ports = _tiScalarList(inst.ports).join(',');
   return ports ? `${where}:${ports}` : where;
 }
 
 function _tiMergeVulnInstance(into, extra) {
   if (!extra) return into;
+  // Prefer a real hostname over an address that was parked in `host`.
   if (!into.host) into.host = extra.host;
+  else if (into.host === into.ip && extra.host && extra.host !== extra.ip) into.host = extra.host;
   if (!into.ip) into.ip = extra.ip;
   if (!into.protocol) into.protocol = extra.protocol;
   if (!into.service_name) into.service_name = extra.service_name;
   if (!into.product) into.product = extra.product;
+  if (!into.evidence) into.evidence = extra.evidence;
   into.hostnames = _tiMergeList(into.hostnames, extra.hostnames);
   into.ports = _tiMergeList(into.ports, extra.ports);
+  into.devices = _tiMergeList(into.devices, extra.devices);
   return into;
+}
+
+/* Same place: the inventory row often carries only the IP, Domain Recon carries
+   the hostname (and the matched AD device). Treat those as one asset so the
+   card does not list 203.0.113.10 and www.example.test as two hosts. */
+function _tiSameAsset(a, b) {
+  if (!a || !b) return false;
+  const norm = x => String(x || '').toLowerCase();
+  const aip = norm(a.ip), bip = norm(b.ip);
+  if (aip && bip && aip === bip) return true;
+  const names = s => {
+    const set = new Set();
+    [s.host, s.ip, ...(s.hostnames || [])].forEach(x => { const n = norm(x); if (n) set.add(n); });
+    return set;
+  };
+  const A = names(a), B = names(b);
+  for (const x of B) if (A.has(x)) return true;
+  const aDev = new Set((a.devices || []).map(norm).filter(Boolean));
+  const bDev = new Set((b.devices || []).map(norm).filter(Boolean));
+  for (const x of B) if (aDev.has(x)) return true;
+  for (const x of A) if (bDev.has(x)) return true;
+  return false;
 }
 
 function _tiVulnAssets(v) {
   const instances = [];
   const push = inst => {
     if (!inst) return;
-    const key = String(inst.host || inst.ip || '').toLowerCase();
-    if (key) {
-      const existing = instances.find(s => String(s.host || s.ip || '').toLowerCase() === key);
-      if (existing) { _tiMergeVulnInstance(existing, inst); return; }
-    }
+    const existing = instances.find(s => _tiSameAsset(s, inst));
+    if (existing) { _tiMergeVulnInstance(existing, inst); return; }
     if (inst.host || inst.ip || inst.ports.length || inst.hostnames.length) instances.push(inst);
   };
   _tiList(v && v.service_instances).forEach(s => push(_tiVulnInstance(s)));
@@ -23217,10 +23255,101 @@ function _tiVulnAssets(v) {
     // Same nmap-label guard as _tiVulnInstance: "443/tcp (https nginx)" is a
     // service fingerprint, not a hostname.
     if (host && !/^\d{1,5}\//.test(host)) {
-      push({ host, ip: '', hostnames: [], ports: [], protocol: '', service_name: '', product: '' });
+      push({ host, ip: '', hostnames: [], ports: [], protocol: '', service_name: '', product: '',
+             devices: [], evidence: '' });
     }
   });
+  // Domain Recon already answered "which host is this product on" for the
+  // campaign. Join those observations so a Tech Intel card that WF12 shipped
+  // without host/port still drills the same way the Analysis chips do.
+  _tiReconObs(v).forEach(push);
   return instances;
+}
+
+function _tiNormName(s) {
+  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function _tiReconTechRows() {
+  const recs = (typeof _drCampaignRecons === 'function')
+    ? _drCampaignRecons()
+    : ((typeof _activeRecons === 'function') ? _activeRecons() : []);
+  const out = [];
+  (recs || []).forEach(r => {
+    const domain = r && r.domain || '';
+    _tiList(r && r.technologies).forEach(t => out.push({ t, plat: false, domain }));
+    _tiList(r && r.platform_tech).forEach(t => out.push({ t, plat: true, domain }));
+  });
+  return out;
+}
+
+function _tiReconMatches(v) {
+  const names = new Set([_tiNormName(v && v.name), _tiNormName(v && v.product)].filter(Boolean));
+  if (!names.size) return [];
+  return _tiReconTechRows().filter(({ t }) =>
+    names.has(_tiNormName(t && t.name)) || names.has(_tiNormName(t && t.product)));
+}
+
+/* One observation per place Domain Recon saw this product — same shape the
+   Analysis chips use (_drTechObs), adapted into a Tech Intel asset instance. */
+function _tiReconObs(v) {
+  const out = [];
+  _tiReconMatches(v).forEach(({ t, plat, domain }) => {
+    if (plat) {
+      out.push({
+        host: domain ? (domain + ' (apex)') : 'apex',
+        ip: '', hostnames: domain ? [domain] : [],
+        ports: [], protocol: '',
+        service_name: '', product: String((t && t.name) || ''),
+        devices: [], evidence: String((t && t.evidence) || ''),
+      });
+      return;
+    }
+    const rows = (typeof _drTechObs === 'function') ? _drTechObs(t) : [];
+    rows.forEach(o => {
+      const hostnames = _tiList(o && o.hostnames).map(String).filter(Boolean);
+      const ip = String((o && o.ip) || '').trim();
+      const port = (o && o.port != null && o.port !== '') ? String(o.port) : '';
+      out.push({
+        host: hostnames[0] || ip,
+        ip,
+        hostnames,
+        ports: port ? [port] : [],
+        protocol: '',
+        service_name: '',
+        product: String((t && t.name) || ''),
+        devices: (typeof _drObsDevs === 'function') ? _drObsDevs(o) : _tiList(o && o.devices),
+        evidence: String((o && o.evidence) || (t && t.evidence) || ''),
+      });
+    });
+  });
+  return out;
+}
+
+function _tiAssetOvfSpec(v, assets) {
+  const hasDev = assets.some(a => (a.devices || []).length);
+  const hasEv  = assets.some(a => a.evidence);
+  const columns = ['Host', 'Hostnames', 'Ports', 'Service']
+    .concat(hasDev ? ['Matched AD device'] : [])
+    .concat(hasEv ? ['Evidence'] : []);
+  const isSvc = v && v.kind === 'service';
+  return {
+    title: `${isSvc ? 'External service instances' : 'Affected hosts'} · ${v.name || 'technology'}`,
+    noun: isSvc ? 'services' : 'hosts',
+    layout: 'table',
+    columns,
+    items: assets.map(a => {
+      const csv = [
+        a.host || a.ip || '',
+        (a.hostnames || []).join(' '),
+        _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, ''),
+        [a.service_name, a.product || v.name].filter(Boolean).join(' '),
+      ];
+      if (hasDev) csv.push((a.devices || []).join(' / '));
+      if (hasEv) csv.push(a.evidence || '');
+      return { text: _tiVulnInstanceLabel(a, v.name), csv };
+    }),
+  };
 }
 
 function _tiCveId(c) {
@@ -23229,7 +23358,7 @@ function _tiCveId(c) {
   return String((c && (c.cve_id || c.id || c.name)) || '').trim();
 }
 
-function _tiCveList(v) {
+function _tiCveList(v, _seenNames) {
   const seen = new Set();
   const out = [];
   _tiList(v && v.cves).forEach(c => {
@@ -23247,6 +23376,14 @@ function _tiCveList(v) {
       match: obj.match || '',
     });
   });
+  // Perimeter rows often ship a count without IDs until WF12 is re-run. The
+  // Vulnerable Technology panel already has the IDs for the same product.
+  if (!out.length && v && !_seenNames) {
+    const name = _tiNormName(v.name || v.product);
+    const sib = _tiGroupVulnerableTech((_tiData && _tiData.vulnerable_tech) || [])
+      .find(x => x !== v && (_tiNormName(x.name) === name || _tiNormName(x.product) === name));
+    if (sib) return _tiCveList(sib, true);
+  }
   return out;
 }
 
@@ -23277,21 +23414,25 @@ function _tiVulnPorts(v) {
 function _tiPortSpec(v, port) {
   const want = String(port);
   const assets = _tiVulnAssets(v).filter(a => _tiScalarList(a.ports).map(String).includes(want));
+  const hasDev = assets.some(a => (a.devices || []).length);
+  const columns = ['Host', 'Hostnames', 'Ports', 'Service']
+    .concat(hasDev ? ['Matched AD device'] : []);
   return {
     title: `Port ${want} · ${v.name || 'technology'}`,
     subtitle: `${assets.length} host${assets.length !== 1 ? 's' : ''} where this component was seen on port ${want}`,
     noun: 'hosts',
     layout: 'list',
-    columns: ['Host', 'Hostnames', 'Ports', 'Service'],
-    items: assets.map(a => ({
-      text: _tiVulnInstanceLabel(a, v.name),
-      csv: [
+    columns,
+    items: assets.map(a => {
+      const csv = [
         a.host || a.ip || '',
         (a.hostnames || []).join(' '),
         _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, ''),
         [a.service_name, a.product || v.name].filter(Boolean).join(' '),
-      ],
-    })),
+      ];
+      if (hasDev) csv.push((a.devices || []).join(' / '));
+      return { text: _tiVulnInstanceLabel(a, v.name), csv };
+    }),
   };
 }
 
@@ -24411,23 +24552,16 @@ function renderTechIntel(data) {
           const assetBits = assets.slice(0, 2).map(a => {
             const where = (a.hostnames && a.hostnames[0]) || a.host || a.ip || '';
             const portTags = _tiScalarList(a.ports).map(p => _tiPortTag(v, p)).join('');
-            return `<span class="ti-vuln-asset">${esc(where)}${portTags}</span>`;
+            const short = assets.length === 1 ? (_tiVulnInstanceShort(a) || where) : where;
+            const dev = (a.devices && a.devices[0]) ? ` → ${esc(a.devices[0])}` : '';
+            return `<span class="ti-vuln-asset">${esc(short)}${portTags}${dev}</span>`;
           }).filter(h => h && !/^<span class="ti-vuln-asset"><\/span>$/.test(h));
+          // Same handle the Domain Recon chips use: click the host line for every
+          // host, port, matched AD device and evidence, even when only one shows.
+          const assetSpec = assets.length ? _tiAssetOvfSpec(v, assets) : null;
+          const assetOvfId = assetSpec ? _ovfPut('ti', assetSpec) : '';
           const hostLine = (assetBits.length || assets.length)
-            ? `<div class="ti-vuln-meta">${isSvc ? 'External services' : 'Hosts'}: ${assetBits.join('')}${_ovfChip('ti', {
-                title: `${isSvc ? 'External service instances' : 'Affected hosts'} · ${v.name || 'technology'}`,
-                noun: isSvc ? 'services' : 'hosts', layout: 'list',
-                columns: ['Host', 'Hostnames', 'Ports', 'Service'],
-                items: assets.map(a => ({
-                  text: _tiVulnInstanceLabel(a, v.name),
-                  csv: [
-                    a.host || a.ip || '',
-                    (a.hostnames || []).join(' '),
-                    _tiFmtPorts(a.ports, a.protocol).replace(/^ports?\s+/, ''),
-                    [a.service_name, a.product || v.name].filter(Boolean).join(' '),
-                  ],
-                })),
-              }, { shown: 2, cls: 'ovf-inline', label: `+${assets.length - 2}` })}</div>`
+            ? `<div class="ti-vuln-meta"${assetOvfId ? ` role="button" tabindex="0" data-ovf-open="${esc(assetOvfId)}" title="Click for every host, port, matched AD device and evidence"` : ''}>${isSvc ? 'External services' : 'Hosts'}: ${assetBits.join('')}${assetSpec ? _ovfChip('ti', assetSpec, { shown: 2, cls: 'ovf-inline', label: `+${assets.length - 2}` }) : ''}</div>`
             : '';
           return `<div class="ti-vuln-card" data-vuln="${i}">
             <div class="ti-vuln-name">${esc(v.name || '?')}${kindTag}${weakMatch}
@@ -24515,7 +24649,7 @@ function renderTechIntel(data) {
       : (t.cpe ? 'CPE' : 'banner');
 
     const perimCard = ({ t, i }) => {
-      const cveCount = Number(t.cve_count) || 0;
+      const cveCount = Number(t.cve_count) || _tiCveList(t).length;
       const pocCount = Number(t.poc_count) || 0;
       // Rail = CVE exposure only. High value gets the accent badge instead, so
       // one fact is never painted in two colours on the same card.
@@ -24524,14 +24658,29 @@ function renderTechIntel(data) {
         : t.platform_basis    ? ''
         :                       'risk-supported';
       const meta  = [t.vendor, t.category].filter(Boolean).map(esc).join(' · ');
-      const where = [t.ip ? esc(t.ip) : '', _perimBasis(t)].filter(Boolean).join(' · ');
+      const assets = _tiVulnAssets(t);
+      const whereBits = assets.slice(0, 2).map(a => {
+        const short = assets.length === 1
+          ? (_tiVulnInstanceShort(a) || (a.hostnames && a.hostnames[0]) || a.host || a.ip || '')
+          : ((a.hostnames && a.hostnames[0]) || a.host || a.ip || '');
+        const portTags = _tiScalarList(a.ports).map(p => _tiPortTag(t, p)).join('');
+        const dev = (a.devices && a.devices[0]) ? ` → ${esc(a.devices[0])}` : '';
+        return short ? `<span class="ti-vuln-asset">${esc(short)}${portTags}${dev}</span>` : '';
+      }).filter(Boolean);
+      const assetSpec = assets.length ? _tiAssetOvfSpec(t, assets) : null;
+      const assetOvfId = assetSpec ? _ovfPut('ti', assetSpec) : '';
+      const whereLine = (whereBits.length || assets.length)
+        ? `<div class="ti-perim-meta"${assetOvfId ? ` role="button" tabindex="0" data-ovf-open="${esc(assetOvfId)}" title="Click for every host, port, matched AD device and evidence"` : ''}>${whereBits.join('')}${assetSpec ? _ovfChip('ti', assetSpec, { shown: 2, cls: 'ovf-inline', label: `+${assets.length - 2}` }) : ''}</div>`
+        : (t.ip || t.platform_basis
+            ? `<div class="ti-perim-meta">${[t.ip ? esc(t.ip) : '', _perimBasis(t)].filter(Boolean).join(' · ')}</div>`
+            : '');
       const hv    = t.is_high_value ? '<span class="ti-tt hv-tt">High value</span>' : '';
       const kind  = t.kind === 'service'
         ? '<span class="ti-kind-tag" title="Seen on an open port from outside">Service</span>' : '';
-      const cveBadge = cveCount
-        ? `<span class="ti-cve-badge" title="${cveCount} known CVEs">${cveCount} CVE`
-          + `${t.cve_match_basis === 'keyword' ? ' · name-matched' : ''}</span>`
+      const weakMatch = (t.cve_match_basis === 'keyword' && cveCount > 0)
+        ? `<span class="ti-kind-tag" title="CVEs matched on product name only — may include CVEs belonging to other products whose description mentions it. A CPE or scanner match would be exact.">name-matched</span>`
         : '';
+      const cveBadge = _tiCveBadge(t);
       const pocBadge = t.exploit_available
         ? `<span class="ti-poc-badge" title="Public proof-of-concept code exists">`
           + `${pocCount ? pocCount + ' PoC' : 'PoC'}</span>`
@@ -24539,12 +24688,13 @@ function renderTechIntel(data) {
       // Keeps the old chip's full-fact hover as well as the new drilldown, so
       // reading one component still costs no clicks.
       const tip = [t.name, t.version, t.vendor, t.category, t.cpe,
-                   t.platform_basis && ('via ' + t.platform_basis), t.ip]
+                   t.platform_basis && ('via ' + t.platform_basis),
+                   assets.map(a => _tiVulnInstanceShort(a) || a.host || a.ip).filter(Boolean).join(', ') || t.ip]
         .filter(Boolean).join(' · ');
       return `<div class="ti-perim-card${rail ? ' ' + rail : ''}" data-perim="${i}" title="${esc(tip)}">
-        <div class="ti-perim-name">${esc(t.name || '?')}${t.version ? ' ' + esc(t.version) : ''}${hv}${kind}</div>
+        <div class="ti-perim-name">${esc(t.name || '?')}${t.version ? ' ' + esc(t.version) : ''}${hv}${kind}${weakMatch}</div>
         ${meta  ? `<div class="ti-perim-meta">${meta}</div>`  : ''}
-        ${where ? `<div class="ti-perim-meta">${where}</div>` : ''}
+        ${whereLine}
         ${cveBadge || pocBadge ? `<div class="ti-perim-badges">${cveBadge}${pocBadge}</div>` : ''}
       </div>`;
     };
@@ -24606,7 +24756,10 @@ function renderTechIntel(data) {
            this panel reads it back.</span></div>`;
 
     document.querySelectorAll('#ti-perimeter .ti-perim-card[data-perim]').forEach(el =>
-      el.addEventListener('click', () => tiShowPerimeter(Number(el.dataset.perim)))
+      el.addEventListener('click', (ev) => {
+        if (ev.target.closest('[data-ovf-open], a')) return;
+        tiShowPerimeter(Number(el.dataset.perim));
+      })
     );
   }
 
@@ -24893,6 +25046,7 @@ function tiShowVuln(idx) {
       a.ip && a.ip !== title ? a.ip : null,
       a.host && a.host !== title && a.host !== a.ip ? a.host : null,
       (a.hostnames || []).filter(h => h && h !== title).join(', ') || null,
+      (a.devices || []).length ? '→ ' + a.devices.join(' / ') : null,
     ].filter(Boolean);
     const svcBits = [a.service_name, a.product || (v.kind === 'service' ? v.name : '')]
       .filter(Boolean)
@@ -24901,6 +25055,7 @@ function tiShowVuln(idx) {
     const secondary = [
       loc.length ? loc.join(' · ') : null,
       svcBits.length ? `service ${svcBits.join(' · ')}` : null,
+      a.evidence || null,
     ].filter(Boolean).join(' — ') || 'Affected host';
     const lookup = a.host || a.ip || (a.hostnames && a.hostnames[0]) || '';
     rows.push({
@@ -24908,7 +25063,8 @@ function tiShowVuln(idx) {
       secondary,
       htmlSecondary: [loc.length ? esc(loc.join(' · ')) : '',
                       portTags || '',
-                      svcBits.length ? esc('service ' + svcBits.join(' · ')) : '']
+                      svcBits.length ? esc('service ' + svcBits.join(' · ')) : '',
+                      a.evidence ? esc(a.evidence) : '']
         .filter(Boolean).join(' — ') || esc(secondary),
       badge: (a.ports || []).length
         ? ((a.ports.length === 1 ? 'PORT ' : a.ports.length + ' PORTS ') + a.ports[0])
@@ -24989,8 +25145,10 @@ function tiShowPerimeter(idx) {
   const t = (_tiData.perimeter_tech || [])[idx];
   if (!t) return;
 
-  const cveCount = Number(t.cve_count) || 0;
+  const cves = _tiCveList(t);
+  const cveCount = Number(t.cve_count) || cves.length;
   const pocCount = Number(t.poc_count) || 0;
+  const assets = _tiVulnAssets(t);
   const row = (k, v) => (v === null || v === undefined || v === '')
     ? null : { primary: k, secondary: String(v) };
 
@@ -24998,7 +25156,6 @@ function tiShowPerimeter(idx) {
     row('Vendor',   t.vendor),
     row('Category', t.category),
     row('Kind',     t.kind === 'service' ? 'Service — seen on an open port' : 'Technology'),
-    row('Where',    t.ip),
     // The identification and the CVE match are separate claims; the drilldown
     // states each in full rather than compressing them into one tag.
     t.platform_basis
@@ -25008,27 +25165,88 @@ function tiShowPerimeter(idx) {
       : row('Identified via', t.cpe ? 'CPE — product-accurate' : 'Service banner — product name only, no CPE'),
     row('CPE', t.cpe),
     row('Confidence', t.confidence),
-    cveCount
-      ? { primary: `${cveCount} CVE${cveCount !== 1 ? 's' : ''}`,
-          secondary: t.cve_match_basis === 'keyword'
-            ? 'Matched on the product NAME, not a CPE — treat the count as soft'
-            : (t.cve_match_basis ? `Matched on ${t.cve_match_basis}` : ''),
-          badge: t.cve_match_basis === 'keyword' ? 'NAME-MATCHED' : null,
-          badgeClass: 'risk-high' }
-      : row('CVEs', 'None attached — workflow 14 has not enriched this component yet'),
-    t.exploit_available
-      ? { primary: pocCount ? `${pocCount} public PoC${pocCount !== 1 ? 's' : ''}` : 'Public PoC available',
-          secondary: 'From the PoC-in-GitHub mirror — UNVETTED, and a stale mirror answers "no" for everything',
-          badge: 'EXPLOIT', badgeClass: 'risk-critical' }
-      : null,
-    t.is_high_value
-      ? { primary: 'High-value attack surface', secondary: 'On the perimeter high-value list',
-          badge: 'HIGH VALUE', badgeClass: 'risk-critical' }
-      : null,
   ].filter(Boolean);
 
-  const name = [t.name || '?', t.version].filter(Boolean).join(' ');
-  tiOpenDetail(name, t.platform_basis ? 'Inferred from DNS' : 'Identified', rows);
+  assets.forEach(a => {
+    const title = (a.hostnames && a.hostnames[0]) || a.host || a.ip || '(unknown host)';
+    const loc = [
+      a.ip && a.ip !== title ? a.ip : null,
+      a.host && a.host !== title && a.host !== a.ip ? a.host : null,
+      (a.hostnames || []).filter(h => h && h !== title).join(', ') || null,
+      (a.devices || []).length ? '→ ' + a.devices.join(' / ') : null,
+    ].filter(Boolean);
+    const svcBits = [a.service_name, a.product || (t.kind === 'service' ? t.name : '')]
+      .filter(Boolean)
+      .filter((x, i, arr) => arr.indexOf(x) === i);
+    const portTags = _tiScalarList(a.ports).map(p => _tiPortTag(t, p)).join('');
+    rows.push({
+      primary: title,
+      secondary: [loc.length ? loc.join(' · ') : null,
+                  svcBits.length ? 'service ' + svcBits.join(' · ') : null,
+                  a.evidence || null].filter(Boolean).join(' — ') || 'Observed host',
+      htmlSecondary: [loc.length ? esc(loc.join(' · ')) : '',
+                      portTags || '',
+                      svcBits.length ? esc('service ' + svcBits.join(' · ')) : '',
+                      a.evidence ? esc(a.evidence) : '']
+        .filter(Boolean).join(' — ') || undefined,
+      badge: (a.ports || []).length
+        ? ((a.ports.length === 1 ? 'PORT ' : a.ports.length + ' PORTS ') + a.ports[0])
+        : null,
+      badgeClass: 'risk-high',
+    });
+  });
+
+  if (cves.length) {
+    const ovfId = _ovfPut('ti', _tiCveSpec(t));
+    rows.push({
+      primary: `${cves.length} CVE${cves.length !== 1 ? 's' : ''}`,
+      secondary: 'Open NVD records and the ports they were seen on',
+      badge: 'NVD',
+      badgeClass: 'risk-high',
+      onclick: () => ovfOpen(ovfId),
+    });
+    cves.forEach(c => {
+      rows.push({
+        primary: c.id,
+        htmlPrimary: _tiNvdLink(c.id),
+        secondary: [c.severity, c.score !== '' ? 'CVSS ' + c.score : '',
+                    c.exploit ? 'public PoC' : '', c.match].filter(Boolean).join(' · '),
+      });
+    });
+  } else if (cveCount) {
+    rows.push({
+      primary: `${cveCount} CVE${cveCount !== 1 ? 's' : ''}`,
+      secondary: t.cve_match_basis === 'keyword'
+        ? 'IDs were not shipped with this record — re-run Tech Inventory after enrichment. Matched on the product NAME, not a CPE.'
+        : 'IDs were not shipped with this record — re-run Tech Inventory after enrichment',
+      badge: t.cve_match_basis === 'keyword' ? 'NAME-MATCHED' : null,
+      badgeClass: 'risk-high',
+    });
+  } else {
+    rows.push(row('CVEs', 'None attached — workflow 14 has not enriched this component yet'));
+  }
+
+  if (t.exploit_available) {
+    rows.push({
+      primary: pocCount ? `${pocCount} public PoC${pocCount !== 1 ? 's' : ''}` : 'Public PoC available',
+      secondary: 'From the PoC-in-GitHub mirror — UNVETTED, and a stale mirror answers "no" for everything',
+      badge: 'EXPLOIT', badgeClass: 'risk-critical',
+    });
+  }
+  if (t.is_high_value) {
+    rows.push({
+      primary: 'High-value attack surface', secondary: 'On the perimeter high-value list',
+      badge: 'HIGH VALUE', badgeClass: 'risk-critical',
+    });
+  }
+
+  const hostCount = assets.length;
+  const subtitle = [
+    t.platform_basis ? 'Inferred from DNS' : 'Identified',
+    hostCount ? `${hostCount} host${hostCount !== 1 ? 's' : ''}` : null,
+    cveCount ? `${cveCount} CVE${cveCount !== 1 ? 's' : ''}` : null,
+  ].filter(Boolean).join(' · ');
+  tiOpenDetail([t.name || '?', t.version].filter(Boolean).join(' '), subtitle, rows);
 }
 
 function tiShowStat(type) {

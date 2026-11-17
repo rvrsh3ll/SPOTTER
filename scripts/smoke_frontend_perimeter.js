@@ -62,7 +62,13 @@ const FIXTURE = {
     { name: 'nginx', version: '1.18', vendor: 'nginx', category: 'web-server',
       kind: 'service', cpe: 'cpe:/a:nginx:nginx:1.18', confidence: 'high',
       platform_basis: '', ip: '203.0.113.10', is_high_value: false,
-      cve_count: 4, cve_match_basis: 'cpe', exploit_available: true, poc_count: 3 },
+      host: '203.0.113.10', hostnames: ['www.example.test'], port: 443, ports: [443],
+      devices: ['WEB01.corp.example.test'], evidence: 'shodan-cpe:203.0.113.10',
+      cve_count: 4, cve_match_basis: 'cpe', exploit_available: true, poc_count: 3,
+      cves: [
+        { cve_id: 'CVE-2021-23017', severity: 'HIGH', base_score: 7.7, exploit_available: true, match: 'cpe' },
+        { cve_id: 'CVE-2019-20372', severity: 'MEDIUM', base_score: 5.3, exploit_available: false, match: 'cpe' },
+      ] },
     // A perimeter appliance flagged high-value before WF14 has attached anything.
     { name: 'Citrix NetScaler ADC', version: '13.1', vendor: 'Citrix',
       category: 'remote-access', kind: 'technology', cpe: '', confidence: 'medium',
@@ -77,7 +83,13 @@ const FIXTURE = {
     { name: 'Apache httpd', version: '2.4.49', vendor: 'Apache', category: 'web-server',
       kind: 'service', cpe: '', confidence: 'medium', platform_basis: '',
       ip: '203.0.113.11', is_high_value: false,
-      cve_count: 10, cve_match_basis: 'keyword', exploit_available: false, poc_count: 0 },
+      cve_count: 10, cve_match_basis: 'keyword', exploit_available: false, poc_count: 0,
+      service_instances: [
+        { ip: '203.0.113.11', port: 8443, evidence: 'shodan:203.0.113.11:8443' },
+        { ip: '203.0.113.21', port: 443, hostnames: ['vpn.example.test'],
+          devices: ['VPN01.corp.example.test'], evidence: 'shodan:203.0.113.21:443' },
+        { ip: '203.0.113.31', port: 80, evidence: 'fofa:203.0.113.31:80' },
+      ] },
   ],
   cloud_exposure: [
     { asset: 's3:example-payroll', endpoint: 'example-payroll.s3.amazonaws.com',
@@ -128,14 +140,96 @@ setTimeout(() => {
      'a DNS-inferred platform declares that it can only keyword-match', perim.slice(0, 400));
   ok(/name-matched/.test(perim),
      'an NVD phrase match is tagged name-matched');
-  // The CPE-identified row must NOT be tagged weak.
-  const nginxChip = (perim.match(/<span class="ti-tt"[^>]*>[\s\S]*?nginx[\s\S]*?<\/span>\s*<\/span>/) || [''])[0];
-  ok(!/keyword-only|name-matched/.test(nginxChip),
-     'a CPE-identified product is NOT tagged as a weak match', nginxChip.slice(0, 200));
+  // The CPE-identified row must NOT be tagged weak. Cards replaced the old chip
+  // wall, so inspect the nginx CARD rather than a <span class="ti-tt"> wrap.
+  const nginxCard = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
+    .find(e => /nginx/.test(e.textContent));
+  ok(!!nginxCard, 'the nginx component renders as a card');
+  ok(nginxCard && !/keyword-only|name-matched/.test(nginxCard.textContent),
+     'a CPE-identified product is NOT tagged as a weak match',
+     nginxCard && nginxCard.textContent.replace(/\s+/g, ' ').slice(0, 200));
   ok(/internet-facing component/.test(T('ti-perim-note')),
      'the section header counts internet-facing components', T('ti-perim-note'));
   ok(/inferred from DNS/.test(T('ti-perim-note')),
      'the header says how many rows are DNS inferences', T('ti-perim-note'));
+
+  // ── Same treatment as Domain Recon chips ──────────────────────────────────
+  // A perimeter / vulnerable-tech card used to name the product and a dead CVE
+  // count. The Domain Recon chips already answer "which host, which port, which
+  // AD device". Tech Intel has to do the same on the card face, and the CVE
+  // count has to open NVD records.
+  console.log('Tech Intel host / CVE drill');
+  ok(nginxCard && /www\.example\.test:443/.test(nginxCard.textContent),
+     'a single-host component names that host:port on the card itself',
+     nginxCard && nginxCard.textContent.replace(/\s+/g, ' ').slice(0, 220));
+  ok(nginxCard && /WEB01\.corp\.example\.test/.test(nginxCard.textContent),
+     'the matched AD device is named beside the host on the card',
+     nginxCard && nginxCard.textContent.replace(/\s+/g, ' ').slice(0, 220));
+  const nginxHostLine = nginxCard && nginxCard.querySelector('.ti-perim-meta[data-ovf-open]');
+  ok(!!nginxHostLine, 'the host line is a drill handle for every observation');
+  if (nginxHostLine) {
+    nginxHostLine.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    const hostOvf = T('ovf-body');
+    ok(/www\.example\.test/.test(hostOvf) && /WEB01\.corp\.example\.test/.test(hostOvf),
+       'clicking the host line lists host and matched AD device', hostOvf.slice(0, 400));
+    ok(/shodan-cpe:203\.0\.113\.10/.test(hostOvf),
+       'clicking the host line lists the observation evidence', hostOvf.slice(0, 400));
+    if (typeof w.ovfClose === 'function') w.ovfClose();
+  }
+  const nginxCve = nginxCard && nginxCard.querySelector('.ti-cve-badge[data-ovf-open]');
+  ok(!!nginxCve, 'a CVE count with IDs is a drill handle',
+     nginxCard && (nginxCard.querySelector('.ti-cve-badge') || {}).outerHTML);
+  w.eval('window.__tiPerimShown = null; window.__origTiShowPerimeter = tiShowPerimeter; tiShowPerimeter = function (i) { window.__tiPerimShown = i; };');
+  if (nginxCve) nginxCve.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  ok(w.__tiPerimShown === null,
+     'clicking the CVE badge does not also open the component drilldown', w.__tiPerimShown);
+  const nginxCveBody = (w.document.getElementById('ovf-body') || {}).innerHTML || '';
+  ok(/nvd\.nist\.gov\/vuln\/detail\/CVE-2021-23017/.test(nginxCveBody),
+     'each CVE is an NVD link', nginxCveBody.slice(0, 400));
+  if (typeof w.ovfClose === 'function') w.ovfClose();
+
+  const apacheCard = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
+    .find(e => /Apache httpd/.test(e.textContent));
+  ok(!!apacheCard, 'the Apache component renders as a card');
+  ok(apacheCard && /3 hosts|\+1|203\.0\.113/.test(apacheCard.textContent)
+     && /vpn\.example\.test/.test(apacheCard.textContent),
+     'a product seen on several hosts advertises more than the first one',
+     apacheCard && apacheCard.textContent.replace(/\s+/g, ' ').slice(0, 280));
+  const apacheHostLine = apacheCard && apacheCard.querySelector('.ti-perim-meta[data-ovf-open]');
+  ok(!!apacheHostLine, 'a multi-host card host line is a drill handle');
+  if (apacheHostLine) {
+    apacheHostLine.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    const apOvf = T('ovf-body');
+    ok(/203\.0\.113\.21/.test(apOvf) && /203\.0\.113\.31/.test(apOvf),
+       'the drilldown lists EVERY host a product was seen on, not just the first',
+       apOvf.slice(0, 500));
+    ok(/VPN01\.corp\.example\.test/.test(apOvf),
+       'the matched AD device is named beside the address it was matched to',
+       apOvf.slice(0, 500));
+    if (typeof w.ovfClose === 'function') w.ovfClose();
+  }
+  const apacheCve = apacheCard && apacheCard.querySelector('.ti-cve-badge');
+  ok(apacheCve && !apacheCve.hasAttribute('data-ovf-open'),
+     'a CVE count without IDs stays inert rather than opening an empty list',
+     apacheCve && apacheCve.outerHTML);
+  ok(/name-matched/.test(apacheCard ? apacheCard.textContent : ''),
+     'the keyword CVE set is tagged name-matched on the Apache card');
+
+  // Restore the real drilldown and click the nginx card body.
+  w.eval('tiShowPerimeter = window.__origTiShowPerimeter; window.__tiPerimShown = null;');
+  nginxCard.querySelector('.ti-perim-name')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const dm = w.document.getElementById('ti-dm');
+  const dmBody = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+  ok(dm && !dm.classList.contains('hidden'), 'clicking a perimeter card opens the detail panel');
+  ok(/www\.example\.test/.test(dmBody) && /WEB01\.corp\.example\.test/.test(dmBody),
+     'the detail panel names the hostname and matched AD device', dmBody.slice(0, 300));
+  ok(/CVE-2021-23017/.test(dmBody),
+     'the detail panel lists the CVE IDs', dmBody.slice(0, 400));
+  const dmNvd = w.document.querySelector('#ti-dm-body a.ti-cve-link');
+  ok(dmNvd && /nvd\.nist\.gov\/vuln\/detail\/CVE-2021-23017/.test(dmNvd.getAttribute('href') || ''),
+     'the detail panel links each CVE to NVD', dmNvd && dmNvd.getAttribute('href'));
+  w.eval('tiCloseDetail && tiCloseDetail();');
 
   // ── Cloud ─────────────────────────────────────────────────────────────────
   const cloud = H('ti-cloud');
@@ -245,6 +339,24 @@ setTimeout(() => {
                     total_edges: 3, graph_read_failed: false },
     errors: [],
   };
+
+  // A Tech Intel card that WF12 shipped without host/port still drills the
+  // campaign's Domain Recon observations for the same product — the same
+  // answer the Analysis chips already give.
+  console.log('Tech Intel recon join');
+  const origCamp = w.getActiveCamp;
+  const origRecons = w.getDomainRecons;
+  w.getActiveCamp = () => ({ id: 'camp-ti', name: 'Example' });
+  w.getDomainRecons = () => [{ ...DR, campaignId: 'camp-ti' }];
+  w.eval('renderTechIntel(window.__fx);');
+  const joinedMx = [...w.document.querySelectorAll('#ti-perimeter .ti-perim-card')]
+    .find(e => /Microsoft 365/.test(e.textContent));
+  ok(joinedMx && /apex/.test(joinedMx.textContent),
+     'a DNS-inferred platform says apex rather than leaving the host blank',
+     joinedMx && joinedMx.textContent.replace(/\s+/g, ' ').slice(0, 240));
+  w.getActiveCamp = origCamp;
+  w.getDomainRecons = origRecons;
+
   console.log('Domain Recon panel');
   let threw3 = '';
   w.eval('window.__dr = ' + JSON.stringify(DR) + ';');

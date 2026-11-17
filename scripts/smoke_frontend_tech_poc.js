@@ -250,6 +250,74 @@ setTimeout(() => {
      'the asset drilldown links each CVE to NVD',
      dmNvd && dmNvd.getAttribute('href'));
 
+  // --- Domain Recon treatment: host line lists every observation ---
+  const hostFx = { ...FIXTURE, vulnerable_tech: [{
+    ...FIXTURE.vulnerable_tech[0],
+    kind: 'service', name: 'nginx', product: 'nginx',
+    host: '203.0.113.10', ip: '203.0.113.10',
+    hostnames: ['www.example.test'], ports: [443], port: 443,
+    protocol: 'tcp', service_name: 'https',
+    devices: ['WEB01.corp.example.test'],
+    evidence: 'shodan-cpe:203.0.113.10',
+    affected_users: [],
+  }] };
+  w.renderTechIntel(hostFx);
+  const hostCard = w.document.querySelector('.ti-vuln-card');
+  ok(hostCard && /www\.example\.test:443/.test(hostCard.textContent),
+     'a single-host vuln card names host:port on the face',
+     hostCard && hostCard.textContent.replace(/\s+/g, ' ').slice(0, 220));
+  ok(hostCard && /WEB01\.corp\.example\.test/.test(hostCard.textContent),
+     'the matched AD device is named beside the host on the card',
+     hostCard && hostCard.textContent.replace(/\s+/g, ' ').slice(0, 220));
+  const hostLine = hostCard && hostCard.querySelector('.ti-vuln-meta[data-ovf-open]');
+  ok(!!hostLine, 'the host line is a drill handle for every observation');
+  w.eval('window.__tiShown = null; window.__origTiShowVuln2 = tiShowVuln; tiShowVuln = function (i) { window.__tiShown = i; };');
+  if (hostLine) hostLine.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  ok(w.__tiShown === null,
+     'clicking the host line does not also open the asset drilldown', w.__tiShown);
+  const hostOvf = (w.document.getElementById('ovf-body') || {}).textContent || '';
+  ok(/www\.example\.test/.test(hostOvf) && /WEB01\.corp\.example\.test/.test(hostOvf),
+     'clicking the host line lists host and matched AD device', hostOvf.slice(0, 400));
+  ok(/shodan-cpe:203\.0\.113\.10/.test(hostOvf),
+     'clicking the host line lists the observation evidence', hostOvf.slice(0, 400));
+  if (typeof w.ovfClose === 'function') w.ovfClose();
+  w.eval('tiShowVuln = window.__origTiShowVuln2;');
+
+  w.document.querySelector('.ti-vuln-card .ti-vuln-name')
+    .dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  const hostDm = (w.document.getElementById('ti-dm-body') || {}).textContent || '';
+  ok(/WEB01\.corp\.example\.test/.test(hostDm) && /shodan-cpe:203\.0\.113\.10/.test(hostDm),
+     'the asset drilldown names the matched AD device and evidence', hostDm.slice(0, 320));
+  if (typeof w.tiCloseDetail === 'function') w.tiCloseDetail();
+
+  // A Tech Intel card that WF12 shipped without host/port still drills the
+  // campaign's Domain Recon observations for the same product.
+  w.getActiveCamp = () => ({ id: 'camp-ti', name: 'Example' });
+  w.getDomainRecons = () => [{
+    campaignId: 'camp-ti', domain: 'example.test',
+    technologies: [{
+      name: 'nginx', version: '1.18', vendor: 'nginx',
+      hosts: [{ ip: '203.0.113.10', port: 443, hostnames: ['www.example.test'],
+                devices: ['WEB01.corp.example.test'],
+                evidence: 'shodan-cpe:203.0.113.10' }],
+    }],
+    platform_tech: [],
+  }];
+  w.renderTechIntel({ ...FIXTURE, vulnerable_tech: [{
+    name: 'nginx', vendor: 'nginx', version: '1.18',
+    kind: 'service', cve_count: 1,
+    cves: [{ cve_id: 'CVE-2021-23017', severity: 'HIGH', base_score: 7.7, match: 'cpe' }],
+  }] });
+  const joinCard = w.document.querySelector('.ti-vuln-card');
+  ok(joinCard && /www\.example\.test/.test(joinCard.textContent),
+     'a vuln card that shipped no host still names the Domain Recon observation',
+     joinCard && joinCard.textContent.replace(/\s+/g, ' ').slice(0, 240));
+  ok(joinCard && /WEB01\.corp\.example\.test/.test(joinCard.textContent),
+     'recon-join carries the matched AD device onto the card',
+     joinCard && joinCard.textContent.replace(/\s+/g, ' ').slice(0, 240));
+  w.getActiveCamp = () => null;
+  w.getDomainRecons = () => [];
+
   // --- weak-match labelling ---
   // A keyword-derived CVE set must not read with the same confidence as a CPE
   // or scanner match; the difference is invisible without this tag.
